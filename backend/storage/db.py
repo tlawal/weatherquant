@@ -112,25 +112,10 @@ async def _seed_initial_data() -> None:
             log.info("db: seeded arming_state")
 
         # Cities
-        existing_cities = await session.execute(select(City))
-        if existing_cities.scalars().all():
-            return  # already seeded
-
+        from backend.storage.repos import upsert_city
         for c in Config.INITIAL_CITIES:
-            session.add(
-                City(
-                    city_slug=c["city_slug"],
-                    display_name=c["display_name"],
-                    metar_station=c.get("metar_station"),
-                    nws_office=c.get("nws_office"),
-                    nws_grid_x=c.get("nws_grid_x"),
-                    nws_grid_y=c.get("nws_grid_y"),
-                    wu_state=c.get("wu_state"),
-                    wu_city=c.get("wu_city"),
-                    enabled=c.get("enabled", False),
-                )
-            )
-        await session.commit()
+            await upsert_city(session, c)
+
         log.info("db: seeded %d cities", len(Config.INITIAL_CITIES))
 
 
