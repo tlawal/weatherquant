@@ -131,6 +131,7 @@ async def city_detail(request: Request, city_slug: str):
         nws = await get_latest_forecast(sess, city.id, "nws", today_et)
         wu_d = await get_latest_forecast(sess, city.id, "wu_daily", today_et)
         wu_h = await get_latest_forecast(sess, city.id, "wu_hourly", today_et)
+        wu_history = await get_latest_forecast(sess, city.id, "wu_history", today_et)
         event = await get_event(sess, city.id, today_et)
 
     model = None
@@ -186,6 +187,7 @@ async def city_detail(request: Request, city_slug: str):
                 "observed_at": metar.observed_at.isoformat() if metar else None,
                 "age_s": _age(metar.fetched_at if metar else None),
             },
+            "daily_high_f": wu_history.high_f if wu_history else None,
             "forecasts": {
                 "nws": {"high_f": nws.high_f if nws else None, "age_s": _age(nws.fetched_at if nws else None)},
                 "wu_daily": {"high_f": wu_d.high_f if wu_d else None, "age_s": _age(wu_d.fetched_at if wu_d else None)},

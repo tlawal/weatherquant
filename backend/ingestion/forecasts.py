@@ -174,12 +174,7 @@ def _wu_history_url(city: City, date_et: str) -> str:
     
     country = "US"
     if not getattr(city, "is_us", True):
-        mapping = {
-            "london": "GB", "paris": "FR", "tokyo": "JP", 
-            "berlin": "DE", "rome": "IT", "madrid": "ES", 
-            "toronto": "CA", "sydney": "AU"
-        }
-        country = mapping.get(city.city_slug.lower(), "GB")
+        country = (getattr(city, "wu_state", "") or "GB").upper()
         
     return f"https://api.weather.com/v1/location/{city.metar_station}:9:{country}/observations/historical.json?apiKey=e1f10a1e78da46f5b10a1e78da96f525&units={units}&startDate={dt_str}"
 
