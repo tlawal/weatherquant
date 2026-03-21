@@ -1,0 +1,86 @@
+{% for row in signal_rows %}
+<tr class="border-b transition-colors hover:bg-white/5 cursor-pointer
+  {% if row.true_edge >= 0.15 %}edge-hot{% elif row.true_edge >= 0.10 %}edge-warm{% else %}edge-cold{% endif %}"
+  style="border-color:rgba(26,58,107,0.5)"
+  onclick="quickTrade('{{ row.city_slug }}', {{ row.bucket_idx }})">
+
+  <!-- City -->
+  <td class="px-4 py-3">
+    <a href="/city/{{ row.city_slug }}" onclick="event.stopPropagation()"
+       class="font-medium text-sm hover:underline" style="color:var(--cyan)">
+      {{ row.city_display }}
+    </a>
+  </td>
+
+  <!-- Bucket range -->
+  <td class="px-4 py-3">
+    <span class="mono text-xs px-2 py-1 rounded" style="background:var(--bg-panel)">
+      {% if row.low_f is not none and row.high_f is not none %}
+        {{ row.low_f|int }}–{{ row.high_f|int }}°F
+      {% elif row.low_f is not none %}
+        ≥{{ row.low_f|int }}°F
+      {% elif row.high_f is not none %}
+        &lt;{{ row.high_f|int }}°F
+      {% else %}
+        {{ row.label }}
+      {% endif %}
+    </span>
+  </td>
+
+  <!-- Market prob -->
+  <td class="px-4 py-3 text-right mono text-sm" style="color:var(--text-muted)">
+    {% if row.mkt_prob %}{{ "%.1f"|format(row.mkt_prob * 100) }}%{% else %}—{% endif %}
+  </td>
+
+  <!-- Model prob -->
+  <td class="px-4 py-3 text-right mono text-sm text-white font-medium">
+    {% if row.model_prob %}{{ "%.1f"|format(row.model_prob * 100) }}%{% else %}—{% endif %}
+  </td>
+
+  <!-- True edge — the KEY column -->
+  <td class="px-4 py-3 text-right font-bold mono">
+    {% if row.true_edge >= 0.15 %}
+      <span class="text-green-400">+{{ "%.2f"|format(row.true_edge * 100) }}%</span>
+    {% elif row.true_edge >= 0.10 %}
+      <span class="text-yellow-400">+{{ "%.2f"|format(row.true_edge * 100) }}%</span>
+    {% elif row.true_edge > 0 %}
+      <span style="color:var(--text-muted)">+{{ "%.2f"|format(row.true_edge * 100) }}%</span>
+    {% else %}
+      <span class="text-red-400/60">{{ "%.2f"|format(row.true_edge * 100) }}%</span>
+    {% endif %}
+  </td>
+
+  <!-- Spread -->
+  <td class="px-4 py-3 text-right mono text-xs" style="color:var(--text-muted)">
+    {% if row.spread %}{{ "%.3f"|format(row.spread) }}{% else %}—{% endif %}
+  </td>
+
+  <!-- Liquidity -->
+  <td class="px-4 py-3 text-right mono text-xs" style="color:var(--text-muted)">
+    {% if row.ask_depth %}{{ "%.0f"|format(row.ask_depth) }}{% else %}—{% endif %}
+  </td>
+
+  <!-- Action -->
+  <td class="px-4 py-3 text-center">
+    {% if row.actionable %}
+      <button onclick="event.stopPropagation();quickTrade('{{ row.city_slug }}',{{ row.bucket_idx }})"
+        class="text-xs px-3 py-1 rounded font-semibold transition-all hover:opacity-80"
+        style="background:#065F46;border:1px solid #22C55E;color:#86EFAC">
+        Trade YES ▶
+      </button>
+    {% elif row.gate_failures %}
+      <span class="text-xs" style="color:var(--text-muted)" title="{{ row.gate_failures|join(', ') }}">
+        🔒 Gated
+      </span>
+    {% else %}
+      <span class="text-xs" style="color:var(--text-muted)">Low edge</span>
+    {% endif %}
+  </td>
+</tr>
+{% else %}
+<tr>
+  <td colspan="8" class="px-4 py-8 text-center" style="color:var(--text-muted)">
+    No signals yet — ingestion may still be initializing.
+  </td>
+</tr>
+{% endfor %}

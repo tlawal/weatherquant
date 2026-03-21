@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{% block title %}WeatherQuant{% endblock %}</title>
+  <meta name="description" content="Professional weather prediction market trading terminal" />
+
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              950: '#020B18',
+              900: '#040F1F',
+              800: '#071428',
+              700: '#0B1E3D',
+              600: '#112852',
+              500: '#1A3A6B',
+            },
+            cyan: {
+              400: '#22D3EE',
+              500: '#06B6D4',
+            },
+            edge: {
+              hot:  '#22C55E',  // green — strong edge
+              warm: '#EAB308',  // yellow — marginal edge
+              cold: '#6B7280',  // gray — no edge
+            }
+          },
+          fontFamily: {
+            sans: ['Inter', 'system-ui', 'sans-serif'],
+            mono: ['JetBrains Mono', 'Fira Code', 'monospace'],
+          },
+          animation: {
+            'pulse-soft': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+          }
+        }
+      }
+    }
+  </script>
+
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+
+  <!-- HTMX -->
+  <script src="https://unpkg.com/htmx.org@1.9.10" defer></script>
+
+  <!-- Plotly (city page charts) -->
+  <script src="https://cdn.plot.ly/plotly-2.27.0.min.js" defer></script>
+
+  <style>
+    :root {
+      --bg-primary: #020B18;
+      --bg-card:    #040F1F;
+      --bg-panel:   #071428;
+      --border:     #1A3A6B;
+      --text-muted: #64748B;
+      --cyan:       #22D3EE;
+      --green:      #22C55E;
+      --yellow:     #EAB308;
+      --red:        #EF4444;
+    }
+    body { background: var(--bg-primary); color: #E2E8F0; }
+    .card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; }
+    .panel { background: var(--bg-panel); }
+    .mono  { font-family: 'JetBrains Mono', monospace; }
+    .glow-cyan { box-shadow: 0 0 12px rgba(34,211,238,0.25); }
+    .glow-green { box-shadow: 0 0 12px rgba(34,197,94,0.25); }
+    .glow-red { box-shadow: 0 0 12px rgba(239,68,68,0.30); }
+    .badge-armed { background: #7F1D1D; border: 1px solid #EF4444; color: #FCA5A5; }
+    .badge-disarmed { background: #14532D; border: 1px solid #22C55E; color: #86EFAC; }
+    .badge-pending { background: #713F12; border: 1px solid #EAB308; color: #FDE047; }
+    .edge-hot  { background: rgba(34,197,94,0.12); border-left: 3px solid #22C55E; }
+    .edge-warm { background: rgba(234,179,8,0.08);  border-left: 3px solid #EAB308; }
+    .edge-cold { border-left: 3px solid transparent; }
+    .htmx-indicator { opacity: 0; transition: opacity 200ms; }
+    .htmx-request .htmx-indicator { opacity: 1; }
+    input:focus { outline: 2px solid var(--cyan); outline-offset: 1px; }
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: var(--bg-primary); }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  </style>
+
+  {% block extra_head %}{% endblock %}
+</head>
+<body class="min-h-screen" x-data="{ theme: localStorage.getItem('theme') || 'dark' }">
+
+  <!-- ── HEADER ─────────────────────────────────────────────────────────────── -->
+  <header class="sticky top-0 z-50 border-b" style="background:var(--bg-card);border-color:var(--border)">
+    <div class="max-w-screen-2xl mx-auto px-4 h-14 flex items-center justify-between">
+
+      <!-- Logo -->
+      <div class="flex items-center gap-3">
+        <a href="/" class="flex items-center gap-2 no-underline">
+          <span class="text-2xl">🌡️</span>
+          <span class="font-bold text-lg tracking-tight" style="color:var(--cyan)">WeatherQuant</span>
+        </a>
+        <span class="text-xs px-2 py-0.5 rounded font-mono" style="background:var(--bg-panel);color:var(--text-muted)">v1</span>
+        <nav class="hidden md:flex gap-4 ml-4">
+          <a href="/" class="text-sm hover:text-white transition-colors" style="color:var(--text-muted)">Signals</a>
+          {% for city_slug in request.state.cities|default([]) %}
+          <a href="/city/{{ city_slug }}" class="text-sm hover:text-white transition-colors" style="color:var(--text-muted)">{{ city_slug|title }}</a>
+          {% endfor %}
+          <a href="/admin/cities" class="text-sm hover:text-white transition-colors" style="color:var(--text-muted)">Cities</a>
+        </nav>
+      </div>
+
+      <!-- Right: ET clock + arming badge -->
+      <div class="flex items-center gap-3">
+        <span id="et-clock" class="mono text-sm" style="color:var(--text-muted)">-- ET</span>
+        <div id="arming-badge" class="text-xs px-3 py-1 rounded font-semibold
+          {% if arming_state == 'ARMED' %}badge-armed glow-red
+          {% elif arming_state == 'ARMING_PENDING' %}badge-pending
+          {% else %}badge-disarmed{% endif %}">
+          {% if arming_state == 'ARMED' %}🔴 ARMED
+          {% elif arming_state == 'ARMING_PENDING' %}🟡 PENDING
+          {% else %}🟢 SAFE{% endif %}
+        </div>
+        <!-- Theme toggle -->
+        <button onclick="toggleTheme()" class="text-lg" title="Toggle theme">🌗</button>
+      </div>
+    </div>
+  </header>
+
+  <!-- ── MAIN CONTENT ────────────────────────────────────────────────────────── -->
+  <main class="max-w-screen-2xl mx-auto px-4 py-6">
+    {% block content %}{% endblock %}
+  </main>
+
+  <!-- ── SCRIPTS ───────────────────────────────────────────────────────────────── -->
+  <script>
+    // ET clock
+    function updateClock() {
+      const now = new Date();
+      const et = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York',
+        hour: '2-digit', minute: '2-digit', second: '2-digit',
+        hour12: false
+      }).format(now);
+      const el = document.getElementById('et-clock');
+      if (el) el.textContent = et + ' ET';
+    }
+    setInterval(updateClock, 1000);
+    updateClock();
+
+    // Theme toggle
+    function toggleTheme() {
+      const html = document.documentElement;
+      if (html.classList.contains('dark')) {
+        html.classList.remove('dark');
+        localStorage.setItem('theme', 'light');
+      } else {
+        html.classList.add('dark');
+        localStorage.setItem('theme', 'dark');
+      }
+    }
+    // Apply saved theme
+    const savedTheme = localStorage.getItem('theme');
+    if (savedTheme === 'light') document.documentElement.classList.remove('dark');
+
+    // Admin token for API calls (stored in sessionStorage)
+    function getAdminToken() {
+      return sessionStorage.getItem('adminToken') || '';
+    }
+    function promptForToken() {
+      const t = prompt('Enter Admin Token:');
+      if (t) sessionStorage.setItem('adminToken', t);
+      return t;
+    }
+  </script>
+
+  {% block scripts %}{% endblock %}
+</body>
+</html>

@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+{% block title %}City Registry — WeatherQuant{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-between mb-5">
+  <h1 class="text-xl font-bold">City Registry</h1>
+  <span class="text-sm" style="color:var(--text-muted)">Enable/disable cities for trading</span>
+</div>
+
+<div class="card overflow-hidden">
+  <table class="w-full text-sm">
+    <thead>
+      <tr class="text-xs uppercase tracking-widest" style="color:var(--text-muted);border-bottom:1px solid var(--border)">
+        <th class="px-5 py-3 text-left">City</th>
+        <th class="px-5 py-3 text-left">METAR</th>
+        <th class="px-5 py-3 text-left">NWS Office</th>
+        <th class="px-5 py-3 text-left">WU City</th>
+        <th class="px-5 py-3 text-center">Status</th>
+        <th class="px-5 py-3 text-center">Action</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for city in cities %}
+      <tr class="border-b hover:bg-white/5" style="border-color:rgba(26,58,107,0.4)">
+        <td class="px-5 py-3">
+          <a href="/city/{{ city.city_slug }}" class="font-medium hover:underline" style="color:var(--cyan)">
+            {{ city.display_name }}
+          </a>
+          <div class="text-xs mono mt-0.5" style="color:var(--text-muted)">{{ city.city_slug }}</div>
+        </td>
+        <td class="px-5 py-3 mono text-sm">{{ city.metar_station or '—' }}</td>
+        <td class="px-5 py-3 mono text-sm">{{ city.nws_office or '—' }}</td>
+        <td class="px-5 py-3 text-sm" style="color:var(--text-muted)">
+          {% if city.wu_state and city.wu_city %}{{ city.wu_state }}/{{ city.wu_city }}{% else %}—{% endif %}
+        </td>
+        <td class="px-5 py-3 text-center">
+          <span class="px-2 py-1 rounded text-xs font-semibold
+            {% if city.enabled %}text-green-400 bg-green-950{% else %}text-gray-500 bg-gray-900{% endif %}">
+            {{ 'ENABLED' if city.enabled else 'DISABLED' }}
+          </span>
+        </td>
+        <td class="px-5 py-3 text-center">
+          <button onclick="toggleCity('{{ city.city_slug }}')"
+            class="text-xs px-3 py-1 rounded transition-all hover:opacity-80"
+            style="background:var(--bg-panel);border:1px solid var(--border)">
+            {{ 'Disable' if city.enabled else 'Enable' }}
+          </button>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<!-- Worker heartbeats -->
+<div class="mt-6 card overflow-hidden">
+  <div class="px-5 py-3 border-b" style="border-color:var(--border)">
+    <h2 class="font-semibold text-sm">Worker Heartbeats</h2>
+  </div>
+  <table class="w-full text-xs">
+    <thead>
+      <tr class="text-xs uppercase tracking-widest" style="color:var(--text-muted);border-bottom:1px solid var(--border)">
+        <th class="px-5 py-2 text-left">Job</th>
+        <th class="px-5 py-2 text-right">Last Run</th>
+        <th class="px-5 py-2 text-right">Runs</th>
+        <th class="px-5 py-2 text-right">Errors</th>
+        <th class="px-5 py-2 text-left">Last Error</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for name, hb in heartbeats.items() %}
+      <tr class="border-b hover:bg-white/5" style="border-color:rgba(26,58,107,0.4)">
+        <td class="px-5 py-2 mono font-medium">{{ name }}</td>
+        <td class="px-5 py-2 text-right" style="color:var(--text-muted)">
+          {{ hb.last_run_at.strftime('%H:%M:%S') if hb.last_run_at else '—' }}</td>
+        <td class="px-5 py-2 text-right mono">{{ hb.run_count }}</td>
+        <td class="px-5 py-2 text-right mono {% if hb.error_count > 0 %}text-red-400{% else %}text-green-400{% endif %}">
+          {{ hb.error_count }}</td>
+        <td class="px-5 py-2 text-red-400 truncate max-w-xs">{{ hb.last_error or '' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function toggleCity(city_slug) {
+  const tok = getAdminToken() || promptForToken();
+  if (!tok) return;
+  const res = await fetch(`/cities/${city_slug}/toggle`, {
+    method: 'POST',
+    headers: {'X-Admin-Token': tok},
+  });
+  const data = await res.json();
+  if (data.city_slug) window.location.reload();
+  else alert(JSON.stringify(data));
+}
+</script>
+{% endblock %}

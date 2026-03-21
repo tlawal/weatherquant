@@ -1,0 +1,128 @@
+"""
+Risk manager — Kelly-based position sizing with hard caps.
+
+Design philosophy:
+  - Half-Kelly to reduce variance and avoid ruin
+  - Three-way minimum: Kelly, position cap, liquidity cap
+  - Absolute minimum size of $1.00 (reject dust)
+  - Hard bankroll ceiling of $10 for v1
+"""
+from __future__ import annotations
+
+import logging
+import math
+from dataclasses import dataclass
+from typing import Optional
+
+from backend.config import Config
+
+log = logging.getLogger(__name__)
+
+
+@dataclass
+class SizingResult:
+    size: float
+    rejected: bool
+    reject_reason: Optional[str]
+    kelly_f: float
+    kelly_size: float
+    position_cap: float
+    liquidity_cap: float
+    bankroll_remaining: float
+
+
+def compute_size(
+    model_prob: float,
+    limit_price: float,
+    bankroll: float,
+    open_exposure: float,
+    ask_depth: float,
+) -> SizingResult:
+    """
+    Compute position size using half-Kelly with hard caps.
+
+    Args:
+        model_prob: output from temperature model (probability this bucket resolves YES)
+        limit_price: the price we plan to pay per share (≈ yes_ask)
+        bankroll: total trading bankroll ($)
+        open_exposure: cost basis of currently open positions ($)
+        ask_depth: total shares available at ask (liquidity)
+
+    Returns:
+        SizingResult — check .rejected before using .size
+    """
+    # Cap bankroll to hard ceiling (safety: never trust passed-in bankroll > cap)
+    effective_bankroll = min(bankroll, Config.BANKROLL_CAP)
+    bankroll_remaining = effective_bankroll - open_exposure
+
+    if bankroll_remaining <= 0:
+        return _rejected(f"bankroll_exhausted: remaining=${bankroll_remaining:.2f}", 0, 0, 0, bankroll_remaining)
+
+    # ── Kelly fraction ────────────────────────────────────────────────────────
+    # Binary payout: win (1 - price)/price per $1 risked (net fractional odds)
+    if limit_price <= 0 or limit_price >= 1:
+        return _rejected(f"invalid_price: {limit_price}", 0, 0, 0, bankroll_remaining)
+
+    net_odds = (1.0 - limit_price) / limit_price  # profit per $1 risked
+    p = model_prob
+    q = 1.0 - p
+
+    # Kelly formula for binary bet: f* = (b*p - q) / b
+    kelly_f = (net_odds * p - q) / net_odds
+    half_kelly_f = kelly_f / 2.0
+
+    if half_kelly_f <= 0:
+        return _rejected(
+            f"negative_kelly: f={kelly_f:.4f} (no positive edge in sizing)",
+            kelly_f, 0, 0, bankroll_remaining
+        )
+
+    kelly_size = half_kelly_f * effective_bankroll
+
+    # ── Hard caps ────────────────────────────────────────────────────────────
+    position_cap = effective_bankroll * Config.MAX_POSITION_PCT
+    liquidity_cap = ask_depth * Config.MAX_LIQUIDITY_PCT * limit_price  # $ value
+
+    final_size = min(kelly_size, position_cap, liquidity_cap, bankroll_remaining)
+
+    # Convert from $ to shares at limit_price
+    shares = math.floor((final_size / limit_price) * 100) / 100  # floor to 2dp
+    dollar_cost = round(shares * limit_price, 2)
+
+    if dollar_cost < 1.00:
+        return _rejected(
+            f"size_too_small: dollar_cost=${dollar_cost:.2f} < $1.00 minimum",
+            kelly_f, kelly_size, position_cap, bankroll_remaining
+        )
+
+    log.info(
+        "sizing: kelly_f=%.4f half_kelly=%.4f kelly_size=$%.2f position_cap=$%.2f "
+        "liquidity_cap=$%.2f final_size=$%.2f (%.2f shares @ ${:.4f})",
+        kelly_f, half_kelly_f, kelly_size, position_cap, liquidity_cap,
+        dollar_cost, shares, limit_price,
+    )
+
+    return SizingResult(
+        size=shares,
+        rejected=False,
+        reject_reason=None,
+        kelly_f=round(kelly_f, 4),
+        kelly_size=round(kelly_size, 2),
+        position_cap=round(position_cap, 2),
+        liquidity_cap=round(liquidity_cap, 2),
+        bankroll_remaining=round(bankroll_remaining, 2),
+    )
+
+
+def _rejected(reason: str, kelly_f: float, kelly_size: float, position_cap: float, remaining: float) -> SizingResult:
+    log.warning("sizing: REJECTED — %s", reason)
+    return SizingResult(
+        size=0.0,
+        rejected=True,
+        reject_reason=reason,
+        kelly_f=round(kelly_f, 4),
+        kelly_size=round(kelly_size, 2),
+        position_cap=round(position_cap, 2),
+        liquidity_cap=0.0,
+        bankroll_remaining=round(remaining, 2),
+    )

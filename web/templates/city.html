@@ -1,0 +1,291 @@
+{% extends "base.html" %}
+{% set city_title = city.display_name %}
+{% block title %}{{ city_title }} — WeatherQuant{% endblock %}
+
+{% block content %}
+<!-- ── HEADER ROW ────────────────────────────────────────────────────────── -->
+<div class="flex items-center justify-between mb-5">
+  <div class="flex items-center gap-3">
+    <a href="/" class="text-sm hover:underline" style="color:var(--text-muted)">← Signals</a>
+    <span style="color:var(--text-muted)">/</span>
+    <h1 class="text-xl font-bold">{{ city.display_name }}</h1>
+    {% if event %}
+    <span class="text-xs px-2 py-0.5 rounded"
+      style="background:{% if event.forecast_quality == 'ok' %}rgba(34,197,94,0.15){% else %}rgba(239,68,68,0.15){% endif %};
+             color:{% if event.forecast_quality == 'ok' %}#86efac{% else %}#fca5a5{% endif %}">
+      {{ event.forecast_quality|upper }}
+    </span>
+    {% endif %}
+  </div>
+  <span class="text-sm mono" style="color:var(--text-muted)">{{ today_et }}</span>
+</div>
+
+<!-- ── TOP METRICS GRID ──────────────────────────────────────────────────── -->
+<div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-5">
+  <!-- Current Temp -->
+  <div class="card p-4">
+    <div class="text-xs uppercase tracking-widest mb-1" style="color:var(--text-muted)">Current Temp</div>
+    <div class="text-3xl font-bold mono" style="color:var(--cyan)">
+      {% if metar.temp_f %}{{ "%.1f"|format(metar.temp_f) }}°F{% else %}—{% endif %}
+    </div>
+    {% if metar.age_s is not none %}
+    <div class="text-xs mt-1" style="color:var(--text-muted)">{{ metar.age_s|int }}s ago (METAR)</div>
+    {% endif %}
+  </div>
+
+  <!-- Daily High Observed -->
+  <div class="card p-4">
+    <div class="text-xs uppercase tracking-widest mb-1" style="color:var(--text-muted)">Daily High (obs)</div>
+    <div class="text-3xl font-bold mono text-white">
+      {% if metar.daily_high_f %}{{ "%.1f"|format(metar.daily_high_f) }}°F{% else %}—{% endif %}
+    </div>
+    <div class="text-xs mt-1" style="color:var(--text-muted)">Ground truth (METAR)</div>
+  </div>
+
+  <!-- Model Forecast (μ) -->
+  <div class="card p-4">
+    <div class="text-xs uppercase tracking-widest mb-1" style="color:var(--text-muted)">Model Forecast μ</div>
+    <div class="text-3xl font-bold mono" style="color:#A78BFA">
+      {% if model and model.mu %}{{ "%.1f"|format(model.mu) }}°F{% else %}—{% endif %}
+    </div>
+    {% if model and model.sigma %}
+    <div class="text-xs mt-1" style="color:var(--text-muted)">σ = {{ "%.2f"|format(model.sigma) }}°F</div>
+    {% endif %}
+  </div>
+
+  <!-- Forecast Sources -->
+  <div class="card p-4">
+    <div class="text-xs uppercase tracking-widest mb-2" style="color:var(--text-muted)">Forecasts</div>
+    <div class="space-y-1 text-xs">
+      <div class="flex justify-between">
+        <span style="color:var(--text-muted)">NWS</span>
+        <span class="mono font-medium {% if forecasts.nws.high_f %}text-white{% else %}text-red-400{% endif %}">
+          {% if forecasts.nws.high_f %}{{ "%.1f"|format(forecasts.nws.high_f) }}°F{% else %}—{% endif %}
+        </span>
+      </div>
+      <div class="flex justify-between">
+        <span style="color:var(--text-muted)">WU Daily</span>
+        <span class="mono font-medium {% if forecasts.wu_daily.high_f %}text-white{% else %}text-red-400{% endif %}">
+          {% if forecasts.wu_daily.high_f %}{{ "%.1f"|format(forecasts.wu_daily.high_f) }}°F{% else %}—{% endif %}
+        </span>
+      </div>
+      <div class="flex justify-between">
+        <span style="color:var(--text-muted)">WU Hourly</span>
+        <span class="mono font-medium {% if forecasts.wu_hourly.high_f %}text-white{% else %}text-red-400{% endif %}">
+          {% if forecasts.wu_hourly.high_f %}{{ "%.1f"|format(forecasts.wu_hourly.high_f) }}°F{% else %}—{% endif %}
+        </span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── MAIN GRID ─────────────────────────────────────────────────────────── -->
+<div class="grid grid-cols-1 lg:grid-cols-5 gap-5">
+
+  <!-- ── LEFT: Probability distribution chart (3/5 width) ───────────────── -->
+  <div class="lg:col-span-3 card p-5">
+    <h2 class="font-semibold text-sm mb-3" style="color:var(--text-muted)">Temperature Probability Distribution</h2>
+    <div id="prob-chart" class="w-full" style="height:280px"></div>
+
+    <!-- Model inputs -->
+    {% if model and model.inputs %}
+    <div class="mt-4 grid grid-cols-3 gap-3 text-xs">
+      <div class="panel rounded p-2">
+        <div style="color:var(--text-muted)">Projected High</div>
+        <div class="mono font-semibold">
+          {% if model.inputs.projected_high %}{{ "%.1f"|format(model.inputs.projected_high) }}°F{% else %}—{% endif %}
+        </div>
+      </div>
+      <div class="panel rounded p-2">
+        <div style="color:var(--text-muted)">METAR Weight</div>
+        <div class="mono font-semibold">
+          {{ "%.0f"|format((model.inputs.w_metar|default(0)) * 100) }}%
+        </div>
+      </div>
+      <div class="panel rounded p-2">
+        <div style="color:var(--text-muted)">Forecast Spread</div>
+        <div class="mono font-semibold">
+          {{ "%.1f"|format(model.inputs.spread|default(0)) }}°F
+        </div>
+      </div>
+    </div>
+    {% endif %}
+  </div>
+
+  <!-- ── RIGHT: Bucket signal table (2/5 width) ─────────────────────────── -->
+  <div class="lg:col-span-2 card overflow-hidden">
+    <div class="px-4 py-3 border-b" style="border-color:var(--border)">
+      <h2 class="font-semibold text-sm">Buckets & Edges</h2>
+    </div>
+    <table class="w-full text-xs">
+      <thead>
+        <tr class="text-xs uppercase tracking-widest" style="color:var(--text-muted);border-bottom:1px solid var(--border)">
+          <th class="px-3 py-2 text-left">Range</th>
+          <th class="px-3 py-2 text-right">Mkt</th>
+          <th class="px-3 py-2 text-right">Model</th>
+          <th class="px-3 py-2 text-right" style="color:var(--cyan)">Edge</th>
+          <th class="px-3 py-2 text-center">Trade</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for b in buckets %}
+        <tr class="border-b hover:bg-white/5 transition-colors
+          {% if b.actionable %}edge-hot{% elif b.true_edge and b.true_edge >= 0.05 %}edge-warm{% else %}edge-cold{% endif %}"
+          style="border-color:rgba(26,58,107,0.4)">
+          <td class="px-3 py-2 mono font-medium">
+            {% if b.low_f is not none and b.high_f is not none %}
+              {{ b.low_f|int }}–{{ b.high_f|int }}°
+            {% elif b.low_f is not none %}≥{{ b.low_f|int }}°
+            {% elif b.high_f is not none %}&lt;{{ b.high_f|int }}°
+            {% else %}{{ b.label }}{% endif %}
+          </td>
+          <td class="px-3 py-2 text-right mono" style="color:var(--text-muted)">
+            {% if b.mkt_prob %}{{ "%.1f"|format(b.mkt_prob * 100) }}%{% else %}—{% endif %}
+          </td>
+          <td class="px-3 py-2 text-right mono font-medium text-white">
+            {% if b.model_prob %}{{ "%.1f"|format(b.model_prob * 100) }}%{% else %}—{% endif %}
+          </td>
+          <td class="px-3 py-2 text-right mono font-bold">
+            {% if b.true_edge is not none %}
+              {% if b.true_edge >= 0.10 %}<span class="text-green-400">+{{ "%.1f"|format(b.true_edge * 100) }}%</span>
+              {% elif b.true_edge >= 0.05 %}<span class="text-yellow-400">+{{ "%.1f"|format(b.true_edge * 100) }}%</span>
+              {% else %}<span style="color:var(--text-muted)">{{ "%.1f"|format(b.true_edge * 100) }}%</span>{% endif %}
+            {% else %}—{% endif %}
+          </td>
+          <td class="px-3 py-2 text-center">
+            {% if b.actionable %}
+            <button onclick="quickTrade('{{ city.city_slug }}', {{ b.bucket_idx }})"
+              class="px-2 py-0.5 rounded text-xs font-semibold"
+              style="background:#065F46;border:1px solid #22C55E;color:#86EFAC">▶</button>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ── MODEL INPUTS DEBUG ───────────────────────────────────────────────── -->
+{% if model and model.inputs %}
+<details class="mt-5 card">
+  <summary class="px-5 py-3 cursor-pointer text-sm font-medium" style="color:var(--text-muted)">
+    🔍 Model Inputs (debug)
+  </summary>
+  <pre class="px-5 pb-4 text-xs overflow-auto mono" style="color:var(--text-muted)">{{ model.inputs|tojson(indent=2) }}</pre>
+</details>
+{% endif %}
+
+<!-- Hidden Trade Modal (shared with dashboard layout) -->
+<div id="trade-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center"
+     style="background:rgba(0,0,0,0.7)" onclick="if(event.target===this)hideTradeModal()">
+  <div class="card w-96 p-6 space-y-4" style="background:var(--bg-card)">
+    <h2 class="font-bold text-base" style="color:var(--cyan)">Trade — <span id="modal-label"></span></h2>
+    <input id="trade-city" type="hidden" value="{{ city.city_slug }}">
+    <input id="trade-bucket-idx" type="hidden">
+    <div class="space-y-2">
+      <input id="trade-price" type="number" step="0.01" min="0.01" max="0.99" placeholder="Limit price (optional)"
+        class="w-full px-3 py-2 rounded text-sm" style="background:var(--bg-panel);border:1px solid var(--border)">
+      <label class="flex items-center gap-2 text-sm">
+        <input id="trade-dry-run" type="checkbox" checked> Dry run
+      </label>
+    </div>
+    <div class="flex gap-2">
+      <button onclick="submitTrade()" class="flex-1 py-2 rounded font-semibold text-sm"
+        style="background:var(--cyan);color:#000">Execute</button>
+      <button onclick="hideTradeModal()" class="flex-1 py-2 rounded text-sm"
+        style="background:var(--bg-panel);border:1px solid var(--border)">Cancel</button>
+    </div>
+    <pre id="trade-result" class="text-xs p-2 rounded hidden"
+      style="background:var(--bg-panel);max-height:120px;overflow:auto"></pre>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Probability distribution chart
+document.addEventListener('DOMContentLoaded', function() {
+  const probs = {{ model.probs_json if model else '[]' }};
+  const buckets = {{ buckets|tojson }};
+
+  if (!probs.length || !Plotly) return;
+
+  const labels = buckets.map(b => {
+    if (b.low_f !== null && b.high_f !== null) return `${b.low_f}–${b.high_f}°F`;
+    if (b.low_f !== null) return `≥${b.low_f}°F`;
+    if (b.high_f !== null) return `<${b.high_f}°F`;
+    return b.label || 'Bucket';
+  });
+
+  const colors = buckets.map((b, i) => {
+    const mkt = b.mkt_prob;
+    const mdl = probs[i];
+    if (!mkt || !mdl) return '#1A3A6B';
+    const edge = mdl - mkt;
+    if (edge >= 0.15) return '#22C55E';
+    if (edge >= 0.10) return '#EAB308';
+    return '#1E3A5F';
+  });
+
+  const data = [
+    {
+      type: 'bar',
+      x: labels,
+      y: probs.map(p => +(p * 100).toFixed(2)),
+      name: 'Model',
+      marker: { color: colors, opacity: 0.85 },
+    },
+    ...(buckets.some(b => b.mkt_prob) ? [{
+      type: 'scatter',
+      mode: 'lines+markers',
+      x: labels,
+      y: buckets.map(b => b.mkt_prob ? +(b.mkt_prob * 100).toFixed(2) : null),
+      name: 'Market',
+      line: { color: '#94A3B8', width: 2, dash: 'dot' },
+      marker: { color: '#94A3B8', size: 6 },
+    }] : []),
+  ];
+
+  const layout = {
+    paper_bgcolor: 'transparent',
+    plot_bgcolor: 'transparent',
+    font: { family: 'JetBrains Mono', color: '#94A3B8', size: 11 },
+    xaxis: { tickfont: { size: 10 }, showgrid: false },
+    yaxis: { title: 'Probability (%)', gridcolor: 'rgba(26,58,107,0.5)' },
+    legend: { orientation: 'h', y: -0.15 },
+    margin: { t: 10, r: 10, b: 40, l: 40 },
+    hovermode: 'x unified',
+  };
+
+  Plotly.newPlot('prob-chart', data, layout, {responsive: true, displayModeBar: false});
+});
+
+async function apiCall(path, method='POST', body=null) {
+  const tok = getAdminToken() || promptForToken();
+  if (!tok) return null;
+  const res = await fetch(path, {
+    method, headers: {'Content-Type':'application/json','X-Admin-Token': tok},
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  return res.json();
+}
+function showTradeModal() { document.getElementById('trade-modal').classList.remove('hidden'); }
+function hideTradeModal() { document.getElementById('trade-modal').classList.add('hidden'); }
+function quickTrade(city_slug, bucket_idx) {
+  document.getElementById('trade-bucket-idx').value = bucket_idx;
+  document.getElementById('modal-label').textContent = `Bucket ${bucket_idx}`;
+  showTradeModal();
+}
+async function submitTrade() {
+  const city_slug = document.getElementById('trade-city').value;
+  const bucket_idx = parseInt(document.getElementById('trade-bucket-idx').value);
+  const limit_price = parseFloat(document.getElementById('trade-price').value) || null;
+  const dry_run = document.getElementById('trade-dry-run').checked;
+  const result = await apiCall('/trade', 'POST', {city_slug, bucket_idx, side:'buy_yes', limit_price, dry_run});
+  const el = document.getElementById('trade-result');
+  el.textContent = JSON.stringify(result, null, 2);
+  el.classList.remove('hidden');
+}
+</script>
+{% endblock %}

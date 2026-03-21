@@ -1,0 +1,477 @@
+"""
+Repository layer — all database queries are here.
+
+Business logic MUST NOT use raw SQL or direct ORM queries.
+Every public function returns typed Python objects, never raw Row objects.
+"""
+from __future__ import annotations
+
+import json
+import secrets
+from datetime import datetime, timedelta, timezone
+from typing import Optional
+
+from sqlalchemy import desc, func, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from backend.storage.models import (
+    ArmingState,
+    AuditLog,
+    Bucket,
+    CalibrationParams,
+    City,
+    Event,
+    Fill,
+    ForecastObs,
+    MarketSnapshot,
+    MetarObs,
+    ModelSnapshot,
+    Order,
+    Position,
+    Signal,
+    WorkerHeartbeat,
+)
+
+
+# ─── Cities ───────────────────────────────────────────────────────────────────
+
+async def get_all_cities(session: AsyncSession, enabled_only: bool = False) -> list[City]:
+    q = select(City)
+    if enabled_only:
+        q = q.where(City.enabled.is_(True))
+    result = await session.execute(q)
+    return list(result.scalars().all())
+
+
+async def get_city_by_slug(session: AsyncSession, city_slug: str) -> Optional[City]:
+    result = await session.execute(
+        select(City).where(City.city_slug == city_slug)
+    )
+    return result.scalar_one_or_none()
+
+
+async def upsert_city(session: AsyncSession, city_data: dict) -> City:
+    slug = city_data["city_slug"]
+    city = await get_city_by_slug(session, slug)
+    if city is None:
+        city = City(**city_data)
+        session.add(city)
+    else:
+        for k, v in city_data.items():
+            if hasattr(city, k):
+                setattr(city, k, v)
+    await session.commit()
+    await session.refresh(city)
+    return city
+
+
+# ─── Events ───────────────────────────────────────────────────────────────────
+
+async def get_event(
+    session: AsyncSession, city_id: int, date_et: str
+) -> Optional[Event]:
+    result = await session.execute(
+        select(Event)
+        .where(Event.city_id == city_id, Event.date_et == date_et)
+    )
+    return result.scalar_one_or_none()
+
+
+async def upsert_event(session: AsyncSession, city_id: int, date_et: str, **kwargs) -> Event:
+    event = await get_event(session, city_id, date_et)
+    if event is None:
+        event = Event(city_id=city_id, date_et=date_et, **kwargs)
+        session.add(event)
+    else:
+        for k, v in kwargs.items():
+            if hasattr(event, k):
+                setattr(event, k, v)
+    await session.commit()
+    await session.refresh(event)
+    return event
+
+
+async def get_event_with_buckets(
+    session: AsyncSession, city_id: int, date_et: str
+) -> Optional[Event]:
+    from sqlalchemy.orm import selectinload
+    result = await session.execute(
+        select(Event)
+        .options(selectinload(Event.buckets))
+        .where(Event.city_id == city_id, Event.date_et == date_et)
+    )
+    return result.scalar_one_or_none()
+
+
+# ─── Buckets ──────────────────────────────────────────────────────────────────
+
+async def get_buckets_for_event(session: AsyncSession, event_id: int) -> list[Bucket]:
+    result = await session.execute(
+        select(Bucket)
+        .where(Bucket.event_id == event_id)
+        .order_by(Bucket.bucket_idx)
+    )
+    return list(result.scalars().all())
+
+
+async def upsert_bucket(
+    session: AsyncSession, event_id: int, bucket_idx: int, **kwargs
+) -> Bucket:
+    result = await session.execute(
+        select(Bucket).where(
+            Bucket.event_id == event_id,
+            Bucket.bucket_idx == bucket_idx,
+        )
+    )
+    bucket = result.scalar_one_or_none()
+    if bucket is None:
+        bucket = Bucket(event_id=event_id, bucket_idx=bucket_idx, **kwargs)
+        session.add(bucket)
+    else:
+        for k, v in kwargs.items():
+            if hasattr(bucket, k):
+                setattr(bucket, k, v)
+    await session.commit()
+    await session.refresh(bucket)
+    return bucket
+
+
+# ─── METAR ────────────────────────────────────────────────────────────────────
+
+async def insert_metar_obs(session: AsyncSession, **kwargs) -> MetarObs:
+    obs = MetarObs(**kwargs)
+    session.add(obs)
+    await session.commit()
+    return obs
+
+
+async def get_latest_metar(
+    session: AsyncSession, city_id: int
+) -> Optional[MetarObs]:
+    result = await session.execute(
+        select(MetarObs)
+        .where(MetarObs.city_id == city_id)
+        .order_by(desc(MetarObs.observed_at))
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_daily_high_metar(
+    session: AsyncSession, city_id: int, date_et: str
+) -> Optional[float]:
+    """Max temp_f observed for a city on the given ET date."""
+    result = await session.execute(
+        select(func.max(MetarObs.temp_f))
+        .where(
+            MetarObs.city_id == city_id,
+            func.date(MetarObs.observed_at) == date_et,
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+# ─── Forecasts ────────────────────────────────────────────────────────────────
+
+async def insert_forecast_obs(session: AsyncSession, **kwargs) -> ForecastObs:
+    obs = ForecastObs(**kwargs)
+    session.add(obs)
+    await session.commit()
+    return obs
+
+
+async def get_latest_forecast(
+    session: AsyncSession, city_id: int, source: str, date_et: str
+) -> Optional[ForecastObs]:
+    result = await session.execute(
+        select(ForecastObs)
+        .where(
+            ForecastObs.city_id == city_id,
+            ForecastObs.source == source,
+            ForecastObs.date_et == date_et,
+        )
+        .order_by(desc(ForecastObs.fetched_at))
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+# ─── Market Snapshots ─────────────────────────────────────────────────────────
+
+async def insert_market_snapshot(session: AsyncSession, **kwargs) -> MarketSnapshot:
+    snap = MarketSnapshot(**kwargs)
+    session.add(snap)
+    await session.commit()
+    return snap
+
+
+async def get_latest_market_snapshot(
+    session: AsyncSession, bucket_id: int
+) -> Optional[MarketSnapshot]:
+    result = await session.execute(
+        select(MarketSnapshot)
+        .where(MarketSnapshot.bucket_id == bucket_id)
+        .order_by(desc(MarketSnapshot.fetched_at))
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+# ─── Model Snapshots ──────────────────────────────────────────────────────────
+
+async def insert_model_snapshot(session: AsyncSession, **kwargs) -> ModelSnapshot:
+    snap = ModelSnapshot(**kwargs)
+    session.add(snap)
+    await session.commit()
+    return snap
+
+
+async def get_latest_model_snapshot(
+    session: AsyncSession, event_id: int
+) -> Optional[ModelSnapshot]:
+    result = await session.execute(
+        select(ModelSnapshot)
+        .where(ModelSnapshot.event_id == event_id)
+        .order_by(desc(ModelSnapshot.computed_at))
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+# ─── Signals ──────────────────────────────────────────────────────────────────
+
+async def insert_signal(session: AsyncSession, **kwargs) -> Signal:
+    sig = Signal(**kwargs)
+    session.add(sig)
+    await session.commit()
+    return sig
+
+
+async def get_latest_signals(
+    session: AsyncSession, limit: int = 50
+) -> list[Signal]:
+    result = await session.execute(
+        select(Signal).order_by(desc(Signal.computed_at)).limit(limit)
+    )
+    return list(result.scalars().all())
+
+
+async def get_latest_signal_for_bucket(
+    session: AsyncSession, bucket_id: int
+) -> Optional[Signal]:
+    result = await session.execute(
+        select(Signal)
+        .where(Signal.bucket_id == bucket_id)
+        .order_by(desc(Signal.computed_at))
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+# ─── Orders & Fills ───────────────────────────────────────────────────────────
+
+async def insert_order(session: AsyncSession, **kwargs) -> Order:
+    order = Order(**kwargs)
+    session.add(order)
+    await session.commit()
+    await session.refresh(order)
+    return order
+
+
+async def update_order_status(
+    session: AsyncSession,
+    order_id: int,
+    status: str,
+    **kwargs,
+) -> None:
+    await session.execute(
+        update(Order)
+        .where(Order.id == order_id)
+        .values(status=status, **kwargs)
+    )
+    await session.commit()
+
+
+async def get_open_orders(session: AsyncSession) -> list[Order]:
+    result = await session.execute(
+        select(Order).where(Order.status.in_(["pending", "open"]))
+    )
+    return list(result.scalars().all())
+
+
+async def insert_fill(session: AsyncSession, **kwargs) -> Fill:
+    fill = Fill(**kwargs)
+    session.add(fill)
+    await session.commit()
+    return fill
+
+
+async def get_recent_orders(
+    session: AsyncSession, limit: int = 50
+) -> list[Order]:
+    result = await session.execute(
+        select(Order).order_by(desc(Order.created_at)).limit(limit)
+    )
+    return list(result.scalars().all())
+
+
+# ─── Positions ────────────────────────────────────────────────────────────────
+
+async def get_position(
+    session: AsyncSession, bucket_id: int
+) -> Optional[Position]:
+    result = await session.execute(
+        select(Position).where(Position.bucket_id == bucket_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def upsert_position(
+    session: AsyncSession, bucket_id: int, **kwargs
+) -> Position:
+    pos = await get_position(session, bucket_id)
+    if pos is None:
+        pos = Position(bucket_id=bucket_id, **kwargs)
+        session.add(pos)
+    else:
+        for k, v in kwargs.items():
+            if hasattr(pos, k):
+                setattr(pos, k, v)
+    await session.commit()
+    await session.refresh(pos)
+    return pos
+
+
+async def get_all_positions(session: AsyncSession) -> list[Position]:
+    result = await session.execute(
+        select(Position).where(Position.net_qty > 0)
+    )
+    return list(result.scalars().all())
+
+
+async def get_daily_realized_pnl(session: AsyncSession, date_et: str) -> float:
+    """Sum of realized PnL for positions associated with today's events."""
+    # Join Position → Bucket → Event to filter by date
+    result = await session.execute(
+        select(func.sum(Position.realized_pnl))
+        .join(Bucket, Position.bucket_id == Bucket.id)
+        .join(Event, Bucket.event_id == Event.id)
+        .where(Event.date_et == date_et)
+    )
+    return float(result.scalar_one_or_none() or 0.0)
+
+
+# ─── Arming State ─────────────────────────────────────────────────────────────
+
+async def get_arming_state(session: AsyncSession) -> ArmingState:
+    """Always returns the singleton arming state (id=1)."""
+    result = await session.execute(select(ArmingState).where(ArmingState.id == 1))
+    arming = result.scalar_one_or_none()
+    if arming is None:
+        arming = ArmingState(id=1, state="DISARMED")
+        session.add(arming)
+        await session.commit()
+    return arming
+
+
+async def update_arming_state(session: AsyncSession, **kwargs) -> ArmingState:
+    await session.execute(
+        update(ArmingState).where(ArmingState.id == 1).values(**kwargs)
+    )
+    await session.commit()
+    return await get_arming_state(session)
+
+
+# ─── Audit Log ────────────────────────────────────────────────────────────────
+
+async def append_audit(
+    session: AsyncSession,
+    actor: str,
+    action: str,
+    payload: dict | None = None,
+    ok: bool = True,
+    error_msg: str | None = None,
+) -> AuditLog:
+    entry = AuditLog(
+        actor=actor,
+        action=action,
+        payload_json=json.dumps(payload) if payload else None,
+        ok=ok,
+        error_msg=error_msg,
+    )
+    session.add(entry)
+    await session.commit()
+    return entry
+
+
+async def get_audit_log(
+    session: AsyncSession, limit: int = 100, action_filter: str | None = None
+) -> list[AuditLog]:
+    q = select(AuditLog).order_by(desc(AuditLog.ts))
+    if action_filter:
+        q = q.where(AuditLog.action == action_filter)
+    q = q.limit(limit)
+    result = await session.execute(q)
+    return list(result.scalars().all())
+
+
+# ─── Calibration ──────────────────────────────────────────────────────────────
+
+async def get_calibration(
+    session: AsyncSession, city_id: int
+) -> Optional[CalibrationParams]:
+    result = await session.execute(
+        select(CalibrationParams).where(CalibrationParams.city_id == city_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def upsert_calibration(
+    session: AsyncSession, city_id: int, **kwargs
+) -> CalibrationParams:
+    cal = await get_calibration(session, city_id)
+    if cal is None:
+        cal = CalibrationParams(city_id=city_id, **kwargs)
+        session.add(cal)
+    else:
+        for k, v in kwargs.items():
+            if hasattr(cal, k):
+                setattr(cal, k, v)
+    await session.commit()
+    await session.refresh(cal)
+    return cal
+
+
+# ─── Worker Heartbeat ─────────────────────────────────────────────────────────
+
+async def update_heartbeat(
+    session: AsyncSession,
+    job_name: str,
+    success: bool = True,
+    error: str | None = None,
+) -> None:
+    result = await session.execute(
+        select(WorkerHeartbeat).where(WorkerHeartbeat.job_name == job_name)
+    )
+    hb = result.scalar_one_or_none()
+    now = datetime.now(timezone.utc)
+
+    if hb is None:
+        hb = WorkerHeartbeat(job_name=job_name)
+        session.add(hb)
+
+    hb.last_run_at = now
+    hb.run_count = (hb.run_count or 0) + 1
+    if success:
+        hb.last_success_at = now
+        hb.last_error = None
+    else:
+        hb.error_count = (hb.error_count or 0) + 1
+        hb.last_error = error
+
+    await session.commit()
+
+
+async def get_all_heartbeats(session: AsyncSession) -> list[WorkerHeartbeat]:
+    result = await session.execute(select(WorkerHeartbeat))
+    return list(result.scalars().all())
