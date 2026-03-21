@@ -122,12 +122,43 @@ async def run_worker() -> None:
         log.info("worker: shutdown complete")
 
 
+async def run_all() -> None:
+    """Start both API and Worker in the same process."""
+    from backend.storage.db import close_db, init_db
+    from backend.ingestion.polymarket_clob import CLOBClient, set_clob
+    from backend.worker.scheduler import start_scheduler, stop_scheduler
+
+    log.info("starting in 'all' mode (api + worker)")
+    await init_db()
+
+    clob = CLOBClient()
+    await clob.start()
+    set_clob(clob)
+
+    # Start scheduler
+    scheduler = await start_scheduler()
+
+    # Start API in a separate task
+    api_task = asyncio.create_task(run_api())
+
+    try:
+        await api_task
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        log.info("shutting down 'all' mode")
+    finally:
+        await stop_scheduler()
+        await clob.close()
+        await close_db()
+
+
 def main() -> None:
     service = Config.SERVICE_TYPE
     log.info("WeatherQuant starting as service_type=%s", service)
 
     if service == "worker":
         asyncio.run(run_worker())
+    elif service == "all":
+        asyncio.run(run_all())
     else:
         asyncio.run(run_api())
 
