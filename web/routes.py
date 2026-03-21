@@ -170,6 +170,8 @@ async def city_detail(request: Request, city_slug: str):
     def _age(dt):
         if not dt:
             return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
         return round((datetime.now(timezone.utc) - dt).total_seconds(), 0)
 
     return templates.TemplateResponse(

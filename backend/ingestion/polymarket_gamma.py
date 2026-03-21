@@ -61,6 +61,7 @@ def _build_slugs(city_slug: str, target_date: date) -> list[str]:
     # NYC fallbacks
     if city_slug == "new-york-city":
         slugs.append(f"highest-temperature-in-new-york-on-{month}-{day}-{year}")
+        slugs.append(f"highest-temperature-in-nyc-on-{month}-{day}-{year}")
     
     return slugs
 
