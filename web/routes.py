@@ -23,6 +23,7 @@ dashboard_router = APIRouter()
 
 @dashboard_router.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
+    log.info("dashboard: GET / hit")
     from backend.storage.db import get_session
     from backend.storage.repos import (
         get_all_cities,
@@ -41,6 +42,8 @@ async def dashboard(request: Request):
         daily_pnl = await get_daily_realized_pnl(sess, today_et)
         positions = await get_all_positions(sess)
         raw_signals = await get_latest_signals(sess, limit=200)
+
+    log.info("dashboard: data fetched: cities=%d, arming=%s, pnl=%.2f", len(cities), arming.state, daily_pnl)
 
     # Build signal rows for the table
     signal_rows = []

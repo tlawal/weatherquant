@@ -105,9 +105,6 @@
         <span class="text-xs px-2 py-0.5 rounded font-mono" style="background:var(--bg-panel);color:var(--text-muted)">v1</span>
         <nav class="hidden md:flex gap-4 ml-4">
           <a href="/" class="text-sm hover:text-white transition-colors" style="color:var(--text-muted)">Signals</a>
-          {% for city_slug in request.state.cities|default([]) %}
-          <a href="/city/{{ city_slug }}" class="text-sm hover:text-white transition-colors" style="color:var(--text-muted)">{{ city_slug|title }}</a>
-          {% endfor %}
           <a href="/admin/cities" class="text-sm hover:text-white transition-colors" style="color:var(--text-muted)">Cities</a>
         </nav>
       </div>
