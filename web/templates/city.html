@@ -24,29 +24,29 @@
 <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-5">
   <!-- Current Temp -->
   <div class="card p-4">
-    <div class="text-xs uppercase tracking-widest mb-1" style="color:var(--text-muted)">Current Temp</div>
+    <div class="text-xs uppercase tracking-widest mb-1" style="color:var(--text-muted)" title="METAR is the official aviation weather report. This is the latest observed temperature at the airport.">Current Temp</div>
     <div class="text-3xl font-bold mono" style="color:var(--cyan)">
-      {% if metar.temp_f %}{{ "%.1f"|format(metar.temp_f) }}°F{% else %}—{% endif %}
+      {% if metar and metar.temp_f is not none %}{{ "%.1f"|format(metar.temp_f) }}°F{% else %}—{% endif %}
     </div>
-    {% if metar.age_s is not none %}
+    {% if metar and metar.age_s is not none %}
     <div class="text-xs mt-1" style="color:var(--text-muted)">{{ metar.age_s|int }}s ago (METAR)</div>
     {% endif %}
   </div>
 
   <!-- Daily High Observed -->
   <div class="card p-4">
-    <div class="text-xs uppercase tracking-widest mb-1" style="color:var(--text-muted)">Daily High (obs)</div>
+    <div class="text-xs uppercase tracking-widest mb-1" style="color:var(--text-muted)" title="The highest METAR temperature recorded so far today. Used as Ground Truth.">Daily High (obs)</div>
     <div class="text-3xl font-bold mono text-white">
-      {% if metar.daily_high_f %}{{ "%.1f"|format(metar.daily_high_f) }}°F{% else %}—{% endif %}
+      {% if metar and metar.daily_high_f is not none %}{{ "%.1f"|format(metar.daily_high_f) }}°F{% else %}—{% endif %}
     </div>
     <div class="text-xs mt-1" style="color:var(--text-muted)">Ground truth (METAR)</div>
   </div>
 
   <!-- Model Forecast (μ) -->
   <div class="card p-4">
-    <div class="text-xs uppercase tracking-widest mb-1" style="color:var(--text-muted)">Model Forecast μ</div>
+    <div class="text-xs uppercase tracking-widest mb-1" style="color:var(--text-muted)" title="The projected daily high based on fusing NWS, WU Daily, and WU Hourly, weighted by time of day.">Model Forecast μ</div>
     <div class="text-3xl font-bold mono" style="color:#A78BFA">
-      {% if model and model.mu %}{{ "%.1f"|format(model.mu) }}°F{% else %}—{% endif %}
+      {% if model and model.mu is not none %}{{ "%.1f"|format(model.mu) }}°F{% else %}—{% endif %}
     </div>
     {% if model and model.sigma %}
     <div class="text-xs mt-1" style="color:var(--text-muted)">σ = {{ "%.2f"|format(model.sigma) }}°F</div>
@@ -57,22 +57,22 @@
   <div class="card p-4">
     <div class="text-xs uppercase tracking-widest mb-2" style="color:var(--text-muted)">Forecasts</div>
     <div class="space-y-1 text-xs">
-      <div class="flex justify-between">
+      <div class="flex justify-between" title="National Weather Service official gridpoint forecast. Highly reliable base forecast.">
         <span style="color:var(--text-muted)">NWS</span>
-        <span class="mono font-medium {% if forecasts.nws.high_f %}text-white{% else %}text-red-400{% endif %}">
-          {% if forecasts.nws.high_f %}{{ "%.1f"|format(forecasts.nws.high_f) }}°F{% else %}—{% endif %}
+        <span class="mono font-medium {% if forecasts.nws.high_f is not none %}text-white{% else %}text-red-400{% endif %}">
+          {% if forecasts.nws.high_f is not none %}{{ "%.1f"|format(forecasts.nws.high_f) }}°F{% else %}—{% endif %}
         </span>
       </div>
-      <div class="flex justify-between">
+      <div class="flex justify-between" title="Weather Underground Daily forecast. Often used by Polymarket as the settlement resolution source.">
         <span style="color:var(--text-muted)">WU Daily</span>
-        <span class="mono font-medium {% if forecasts.wu_daily.high_f %}text-white{% else %}text-red-400{% endif %}">
-          {% if forecasts.wu_daily.high_f %}{{ "%.1f"|format(forecasts.wu_daily.high_f) }}°F{% else %}—{% endif %}
+        <span class="mono font-medium {% if forecasts.wu_daily.high_f is not none %}text-white{% else %}text-red-400{% endif %}">
+          {% if forecasts.wu_daily.high_f is not none %}{{ "%.1f"|format(forecasts.wu_daily.high_f) }}°F{% else %}—{% endif %}
         </span>
       </div>
-      <div class="flex justify-between">
+      <div class="flex justify-between" title="Weather Underground Hourly forecast. The maximum temperature found within today's hourly projections.">
         <span style="color:var(--text-muted)">WU Hourly</span>
-        <span class="mono font-medium {% if forecasts.wu_hourly.high_f %}text-white{% else %}text-red-400{% endif %}">
-          {% if forecasts.wu_hourly.high_f %}{{ "%.1f"|format(forecasts.wu_hourly.high_f) }}°F{% else %}—{% endif %}
+        <span class="mono font-medium {% if forecasts.wu_hourly.high_f is not none %}text-white{% else %}text-red-400{% endif %}">
+          {% if forecasts.wu_hourly.high_f is not none %}{{ "%.1f"|format(forecasts.wu_hourly.high_f) }}°F{% else %}—{% endif %}
         </span>
       </div>
     </div>
@@ -140,10 +140,10 @@
             {% else %}{{ b.label }}{% endif %}
           </td>
           <td class="px-3 py-2 text-right mono" style="color:var(--text-muted)">
-            {% if b.mkt_prob %}{{ "%.1f"|format(b.mkt_prob * 100) }}%{% else %}—{% endif %}
+            {% if b.mkt_prob is not none %}{{ "%.1f"|format(b.mkt_prob * 100) }}%{% else %}—{% endif %}
           </td>
           <td class="px-3 py-2 text-right mono font-medium text-white">
-            {% if b.model_prob %}{{ "%.1f"|format(b.model_prob * 100) }}%{% else %}—{% endif %}
+            {% if b.model_prob is not none %}{{ "%.1f"|format(b.model_prob * 100) }}%{% else %}—{% endif %}
           </td>
           <td class="px-3 py-2 text-right mono font-bold">
             {% if b.true_edge is not none %}

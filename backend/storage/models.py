@@ -98,7 +98,7 @@ class Bucket(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     event_id: Mapped[int] = mapped_column(Integer, ForeignKey("events.id"), nullable=False)
     bucket_idx: Mapped[int] = mapped_column(Integer, nullable=False)  # 0-based
-    label: Mapped[Optional[str]] = mapped_column(String(64))
+    label: Mapped[Optional[str]] = mapped_column(String(256))
     low_f: Mapped[Optional[float]] = mapped_column(Float)   # None = -inf (below bucket)
     high_f: Mapped[Optional[float]] = mapped_column(Float)  # None = +inf (above bucket)
     yes_token_id: Mapped[Optional[str]] = mapped_column(String(128))

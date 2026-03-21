@@ -255,7 +255,7 @@ async def _process_event_data(city, date_et: str, slug: str, event_data: dict) -
         raw_buckets.append(
             {
                 "bucket_idx": i,
-                "label": str(question or label)[:64],
+                "label": str(question or label)[:256],
                 "low_f": lo,
                 "high_f": hi,
                 "yes_token_id": yes_token,
