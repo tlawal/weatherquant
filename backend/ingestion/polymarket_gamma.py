@@ -233,15 +233,32 @@ async def _process_event_data(city, date_et: str, slug: str, event_data: dict) -
             # Try the label field
             lo, hi = _parse_bucket_range(str(label), "")
 
+        import json
+        
         # Extract YES/NO token IDs
         yes_token = None
         no_token = None
         tokens = market.get("clobTokenIds") or []
+        if isinstance(tokens, str):
+            try:
+                tokens = json.loads(tokens)
+            except Exception:
+                tokens = []
+                
         if isinstance(tokens, list) and len(tokens) >= 2:
             yes_token, no_token = str(tokens[0]), str(tokens[1])
+        elif isinstance(tokens, dict):
+            yes_token = str(tokens.get("1") or "")
+            no_token = str(tokens.get("0") or "")
 
         # Fallback to outcomes array
         outcomes = market.get("outcomes") or []
+        if isinstance(outcomes, str):
+            try:
+                outcomes = json.loads(outcomes)
+            except Exception:
+                outcomes = []
+                
         if isinstance(outcomes, list):
             for outcome in outcomes:
                 if isinstance(outcome, dict):
@@ -252,9 +269,13 @@ async def _process_event_data(city, date_et: str, slug: str, event_data: dict) -
                     elif name == "NO" and tid:
                         no_token = tid
 
+        if lo is None and hi is None:
+            log.debug("gamma: skipping non-bucket market '%s'", label)
+            continue
+
         raw_buckets.append(
             {
-                "bucket_idx": i,
+                "bucket_idx": len(raw_buckets),  # Use length so indices are sequential
                 "label": str(question or label)[:256],
                 "low_f": lo,
                 "high_f": hi,

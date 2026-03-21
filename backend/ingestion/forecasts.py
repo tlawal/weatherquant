@@ -165,6 +165,12 @@ def _wu_hourly_url(city: City) -> str:
     return f"{WU_BASE}/hourly/{city.metar_station}"
 
 
+def _wu_history_url(city: City, date_et: str) -> str:
+    # api.weather.com/v1/location/KATL:9:US/observations/historical.json?apiKey=...&startDate=20260321
+    dt_str = date_et.replace("-", "")
+    return f"https://api.weather.com/v1/location/{city.metar_station}:9:US/observations/historical.json?apiKey=e1f10a1e78da46f5b10a1e78da96f525&units=e&startDate={dt_str}"
+
+
 async def fetch_wu_all() -> None:
     """Scrape WU daily + hourly for all enabled cities."""
     async with get_session() as sess:
@@ -197,9 +203,10 @@ async def fetch_wu_all() -> None:
 async def _scrape_wu_city(city: City, date_et: str) -> None:
     daily_high = await _scrape_wu_daily(city)
     hourly_peak = await _scrape_wu_hourly(city)
+    history_high = await _fetch_wu_history_api(city, date_et)
 
-    wu_ok = daily_high is not None or hourly_peak is not None
-    parse_err = None if wu_ok else "both_wu_daily_and_hourly_failed"
+    wu_ok = daily_high is not None or hourly_peak is not None or history_high is not None
+    parse_err = None if wu_ok else "all_wu_sources_failed"
 
     async with get_session() as sess:
         if daily_high is not None or True:  # always write, even None
@@ -239,10 +246,11 @@ async def _scrape_wu_city(city: City, date_et: str) -> None:
         await update_heartbeat(sess, "fetch_wu", success=wu_ok, error=parse_err)
 
     log.info(
-        "wu: %s daily=%.1f hourly=%.1f quality=%s",
+        "wu: %s daily=%.1f hourly=%.1f history=%.1f quality=%s",
         city.city_slug,
         daily_high or 0,
         hourly_peak or 0,
+        history_high or 0,
         "ok" if wu_ok else "degraded",
     )
 
@@ -369,6 +377,25 @@ async def _fetch_html(url: str, retries: int = 3) -> Optional[str]:
                 await asyncio.sleep(3 * (attempt + 1))
         except Exception as e:
             log.error("wu: error for %s: %s", url[:60], e)
-            if attempt < retries - 1:
-                await asyncio.sleep(2)
+    return None
+
+
+async def _fetch_wu_history_api(city: City, date_et: str) -> Optional[float]:
+    """Fetch WU actual historical observations using the internal API to resolve settlement ground truth."""
+    url = _wu_history_url(city, date_et)
+    for attempt in range(3):
+        try:
+            async with aiohttp.ClientSession(timeout=_TIMEOUT, headers=_WU_HEADERS) as http:
+                async with http.get(url) as resp:
+                    if resp.status == 200:
+                        data = await resp.json(content_type=None)
+                        obs = data.get("observations", [])
+                        temps = [o.get("temp") for o in obs if o.get("temp") is not None]
+                        if temps:
+                            return float(max(temps))
+                    elif resp.status == 404:
+                        return None
+        except Exception as e:
+            log.warning("wu_history: fetch failed for %s: %s", city.city_slug, e)
+            await asyncio.sleep(2)
     return None

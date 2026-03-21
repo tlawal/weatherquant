@@ -126,6 +126,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         nws_obs = await get_latest_forecast(sess, city.id, "nws", today_et)
         wu_daily_obs = await get_latest_forecast(sess, city.id, "wu_daily", today_et)
         wu_hourly_obs = await get_latest_forecast(sess, city.id, "wu_hourly", today_et)
+        wu_history_obs = await get_latest_forecast(sess, city.id, "wu_history", today_et)
 
         cal = await get_calibration(sess, city.id)
 
@@ -135,6 +136,9 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
 
     # Build bucket boundary list
     bucket_ranges = [(b.low_f, b.high_f) for b in buckets]
+
+    # Resolve ground truth: prefer WU history since that is Polymarket's settlement source
+    ground_truth_high = wu_history_obs.high_f if (wu_history_obs and wu_history_obs.high_f is not None) else daily_high
 
     # Build calibration dict
     cal_dict = None
@@ -153,7 +157,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         nws_high=nws_obs.high_f if nws_obs else None,
         wu_daily_high=wu_daily_obs.high_f if wu_daily_obs else None,
         wu_hourly_peak=wu_hourly_obs.high_f if wu_hourly_obs else None,
-        daily_high_metar=daily_high,
+        daily_high_metar=ground_truth_high,
         current_temp_f=metar.temp_f if metar else None,
         calibration=cal_dict,
         buckets=bucket_ranges,

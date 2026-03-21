@@ -122,6 +122,7 @@ async def get_city_state(city_slug: str):
         nws = await get_latest_forecast(sess, city.id, "nws", today_et)
         wu_d = await get_latest_forecast(sess, city.id, "wu_daily", today_et)
         wu_h = await get_latest_forecast(sess, city.id, "wu_hourly", today_et)
+        wu_hist = await get_latest_forecast(sess, city.id, "wu_history", today_et)
         event = await get_event(sess, city.id, today_et)
         model = None if not event else await get_latest_model_snapshot(sess, event.id)
 
@@ -130,12 +131,15 @@ async def get_city_state(city_slug: str):
             return None
         return round((datetime.now(timezone.utc) - dt_).total_seconds(), 0)
 
+    # Use WU History as ground truth if available; fallback to METAR daily high
+    daily_high = wu_hist.high_f if wu_hist and wu_hist.high_f is not None else (metar.daily_high_f if metar else None)
+
     return {
         "city_slug": city_slug,
         "display_name": city.display_name,
         "metar_station": city.metar_station,
         "current_temp_f": metar.temp_f if metar else None,
-        "daily_high_f": metar.daily_high_f if metar else None,
+        "daily_high_f": daily_high,
         "metar_observed_at": metar.observed_at.isoformat() if metar else None,
         "metar_age_s": _age_s(metar.fetched_at if metar else None),
         "forecasts": {

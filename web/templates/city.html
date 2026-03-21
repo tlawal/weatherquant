@@ -36,16 +36,16 @@
     {% endif %}
   </div>
 
-  <!-- Daily High Observed -->
-  <div class="card p-4">
+  <!-- WU History Actual -->
+  <div class="card p-4" style="border:1px solid rgba(234,179,8,0.3)">
     <div class="flex items-center justify-between text-xs uppercase tracking-widest mb-1" style="color:var(--text-muted)">
-      <span>Daily High (obs)</span>
-      <span title="The highest METAR temperature recorded so far today. Used as Ground Truth." style="cursor:help;color:var(--cyan);font-size:12px;opacity:0.7">ⓘ</span>
+      <span>WU Actual History</span>
+      <span title="The official settlement source for Polymarket weather outcomes. Read from Wunderground's daily history API." style="cursor:help;color:var(--cyan);font-size:12px;opacity:0.7">ⓘ</span>
     </div>
-    <div class="text-3xl font-bold mono text-white">
-      {% if metar and metar.daily_high_f is not none %}{{ "%.1f"|format(metar.daily_high_f) }}°F{% else %}—{% endif %}
+    <div class="text-3xl font-bold mono" style="color:#FBBF24">
+      {% if daily_high_f is not none %}{{ "%.1f"|format(daily_high_f) }}°F{% else %}—{% endif %}
     </div>
-    <div class="text-xs mt-1" style="color:var(--text-muted)">Ground truth (METAR)</div>
+    <div class="text-xs mt-1" style="color:var(--text-muted)">Settlement Source (WU)</div>
   </div>
 
   <!-- Model Forecast (μ) -->
@@ -73,7 +73,7 @@
         </span>
       </div>
       <div class="flex justify-between">
-        <span style="color:var(--text-muted)" class="flex items-center gap-1">WU Daily <span title="Weather Underground Daily forecast. Often used by Polymarket as the settlement resolution source." style="cursor:help;color:var(--cyan);font-size:10px;opacity:0.5">ⓘ</span></span>
+        <span style="color:var(--text-muted)" class="flex items-center gap-1">WU Today Forecast <span title="Weather Underground 'Today' forecast." style="cursor:help;color:var(--cyan);font-size:10px;opacity:0.5">ⓘ</span></span>
         <span class="mono font-medium {% if forecasts.wu_daily.high_f is not none %}text-white{% else %}text-red-400{% endif %}">
           {% if forecasts.wu_daily.high_f is not none %}{{ "%.1f"|format(forecasts.wu_daily.high_f) }}°F{% else %}—{% endif %}
         </span>
