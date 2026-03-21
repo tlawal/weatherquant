@@ -163,7 +163,7 @@ def create_scheduler() -> AsyncIOScheduler:
     add(job_heartbeat,           seconds=30,   name="scheduler_alive")
     add(job_fetch_metar,         seconds=60,   name="fetch_metar")
     add(job_fetch_nws,           seconds=900,  name="fetch_nws")   # 15 min
-    add(job_fetch_wu,            seconds=3600, name="fetch_wu")    # 60 min
+    add(job_fetch_wu,            seconds=300,  name="fetch_wu")    # 5 min
     add(job_fetch_gamma,         seconds=120,  name="fetch_gamma") # 2 min
     add(job_fetch_clob,          seconds=30,   name="fetch_clob")
     add(job_run_model,           seconds=60,   name="run_model")

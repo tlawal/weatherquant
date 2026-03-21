@@ -158,15 +158,11 @@ async def _fetch_nws_high(city: City) -> Optional[float]:
 # ─── WU Scraping ─────────────────────────────────────────────────────────────
 
 def _wu_daily_url(city: City) -> str:
-    return (
-        f"{WU_BASE}/weather/us/{city.wu_state}/{city.wu_city}/{city.metar_station}"
-    )
+    return f"{WU_BASE}/weather/{city.metar_station}"
 
 
 def _wu_hourly_url(city: City) -> str:
-    return (
-        f"{WU_BASE}/hourly/us/{city.wu_state}/{city.wu_city}/{city.metar_station}"
-    )
+    return f"{WU_BASE}/hourly/{city.metar_station}"
 
 
 async def fetch_wu_all() -> None:
