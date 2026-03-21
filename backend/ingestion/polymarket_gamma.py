@@ -50,13 +50,19 @@ _ABOVE_PATTERN = re.compile(r"(?:above|higher than|over|≥|>=)\s*(\d+\.?\d*)", 
 _BELOW_PATTERN = re.compile(r"(?:below|lower than|under|<)\s*(\d+\.?\d*)", re.I)
 
 
-def _build_slug(city_slug: str, target_date: date) -> str:
-    """Build Polymarket event slug for a city/date."""
-    # e.g. highest-temperature-in-atlanta-on-march-21-2026
+def _build_slugs(city_slug: str, target_date: date) -> list[str]:
+    """Build possible Polymarket event slugs for a city/date."""
     month = target_date.strftime("%B").lower()
     day = target_date.day
     year = target_date.year
-    return f"highest-temperature-in-{city_slug}-on-{month}-{day}-{year}"
+    
+    slugs = [f"highest-temperature-in-{city_slug}-on-{month}-{day}-{year}"]
+    
+    # NYC fallbacks
+    if city_slug == "new-york-city":
+        slugs.append(f"highest-temperature-in-new-york-on-{month}-{day}-{year}")
+    
+    return slugs
 
 
 def _is_wu_source(source_text: str) -> bool:
@@ -97,8 +103,8 @@ def _parse_bucket_range(label: str, description: str = "") -> tuple[Optional[flo
 def _validate_buckets(buckets: list[dict]) -> list[str]:
     """Return list of parse errors — empty means valid."""
     errors = []
-    if len(buckets) != 8:
-        errors.append(f"expected 8 buckets, got {len(buckets)}")
+    if len(buckets) < 3:
+        errors.append(f"expected at least 3 buckets, got {len(buckets)}")
         return errors
 
     # Check monotonic ordering of boundaries
@@ -138,34 +144,43 @@ async def fetch_gamma_all() -> None:
 
 
 async def _fetch_city_event(city, today_et: date, today_str: str) -> None:
-    slug = _build_slug(city.city_slug, today_et)
-    log.debug("gamma: fetching slug=%s", slug)
+    slugs = _build_slugs(city.city_slug, today_et)
+    
+    event_data = None
+    final_slug = slugs[0]
 
-    url = f"{GAMMA_API}/events/slug/{slug}"
-    try:
-        async with aiohttp.ClientSession(timeout=_TIMEOUT, headers=_HEADERS) as http:
-            async with http.get(url) as resp:
-                if resp.status == 404:
-                    log.info("gamma: no event for slug=%s", slug)
-                    async with get_session() as sess:
-                        event = await upsert_event(
-                            sess,
-                            city_id=city.id,
-                            date_et=today_str,
-                            gamma_slug=slug,
-                            status="no_event",
-                            trading_enabled=False,
-                        )
-                    return
-                if resp.status != 200:
-                    log.error("gamma: HTTP %d for %s", resp.status, url)
-                    return
-                event_data = await resp.json(content_type=None)
-    except Exception as e:
-        log.error("gamma: fetch failed for %s: %s", slug, e)
+    async with aiohttp.ClientSession(timeout=_TIMEOUT, headers=_HEADERS) as http:
+        for slug in slugs:
+            log.debug("gamma: fetching slug=%s", slug)
+            url = f"{GAMMA_API}/events/slug/{slug}"
+            try:
+                async with http.get(url) as resp:
+                    if resp.status == 200:
+                        event_data = await resp.json(content_type=None)
+                        final_slug = slug
+                        break
+                    elif resp.status == 404:
+                        continue
+                    else:
+                        log.error("gamma: HTTP %d for %s", resp.status, url)
+            except Exception as e:
+                log.error("gamma: fetch failed for %s: %s", slug, e)
+                continue
+
+    if not event_data:
+        log.info("gamma: no event found for city=%s after trying %d slugs", city.city_slug, len(slugs))
+        async with get_session() as sess:
+            await upsert_event(
+                sess,
+                city_id=city.id,
+                date_et=today_str,
+                gamma_slug=slugs[0],
+                status="no_event",
+                trading_enabled=False,
+            )
         return
 
-    await _process_event_data(city, today_str, slug, event_data)
+    await _process_event_data(city, today_str, final_slug, event_data)
 
 
 async def _process_event_data(city, date_et: str, slug: str, event_data: dict) -> None:
