@@ -29,6 +29,11 @@ _session_factory: async_sessionmaker[AsyncSession] | None = None
 
 def _build_engine() -> AsyncEngine:
     url = Config.DATABASE_URL
+    if url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql+asyncpg://", 1)
+    elif url.startswith("postgresql://"):
+        url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+
     is_sqlite = "sqlite" in url.lower()
 
     kwargs: dict = {
