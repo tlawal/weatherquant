@@ -20,13 +20,13 @@ log = logging.getLogger(__name__)
 _scheduler: AsyncIOScheduler | None = None
 
 
-async def _run_with_heartbeat(job_name: str, coro) -> None:
+async def _run_with_heartbeat(job_name: str, coro_fn) -> None:
     """Wrap a job coroutine with error catching and heartbeat update."""
     from backend.storage.db import get_session
     from backend.storage.repos import update_heartbeat
 
     try:
-        await coro
+        await coro_fn()
         async with get_session() as sess:
             await update_heartbeat(sess, job_name, success=True)
     except Exception as e:
@@ -151,10 +151,9 @@ def create_scheduler() -> AsyncIOScheduler:
 
     def add(job_fn, seconds: int, name: str = None):
         scheduler.add_job(
-            lambda: asyncio.create_task(
-                _run_with_heartbeat(name or job_fn.__name__, job_fn())
-            ),
+            _run_with_heartbeat,
             trigger=IntervalTrigger(seconds=seconds),
+            args=[name or job_fn.__name__, job_fn],
             id=name or job_fn.__name__,
             max_instances=1,
             coalesce=True,
@@ -190,7 +189,7 @@ async def start_scheduler() -> AsyncIOScheduler:
         (job_fetch_nws, "fetch_nws"),
     ]:
         try:
-            await _run_with_heartbeat(name, coro_fn())
+            await _run_with_heartbeat(name, coro_fn)
         except Exception as e:
             log.warning("scheduler: startup job %s failed: %s", name, e)
 
