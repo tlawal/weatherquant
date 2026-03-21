@@ -14,13 +14,13 @@
 
   <!-- Bucket range -->
   <td class="px-4 py-3">
-    <span class="mono text-xs px-2 py-1 rounded" style="background:var(--bg-panel)">
+    <span class="font-mono text-sm tracking-tighter">
       {% if row.low_f is not none and row.high_f is not none %}
-        {{ row.low_f|int }}–{{ row.high_f|int }}°F
-      {% elif row.low_f is not none %}
-        ≥{{ row.low_f|int }}°F
-      {% elif row.high_f is not none %}
-        &lt;{{ row.high_f|int }}°F
+        {{ row.low_f|int }}–{{ row.high_f|int }}°{{ row.unit }}
+      {% elif row.high_f is none %}
+        ≥{{ row.low_f|int }}°{{ row.unit }}
+      {% elif row.low_f is none %}
+        &lt;{{ row.high_f|int }}°{{ row.unit }}
       {% else %}
         {{ row.label }}
       {% endif %}

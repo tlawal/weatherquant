@@ -45,6 +45,7 @@ ET = ZoneInfo("America/New_York")
 class BucketSignal:
     city_slug: str
     city_display: str
+    unit: str
     event_id: int
     bucket_id: int
     bucket_idx: int
@@ -162,6 +163,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         calibration=cal_dict,
         buckets=bucket_ranges,
         forecast_quality=event.forecast_quality or "ok",
+        unit=getattr(city, "unit", "F"),
     )
 
     if model is None:
@@ -197,6 +199,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
             sig = BucketSignal(
                 city_slug=city.city_slug,
                 city_display=city.display_name,
+                unit=getattr(city, "unit", "F"),
                 event_id=event.id,
                 bucket_id=bucket.id,
                 bucket_idx=i,
@@ -250,6 +253,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         sig = BucketSignal(
             city_slug=city.city_slug,
             city_display=city.display_name,
+            unit=getattr(city, "unit", "F"),
             event_id=event.id,
             bucket_id=bucket.id,
             bucket_idx=i,

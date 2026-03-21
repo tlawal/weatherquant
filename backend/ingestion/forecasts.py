@@ -68,6 +68,9 @@ async def fetch_nws_all() -> None:
     today_et = date.today().isoformat()
 
     for city in cities:
+        if not city.is_us:
+            log.debug("nws: skipping city %s (not US)", city.city_slug)
+            continue
         if not (city.nws_office and city.nws_grid_x and city.nws_grid_y):
             log.debug("nws: city %s missing NWS config, skipping", city.city_slug)
             continue
@@ -166,9 +169,19 @@ def _wu_hourly_url(city: City) -> str:
 
 
 def _wu_history_url(city: City, date_et: str) -> str:
-    # api.weather.com/v1/location/KATL:9:US/observations/historical.json?apiKey=...&startDate=20260321
     dt_str = date_et.replace("-", "")
-    return f"https://api.weather.com/v1/location/{city.metar_station}:9:US/observations/historical.json?apiKey=e1f10a1e78da46f5b10a1e78da96f525&units=e&startDate={dt_str}"
+    units = "m" if getattr(city, "unit", "F") == "C" else "e"
+    
+    country = "US"
+    if not getattr(city, "is_us", True):
+        mapping = {
+            "london": "GB", "paris": "FR", "tokyo": "JP", 
+            "berlin": "DE", "rome": "IT", "madrid": "ES", 
+            "toronto": "CA", "sydney": "AU"
+        }
+        country = mapping.get(city.city_slug.lower(), "GB")
+        
+    return f"https://api.weather.com/v1/location/{city.metar_station}:9:{country}/observations/historical.json?apiKey=e1f10a1e78da46f5b10a1e78da96f525&units={units}&startDate={dt_str}"
 
 
 async def fetch_wu_all() -> None:

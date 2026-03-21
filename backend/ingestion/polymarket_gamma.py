@@ -43,7 +43,7 @@ _WU_SOURCE_PATTERNS = [
 
 # Regex to parse bucket temperature ranges from market labels
 _RANGE_PATTERNS = [
-    re.compile(r"(\d+\.?\d*)\s*[-–—]\s*(\d+\.?\d*)\s*°?\s*[Ff]?"),
+    re.compile(r"(\d+\.?\d*)\s*[-–—]\s*(\d+\.?\d*)\s*°?\s*[FCfc]?"),
     re.compile(r"(\d+\.?\d*)\s*[-–—]\s*(\d+\.?\d*)"),
 ]
 _ABOVE_PATTERN = re.compile(r"(?:above|higher than|over|≥|>=)\s*(\d+\.?\d*)", re.I)
@@ -76,7 +76,7 @@ def _is_wu_source(source_text: str) -> bool:
 
 
 def _parse_bucket_range(label: str, description: str = "") -> tuple[Optional[float], Optional[float]]:
-    """Parse (low_f, high_f) from a bucket market label. None = open-ended."""
+    """Parse (low, high) from a bucket market label. None = open-ended."""
     text = f"{label} {description}"
 
     # "above X"
@@ -326,7 +326,7 @@ async def discover_cities() -> None:
     # Also try the public search endpoint
     search_url = f"{GAMMA_API}/events?limit=200&slug_search=highest-temperature-in"
 
-    found_slugs: set[str] = set()
+    found_cities: dict[str, tuple[bool, str]] = {}
 
     for endpoint in [search_url, url]:
         try:
@@ -340,13 +340,23 @@ async def discover_cities() -> None:
             for ev in events:
                 slug = str(ev.get("slug") or "")
                 if "highest-temperature-in-" in slug:
-                    found_slugs.add(slug)
+                    # Detect unit
+                    title = str(ev.get("title") or ev.get("question") or "")
+                    desc = str(ev.get("description") or "")
+                    
+                    is_us = True
+                    unit = "F"
+                    if "°C" in title or "°C" in desc or "Celsius" in desc:
+                        is_us = False
+                        unit = "C"
+                    
+                    found_cities[slug] = (is_us, unit)
         except Exception as e:
             log.warning("gamma discover: %s error: %s", endpoint, e)
 
     # Parse city slugs from event slugs
     slug_pattern = re.compile(r"highest-temperature-in-([a-z0-9-]+)-on-")
-    for slug in found_slugs:
+    for slug, (is_us, unit) in found_cities.items():
         m = slug_pattern.search(slug)
         if not m:
             continue
@@ -363,8 +373,10 @@ async def discover_cities() -> None:
                         "city_slug": city_slug,
                         "display_name": display,
                         "enabled": False,
+                        "is_us": is_us,
+                        "unit": unit,
                     },
                 )
-                log.info("gamma: discovered new city: %s (disabled)", city_slug)
+                log.info("gamma: discovered new city: %s (is_us=%s unit=%s disabled)", city_slug, is_us, unit)
 
-    log.info("gamma: city discovery found %d temp-market slugs", len(found_slugs))
+    log.info("gamma: city discovery found %d temp-market slugs", len(found_cities))

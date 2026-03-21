@@ -71,6 +71,28 @@ async def init_db() -> None:
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
+        # Patch cities table for Phase 13 manually (since Alembic isn't present)
+        try:
+            from sqlalchemy import text
+            await conn.execute(text("ALTER TABLE cities ADD COLUMN is_us BOOLEAN NOT NULL DEFAULT true;"))
+        except Exception as e:
+            # Expected if column already exists
+            pass
+            
+        try:
+            from sqlalchemy import text
+            await conn.execute(text("ALTER TABLE cities ADD COLUMN unit VARCHAR(1) NOT NULL DEFAULT 'F';"))
+        except Exception as e:
+            # Expected if column already exists
+            pass
+            
+        try:
+            from sqlalchemy import text
+            # Postgres syntax to expand column length. SQLite will fail but it's safe to ignore.
+            await conn.execute(text("ALTER TABLE buckets ALTER COLUMN label TYPE VARCHAR(256);"))
+        except Exception as e:
+            pass
+
     await _seed_initial_data()
     log.info("db: init complete")
 

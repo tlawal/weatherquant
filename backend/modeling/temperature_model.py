@@ -90,20 +90,22 @@ def compute_model(
     calibration: Optional[dict],
     buckets: list[tuple[Optional[float], Optional[float]]],
     forecast_quality: str = "ok",
+    unit: str = "F",
 ) -> Optional[ModelResult]:
     """
     Fuse all forecast sources and compute temperature distribution + bucket probabilities.
 
     Args:
-        nws_high: NWS API daily high forecast (°F)
-        wu_daily_high: WU daily high scrape (°F)
-        wu_hourly_peak: max(WU hourly temps) (°F)
-        daily_high_metar: max observed temp today (°F)
-        current_temp_f: latest METAR temperature (°F)
+        nws_high: NWS API daily high forecast (units match 'unit')
+        wu_daily_high: WU daily high scrape
+        wu_hourly_peak: max(WU hourly temps)
+        daily_high_metar: max observed temp today
+        current_temp_f: latest METAR temperature
         calibration: dict with bias_nws, bias_wu_daily, bias_wu_hourly,
                      weight_nws, weight_wu_daily, weight_wu_hourly
         buckets: list of (lo, hi) bucket boundaries
         forecast_quality: "ok" | "degraded"
+        unit: "F" or "C"
 
     Returns:
         ModelResult or None if insufficient data.
@@ -133,21 +135,24 @@ def compute_model(
     total_weight = sum(w for _, w in calibrated.values())
     mu_forecast = sum(v * w for v, w in calibrated.values()) / total_weight
 
+    # Scale factor for Celsius
+    unit_mult = 5.0 / 9.0 if unit == "C" else 1.0
+
     # Uncertainty from disagreement
     vals = [v for v, _ in calibrated.values()]
     if len(vals) >= 2:
         spread = max(vals) - min(vals)
-        sigma_raw = max(1.0, spread / 2.0)
+        sigma_raw = max(1.0 * unit_mult, spread / 2.0)
     else:
         # Only one source — use a conservative base uncertainty
-        sigma_raw = 2.5
+        sigma_raw = 2.5 * unit_mult
 
     # ── METAR intraday adjustment ──────────────────────────────────────────────
     now_et = datetime.now(ET)
     hour_et = now_et.hour
 
     w_metar = _metar_weight(hour_et)
-    remaining_rise = _expected_remaining_rise(hour_et)
+    remaining_rise = _expected_remaining_rise(hour_et) * unit_mult
 
     # Projected high = max(daily high so far, current + expected rise)
     projected_high = mu_forecast  # default to forecast if no METAR
@@ -168,7 +173,7 @@ def compute_model(
     # When heavily relying on METAR, widen sigma slightly to reflect
     # that a single ground observation is noisy
     sigma_final = sigma_raw * (1.0 + 0.2 * w_metar)
-    sigma_final = max(1.0, sigma_final)
+    sigma_final = max(1.0 * unit_mult, sigma_final)
 
     # ── Compute bucket probabilities ───────────────────────────────────────────
     if not buckets:

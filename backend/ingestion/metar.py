@@ -138,6 +138,11 @@ async def fetch_metar_all(session=None) -> None:
             temp_c, temp_f = None, None
         else:
             temp_c, temp_f = temp
+            
+        # Unify units: if city uses Celsius, map the native C observation into the F column 
+        # so downstream processing stays completely seamless without having to branch.
+        if getattr(city, "unit", "F") == "C" and temp_c is not None:
+            temp_f = temp_c
 
         obs_time = _parse_obs_time(obs)
         raw_str = json.dumps(obs, default=str)

@@ -8,7 +8,12 @@
   <div class="flex items-center gap-3">
     <a href="/" class="text-sm hover:underline" style="color:var(--text-muted)">← Signals</a>
     <span style="color:var(--text-muted)">/</span>
-    <h1 class="text-xl font-bold">{{ city.display_name }}</h1>
+    <h1 class="text-3xl font-bold tracking-tight mb-1">
+      {{ city.display_name }}
+      {% if not city.is_us %}
+      <span class="ml-2 text-xs px-2 py-0.5 rounded uppercase tracking-widest align-middle" style="background:var(--bg-panel); color:var(--cyan)">Intl</span>
+      {% endif %}
+    </h1>
     {% if event %}
     <span class="text-xs px-2 py-0.5 rounded"
       style="background:{% if event.forecast_quality == 'ok' %}rgba(34,197,94,0.15){% else %}rgba(239,68,68,0.15){% endif %};
@@ -29,7 +34,7 @@
       <span title="METAR is the official aviation weather report. This is the latest observed temperature at the airport." style="cursor:help;color:var(--cyan);font-size:12px;opacity:0.7">ⓘ</span>
     </div>
     <div class="text-3xl font-bold mono" style="color:var(--cyan)">
-      {% if metar and metar.temp_f is not none %}{{ "%.1f"|format(metar.temp_f) }}°F{% else %}—{% endif %}
+      {% if metar and metar.temp_f is not none %}{{ "%.1f"|format(metar.temp_f) }}°{{ city.unit|default('F') }}{% else %}—{% endif %}
     </div>
     {% if metar and metar.age_s is not none %}
     <div class="text-xs mt-1" style="color:var(--text-muted)">{{ metar.age_s|int }}s ago (METAR)</div>
@@ -43,7 +48,7 @@
       <span title="The official settlement source for Polymarket weather outcomes. Read from Wunderground's daily history API." style="cursor:help;color:var(--cyan);font-size:12px;opacity:0.7">ⓘ</span>
     </div>
     <div class="text-3xl font-bold mono" style="color:#FBBF24">
-      {% if daily_high_f is not none %}{{ "%.1f"|format(daily_high_f) }}°F{% else %}—{% endif %}
+      {% if daily_high_f is not none %}{{ "%.1f"|format(daily_high_f) }}°{{ city.unit|default('F') }}{% else %}—{% endif %}
     </div>
     <div class="text-xs mt-1" style="color:var(--text-muted)">Settlement Source (WU)</div>
   </div>
@@ -55,10 +60,10 @@
       <span title="The projected daily high based on fusing NWS, WU Daily, and WU Hourly, weighted by time of day." style="cursor:help;color:var(--cyan);font-size:12px;opacity:0.7">ⓘ</span>
     </div>
     <div class="text-3xl font-bold mono" style="color:#A78BFA">
-      {% if model and model.mu is not none %}{{ "%.1f"|format(model.mu) }}°F{% else %}—{% endif %}
+      {% if model and model.mu is not none %}{{ "%.1f"|format(model.mu) }}°{{ city.unit|default('F') }}{% else %}—{% endif %}
     </div>
     {% if model and model.sigma %}
-    <div class="text-xs mt-1" style="color:var(--text-muted)">σ = {{ "%.2f"|format(model.sigma) }}°F</div>
+    <div class="text-xs mt-1" style="color:var(--text-muted)">σ = {{ "%.2f"|format(model.sigma) }}°{{ city.unit|default('F') }}</div>
     {% endif %}
   </div>
 
@@ -69,19 +74,19 @@
       <div class="flex justify-between">
         <span style="color:var(--text-muted)" class="flex items-center gap-1">NWS <span title="National Weather Service official gridpoint forecast. Highly reliable base forecast." style="cursor:help;color:var(--cyan);font-size:10px;opacity:0.5">ⓘ</span></span>
         <span class="mono font-medium {% if forecasts.nws.high_f is not none %}text-white{% else %}text-red-400{% endif %}">
-          {% if forecasts.nws.high_f is not none %}{{ "%.1f"|format(forecasts.nws.high_f) }}°F{% else %}—{% endif %}
+          {% if forecasts.nws.high_f is not none %}{{ "%.1f"|format(forecasts.nws.high_f) }}°{{ city.unit|default('F') }}{% else %}—{% endif %}
         </span>
       </div>
       <div class="flex justify-between">
         <span style="color:var(--text-muted)" class="flex items-center gap-1">WU Today Forecast <span title="Weather Underground 'Today' forecast." style="cursor:help;color:var(--cyan);font-size:10px;opacity:0.5">ⓘ</span></span>
         <span class="mono font-medium {% if forecasts.wu_daily.high_f is not none %}text-white{% else %}text-red-400{% endif %}">
-          {% if forecasts.wu_daily.high_f is not none %}{{ "%.1f"|format(forecasts.wu_daily.high_f) }}°F{% else %}—{% endif %}
+          {% if forecasts.wu_daily.high_f is not none %}{{ "%.1f"|format(forecasts.wu_daily.high_f) }}°{{ city.unit|default('F') }}{% else %}—{% endif %}
         </span>
       </div>
       <div class="flex justify-between">
         <span style="color:var(--text-muted)" class="flex items-center gap-1">WU Hourly <span title="Weather Underground Hourly forecast. The maximum temperature found within today's hourly projections." style="cursor:help;color:var(--cyan);font-size:10px;opacity:0.5">ⓘ</span></span>
         <span class="mono font-medium {% if forecasts.wu_hourly.high_f is not none %}text-white{% else %}text-red-400{% endif %}">
-          {% if forecasts.wu_hourly.high_f is not none %}{{ "%.1f"|format(forecasts.wu_hourly.high_f) }}°F{% else %}—{% endif %}
+          {% if forecasts.wu_hourly.high_f is not none %}{{ "%.1f"|format(forecasts.wu_hourly.high_f) }}°{{ city.unit|default('F') }}{% else %}—{% endif %}
         </span>
       </div>
     </div>
@@ -102,7 +107,7 @@
       <div class="panel rounded p-2">
         <div style="color:var(--text-muted)">Projected High</div>
         <div class="mono font-semibold">
-          {% if model.inputs.projected_high %}{{ "%.1f"|format(model.inputs.projected_high) }}°F{% else %}—{% endif %}
+          {% if model.inputs.projected_high %}{{ "%.1f"|format(model.inputs.projected_high) }}°{{ city.unit|default('F') }}{% else %}—{% endif %}
         </div>
       </div>
       <div class="panel rounded p-2">
@@ -114,7 +119,7 @@
       <div class="panel rounded p-2">
         <div style="color:var(--text-muted)">Forecast Spread</div>
         <div class="mono font-semibold">
-          {{ "%.1f"|format(model.inputs.spread|default(0)) }}°F
+          {{ "%.1f"|format(model.inputs.spread|default(0)) }}°{{ city.unit|default('F') }}
         </div>
       </div>
     </div>
@@ -221,9 +226,9 @@ document.addEventListener('DOMContentLoaded', function() {
   if (!probs.length || !Plotly) return;
 
   const labels = buckets.map(b => {
-    if (b.low_f !== null && b.high_f !== null) return `${b.low_f}–${b.high_f}°F`;
-    if (b.low_f !== null) return `≥${b.low_f}°F`;
-    if (b.high_f !== null) return `<${b.high_f}°F`;
+    if (b.low_f !== null && b.high_f !== null) return `${b.low_f}–${b.high_f}°{{ city.unit|default('F') }}`;
+    if (b.low_f !== null) return `≥${b.low_f}°{{ city.unit|default('F') }}`;
+    if (b.high_f !== null) return `<${b.high_f}°{{ city.unit|default('F') }}`;
     return b.label || 'Bucket';
   });
 

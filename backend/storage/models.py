@@ -40,6 +40,9 @@ class City(Base):
     wu_state: Mapped[Optional[str]] = mapped_column(String(32))
     wu_city: Mapped[Optional[str]] = mapped_column(String(64))
     enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_us: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # "F" or "C"
+    unit: Mapped[str] = mapped_column(String(1), default="F", nullable=False)
     first_seen_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow
     )
