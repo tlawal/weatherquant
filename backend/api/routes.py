@@ -138,9 +138,13 @@ async def get_current_temp(city_slug: str):
                     if raw is None:
                         return None
                     try:
+                        from zoneinfo import ZoneInfo
+                        et = ZoneInfo("America/New_York")
                         if isinstance(raw, (int, float)):
-                            return datetime.fromtimestamp(int(raw), tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-                        return datetime.fromisoformat(str(raw).rstrip("Z")).strftime("%Y-%m-%d %H:%M UTC")
+                            dt = datetime.fromtimestamp(int(raw), tz=timezone.utc).astimezone(et)
+                        else:
+                            dt = datetime.fromisoformat(str(raw).rstrip("Z")).replace(tzinfo=timezone.utc).astimezone(et)
+                        return dt.strftime("%-I:%M %p ET")
                     except Exception:
                         return str(raw)
 

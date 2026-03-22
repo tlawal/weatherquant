@@ -69,8 +69,8 @@
       <template x-if="data">
         <div class="space-y-1.5">
           <div class="flex justify-between"><span style="color:var(--text-muted)">Station</span><span class="mono" x-text="data.station || '—'"></span></div>
-          <div class="flex justify-between"><span style="color:var(--text-muted)">Obs Time (UTC)</span><span class="mono text-right" x-text="data.observed_at || '—'"></span></div>
-          <div class="flex justify-between"><span style="color:var(--text-muted)">Report Time (UTC)</span><span class="mono text-right" x-text="data.report_at || '—'"></span></div>
+          <div class="flex justify-between"><span style="color:var(--text-muted)">Obs Time (ET)</span><span class="mono text-right" x-text="data.observed_at || '—'"></span></div>
+          <div class="flex justify-between"><span style="color:var(--text-muted)">Report Time (ET)</span><span class="mono text-right" x-text="data.report_at || '—'"></span></div>
           <template x-if="data.raw_text">
             <div class="mt-2 p-2 rounded bg-black/20 mono break-words leading-relaxed border border-white/5 opacity-80" x-text="data.raw_text"></div>
           </template>
