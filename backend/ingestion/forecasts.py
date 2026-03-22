@@ -28,6 +28,7 @@ from backend.storage.db import get_session
 from backend.storage.models import City
 from backend.storage.repos import (
     get_all_cities,
+    get_daily_high_metar,
     get_latest_forecast,
     insert_forecast_obs,
     update_heartbeat,
@@ -295,7 +296,25 @@ async def _scrape_wu_city(city: City, date_et: str) -> None:
     parse_err = None if wu_ok else "all_wu_sources_failed"
 
     async with get_session() as sess:
-        if daily_high is not None or True:  # always write, even None
+        # Guard: skip wu_daily if scraped value is below today's METAR-observed high.
+        # The WU daily page transitions to night forecast in late afternoon, causing
+        # the scraper to pick up the overnight low instead of the day's high.
+        # METAR is a real observation — if it's already seen 78°F, 63°F can't be the day high.
+        # Legitimate forecast revisions (88→84) pass through because 84 > METAR floor.
+        metar_high = await get_daily_high_metar(sess, city.id, date_et)
+        skip_wu_daily = (
+            daily_high is not None
+            and metar_high is not None
+            and daily_high < metar_high
+        )
+        if skip_wu_daily:
+            log.info(
+                "wu_daily: %s scraped %.1f < metar obs high %.1f — "
+                "page transitioned to night forecast; skipping insert",
+                city.city_slug, daily_high, metar_high,
+            )
+
+        if not skip_wu_daily:  # still inserts None records (scrape failures) for error tracking
             raw = json.dumps({"high_f": daily_high, "source": "wu_daily"})
             await insert_forecast_obs(
                 sess,
