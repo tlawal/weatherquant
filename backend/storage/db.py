@@ -59,6 +59,17 @@ def _build_engine() -> AsyncEngine:
     return create_async_engine(url, **kwargs)
 
 
+async def _run_ddl(ddl: str) -> None:
+    """Run a single DDL statement in its own transaction. Silently ignore failures
+    (e.g., column already exists). Critical: never shares a transaction with other DDL."""
+    try:
+        from sqlalchemy import text
+        async with _engine.begin() as conn:
+            await conn.execute(text(ddl))
+    except Exception as e:
+        log.debug("ddl: skipped (already applied or not supported): %s — %s", ddl[:60], e)
+
+
 async def init_db() -> None:
     """Create tables and seed initial data. Called once on startup."""
     global _engine, _session_factory
@@ -68,94 +79,43 @@ async def init_db() -> None:
         _engine, expire_on_commit=False, class_=AsyncSession
     )
 
+    # Step 1: create all tables (own transaction)
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    log.info("db: tables created/verified")
 
-        # Patch cities table for Phase 13 manually (since Alembic isn't present)
-        try:
-            from sqlalchemy import text
-            await conn.execute(text("ALTER TABLE cities ADD COLUMN is_us BOOLEAN NOT NULL DEFAULT true;"))
-        except Exception as e:
-            # Expected if column already exists
-            pass
-            
-        try:
-            from sqlalchemy import text
-            await conn.execute(text("ALTER TABLE cities ADD COLUMN unit VARCHAR(1) NOT NULL DEFAULT 'F';"))
-        except Exception:
-            pass
+    # Step 2: schema migrations — each in its own transaction so one failure
+    # never aborts another (PostgreSQL aborts the whole tx on any error)
+    # cities
+    await _run_ddl("ALTER TABLE cities ADD COLUMN is_us BOOLEAN NOT NULL DEFAULT true")
+    await _run_ddl("ALTER TABLE cities ADD COLUMN unit VARCHAR(1) NOT NULL DEFAULT 'F'")
+    await _run_ddl("ALTER TABLE cities ADD COLUMN lat FLOAT")
+    await _run_ddl("ALTER TABLE cities ADD COLUMN lon FLOAT")
 
-        try:
-            from sqlalchemy import text
-            await conn.execute(text("ALTER TABLE cities ADD COLUMN lat FLOAT;"))
-        except Exception:
-            pass
+    # metar_obs
+    await _run_ddl("ALTER TABLE metar_obs ADD COLUMN report_at TIMESTAMP WITH TIME ZONE")
+    await _run_ddl("ALTER TABLE metar_obs ADD COLUMN raw_text TEXT")
+    await _run_ddl("ALTER TABLE metar_obs ADD COLUMN raw_json TEXT")
+    await _run_ddl("ALTER TABLE metar_obs ADD COLUMN parse_error TEXT")
+    await _run_ddl("ALTER TABLE metar_obs ADD COLUMN raw_payload_hash VARCHAR(64)")
 
-        try:
-            from sqlalchemy import text
-            await conn.execute(text("ALTER TABLE cities ADD COLUMN lon FLOAT;"))
-        except Exception:
-            pass
+    # buckets
+    await _run_ddl("ALTER TABLE buckets ALTER COLUMN label TYPE VARCHAR(256)")
 
-        try:
-            from sqlalchemy import text
-            await conn.execute(text("ALTER TABLE metar_obs ADD COLUMN report_at TIMESTAMP WITH TIME ZONE;"))
-        except Exception:
-            pass
+    # events
+    await _run_ddl("ALTER TABLE events ADD COLUMN forecast_quality VARCHAR(16) NOT NULL DEFAULT 'ok'")
+    await _run_ddl("ALTER TABLE events ADD COLUMN wu_scrape_error TEXT")
 
-        try:
-            from sqlalchemy import text
-            await conn.execute(text("ALTER TABLE metar_obs ADD COLUMN raw_text TEXT;"))
-        except Exception:
-            pass
-            
-        try:
-            from sqlalchemy import text
-            await conn.execute(text("ALTER TABLE buckets ALTER COLUMN label TYPE VARCHAR(256);"))
-        except Exception:
-            pass
+    # forecast_obs
+    await _run_ddl("ALTER TABLE forecast_obs ADD COLUMN raw_json TEXT")
+    await _run_ddl("ALTER TABLE forecast_obs ADD COLUMN parse_error TEXT")
+    await _run_ddl("ALTER TABLE forecast_obs ADD COLUMN raw_payload_hash VARCHAR(64)")
 
-        # Event fields
-        try:
-            from sqlalchemy import text
-            await conn.execute(text("ALTER TABLE events ADD COLUMN forecast_quality VARCHAR(16) NOT NULL DEFAULT 'ok';"))
-        except Exception:
-            pass
-        try:
-            from sqlalchemy import text
-            await conn.execute(text("ALTER TABLE events ADD COLUMN wu_scrape_error TEXT;"))
-        except Exception:
-            pass
+    # orders
+    await _run_ddl("ALTER TABLE orders ADD COLUMN signal_id INTEGER")
+    await _run_ddl("ALTER TABLE orders ADD COLUMN gates_json TEXT")
 
-        # ForecastObs fields
-        try:
-            from sqlalchemy import text
-            await conn.execute(text("ALTER TABLE forecast_obs ADD COLUMN raw_json TEXT;"))
-        except Exception:
-            pass
-        try:
-            from sqlalchemy import text
-            await conn.execute(text("ALTER TABLE forecast_obs ADD COLUMN parse_error TEXT;"))
-        except Exception:
-            pass
-        try:
-            from sqlalchemy import text
-            await conn.execute(text("ALTER TABLE forecast_obs ADD COLUMN raw_payload_hash VARCHAR(64);"))
-        except Exception:
-            pass
-
-        # Order fields
-        try:
-            from sqlalchemy import text
-            await conn.execute(text("ALTER TABLE orders ADD COLUMN signal_id INTEGER;"))
-        except Exception:
-            pass
-        try:
-            from sqlalchemy import text
-            await conn.execute(text("ALTER TABLE orders ADD COLUMN gates_json TEXT;"))
-        except Exception:
-            pass
-
+    # Step 3: seed initial data
     await _seed_initial_data()
     log.info("db: init complete")
 
