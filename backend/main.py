@@ -33,7 +33,7 @@ def _log_config_warnings() -> None:
         log.warning("config: %s", w)
 
 
-async def run_api() -> None:
+async def run_api(start_worker: bool = False) -> None:
     """Start API server (FastAPI + Uvicorn)."""
     import uvicorn
     from fastapi import FastAPI
@@ -59,6 +59,12 @@ async def run_api() -> None:
             await clob.start()
             set_clob(clob)
             log.info("api: CLOB client ready (can_trade=%s)", clob.can_trade)
+
+            if start_worker:
+                from backend.worker.scheduler import start_scheduler
+                await start_scheduler()
+                log.info("api: scheduler started in background 'all' mode")
+
         except Exception as e:
             log.exception("api: background startup failed: %s", e)
 
@@ -71,6 +77,14 @@ async def run_api() -> None:
 
     @app.on_event("shutdown")
     async def shutdown():
+        if start_worker:
+            try:
+                from backend.worker.scheduler import stop_scheduler
+                await stop_scheduler()
+                log.info("api: scheduler stopped")
+            except Exception as e:
+                log.exception("api: error stopping scheduler: %s", e)
+
         from backend.ingestion.polymarket_clob import get_clob
         clob = get_clob()
         if clob:
@@ -139,31 +153,8 @@ async def run_worker() -> None:
 
 async def run_all() -> None:
     """Start both API and Worker in the same process."""
-    from backend.storage.db import close_db, init_db
-    from backend.ingestion.polymarket_clob import CLOBClient, set_clob
-    from backend.worker.scheduler import start_scheduler, stop_scheduler
-
     log.info("starting in 'all' mode (api + worker)")
-    await init_db()
-
-    clob = CLOBClient()
-    await clob.start()
-    set_clob(clob)
-
-    # Start scheduler
-    scheduler = await start_scheduler()
-
-    # Start API in a separate task
-    api_task = asyncio.create_task(run_api())
-
-    try:
-        await api_task
-    except (KeyboardInterrupt, asyncio.CancelledError):
-        log.info("shutting down 'all' mode")
-    finally:
-        await stop_scheduler()
-        await clob.close()
-        await close_db()
+    await run_api(start_worker=True)
 
 
 def main() -> None:
