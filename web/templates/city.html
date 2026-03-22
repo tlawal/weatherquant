@@ -47,48 +47,72 @@
 <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
 
   <!-- Current Temp -->
-  <div class="card p-4 relative" x-data="{ showMeta: false }">
+  <div class="card p-4 relative" x-data="currentTemp('{{ city.slug }}', '{{ city.unit|default('F') }}', {{ 'true' if city.is_us else 'false' }})">
     <div class="flex items-center justify-between text-[10px] uppercase tracking-widest mb-2" style="color:var(--text-muted)">
       <div class="flex items-center gap-1.5">
         <span>Current Temp</span>
         <button @click="showMeta = !showMeta" @click.outside="showMeta = false"
                 class="hover:text-cyan-400 opacity-50 hover:opacity-100 transition-all">ⓘ</button>
       </div>
-      <span class="mono opacity-50">{{ metar.station }}</span>
+      <span class="mono opacity-50" x-text="data ? data.station : '...'"></span>
     </div>
     <!-- Meta Popover -->
-    <div x-show="showMeta"
+    <div x-show="showMeta" x-cloak
          x-transition:enter="transition ease-out duration-100"
          x-transition:enter-start="opacity-0 scale-95"
          x-transition:enter-end="opacity-100 scale-100"
          class="absolute right-4 top-10 w-80 p-3 rounded-xl shadow-2xl z-50 border text-[10px] normal-case tracking-tight font-medium"
-         style="background:var(--bg-card); border-color:var(--border); display: none;">
+         style="background:var(--bg-card); border-color:var(--border);">
       <div class="font-bold mb-2 pb-1 border-b" style="color:var(--cyan); border-color:var(--border)">
-        {% if city.is_us %}METAR Observation{% else %}Open-Meteo Current Weather{% endif %}
+        <span x-text="isUs ? 'METAR Observation' : 'Open-Meteo Current Weather'"></span>
       </div>
-      <div class="space-y-1.5">
-        <div class="flex justify-between"><span style="color:var(--text-muted)">Station</span><span class="mono">{{ metar.station or '—' }}</span></div>
-        <div class="flex justify-between"><span style="color:var(--text-muted)">Obs Time (UTC)</span><span class="mono text-right">{{ metar.observed_at.strftime('%Y-%m-%d %H:%M') if metar.observed_at else '—' }}</span></div>
-        <div class="flex justify-between"><span style="color:var(--text-muted)">Report Time (UTC)</span><span class="mono text-right">{{ metar.report_at.strftime('%Y-%m-%d %H:%M') if metar.report_at else '—' }}</span></div>
-        {% if metar.raw_text %}
-        <div class="mt-2 p-2 rounded bg-black/20 mono break-words leading-relaxed border border-white/5 opacity-80">{{ metar.raw_text }}</div>
-        {% endif %}
-        {% if metar.source_url %}
-        <div class="mt-2 pt-2 border-t" style="border-color:var(--border)">
-          <a href="{{ metar.source_url }}" target="_blank" rel="noopener"
-             class="flex items-center gap-1 hover:underline transition-colors"
-             style="color:var(--cyan)">
-            <span>↗ View Source API</span>
-          </a>
+      <template x-if="data">
+        <div class="space-y-1.5">
+          <div class="flex justify-between"><span style="color:var(--text-muted)">Station</span><span class="mono" x-text="data.station || '—'"></span></div>
+          <div class="flex justify-between"><span style="color:var(--text-muted)">Obs Time (UTC)</span><span class="mono text-right" x-text="data.observed_at || '—'"></span></div>
+          <div class="flex justify-between"><span style="color:var(--text-muted)">Report Time (UTC)</span><span class="mono text-right" x-text="data.report_at || '—'"></span></div>
+          <template x-if="data.raw_text">
+            <div class="mt-2 p-2 rounded bg-black/20 mono break-words leading-relaxed border border-white/5 opacity-80" x-text="data.raw_text"></div>
+          </template>
+          <template x-if="data.source_url">
+            <div class="mt-2 pt-2 border-t" style="border-color:var(--border)">
+              <a :href="data.source_url" target="_blank" rel="noopener"
+                 class="flex items-center gap-1 hover:underline transition-colors"
+                 style="color:var(--cyan)">
+                <span>↗ View Source API</span>
+              </a>
+            </div>
+          </template>
         </div>
-        {% endif %}
-      </div>
+      </template>
+      <template x-if="!data && !error">
+        <div class="opacity-50 py-2 italic flex justify-center items-center">Loading live data...</div>
+      </template>
+      <template x-if="error">
+        <div class="text-red-400 py-2 break-words" x-text="error"></div>
+      </template>
     </div>
     <div class="text-4xl font-bold mono leading-none" style="color:var(--cyan)">
-      {% if metar and metar.temp_f is not none %}{{ "%.1f"|format(metar.temp_f) }}°{{ city.unit|default('F') }}{% else %}—{% endif %}
+      <template x-if="data">
+        <span><span x-text="data.temp_f.toFixed(1)"></span>°<span x-text="unit"></span></span>
+      </template>
+      <template x-if="!data && !error">
+        <span class="opacity-50 animate-pulse">---</span>
+      </template>
+      <template x-if="error">
+        <span class="text-red-500 text-lg">Error</span>
+      </template>
     </div>
     <div class="text-xs mt-2" style="color:var(--text-muted)">
-      {% if metar and metar.age_s is not none %}{{ metar.age_s|int }}s ago · {% endif %}{% if city.is_us %}METAR{% else %}Open-Meteo{% endif %}
+      <template x-if="data">
+        <span x-text="'Live API · ' + data.source"></span>
+      </template>
+      <template x-if="!data && !error">
+        <span>Fetching live status...</span>
+      </template>
+      <template x-if="error">
+        <span class="text-red-500">Failed to load</span>
+      </template>
     </div>
   </div>
 
@@ -435,5 +459,26 @@ async function submitTrade() {
   el.textContent = JSON.stringify(result, null, 2);
   el.classList.remove('hidden');
 }
+</script>
+<script>
+document.addEventListener('alpine:init', () => {
+    Alpine.data('currentTemp', (slug, unit, isUs) => ({
+        showMeta: false,
+        data: null,
+        error: null,
+        unit: unit,
+        isUs: isUs,
+        async init() {
+            try {
+                const res = await fetch(`/api/current-temp/${slug}`);
+                if (!res.ok) throw new Error(await res.text());
+                this.data = await res.json();
+            } catch (err) {
+                this.error = "Failed to load live data.";
+                console.error(err);
+            }
+        }
+    }));
+});
 </script>
 {% endblock %}

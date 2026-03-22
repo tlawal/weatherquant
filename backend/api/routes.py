@@ -89,6 +89,110 @@ async def health():
     }
 
 
+
+# ─── Live Current Temperature (on-demand fetch) ───────────────────────────────
+
+@router.get("/api/current-temp/{city_slug}")
+async def get_current_temp(city_slug: str):
+    """Fetch live current temperature for a city on demand.
+    US cities: aviationweather.gov METAR API.
+    International cities: Open-Meteo current_weather API.
+    """
+    import aiohttp
+    from datetime import datetime, timezone
+
+    async with get_session() as sess:
+        from backend.storage.repos import get_city_by_slug
+        city = await get_city_by_slug(sess, city_slug)
+
+    if not city:
+        raise HTTPException(status_code=404, detail="City not found")
+
+    timeout = aiohttp.ClientTimeout(total=10)
+    headers = {"User-Agent": "WeatherQuant/1.0"}
+
+    try:
+        if city.is_us and city.metar_station:
+            url = f"https://aviationweather.gov/api/data/metar?ids={city.metar_station}&format=json&latest=1"
+            async with aiohttp.ClientSession(timeout=timeout, headers=headers) as http:
+                async with http.get(url) as resp:
+                    resp.raise_for_status()
+                    data = await resp.json(content_type=None)
+
+            if not data:
+                raise HTTPException(status_code=503, detail="No METAR data returned")
+
+            obs = data[0]
+            temp_c = obs.get("temp")
+            if temp_c is None:
+                raise HTTPException(status_code=503, detail="No temperature in METAR")
+
+            temp_c = float(temp_c)
+            temp_f = round(temp_c * 9 / 5 + 32, 1)
+
+            # obsTime can be epoch int or ISO string
+            obs_time_raw = obs.get("obsTime")
+            report_time_raw = obs.get("reportTime")
+
+            def _parse_time(raw):
+                if raw is None:
+                    return None
+                try:
+                    if isinstance(raw, (int, float)):
+                        return datetime.fromtimestamp(int(raw), tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                    return datetime.fromisoformat(str(raw).rstrip("Z")).strftime("%Y-%m-%d %H:%M UTC")
+                except Exception:
+                    return str(raw)
+
+            return {
+                "temp_f": temp_f,
+                "temp_c": round(temp_c, 1),
+                "observed_at": _parse_time(obs_time_raw),
+                "report_at": _parse_time(report_time_raw),
+                "station": obs.get("stationId") or city.metar_station,
+                "raw_text": obs.get("rawOb"),
+                "source": "aviationweather.gov",
+                "source_url": url,
+                "unit": city.unit or "F",
+            }
+
+        elif not city.is_us and city.lat and city.lon:
+            url = f"https://api.open-meteo.com/v1/forecast?latitude={city.lat}&longitude={city.lon}&current_weather=true"
+            async with aiohttp.ClientSession(timeout=timeout) as http:
+                async with http.get(url) as resp:
+                    resp.raise_for_status()
+                    data = await resp.json()
+
+            cw = data.get("current_weather")
+            if not cw:
+                raise HTTPException(status_code=503, detail="No current_weather in Open-Meteo response")
+
+            temp_c = float(cw.get("temperature", 0))
+            temp_display = temp_c if (city.unit or "C") == "C" else round(temp_c * 9 / 5 + 32, 1)
+            obs_time = cw.get("time", "")
+
+            return {
+                "temp_f": temp_display,
+                "temp_c": round(temp_c, 1),
+                "observed_at": obs_time,
+                "report_at": obs_time,
+                "station": city.metar_station or "OM",
+                "raw_text": None,
+                "source": "open-meteo.com",
+                "source_url": url,
+                "unit": city.unit or "C",
+            }
+
+        else:
+            raise HTTPException(status_code=400, detail="City has no METAR station or coordinates")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.warning("current-temp: fetch failed for %s: %s", city_slug, e)
+        raise HTTPException(status_code=503, detail=f"Fetch failed: {e}")
+
+
 # ─── Cities ───────────────────────────────────────────────────────────────────
 
 @router.get("/cities")
