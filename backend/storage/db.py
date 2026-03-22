@@ -82,15 +82,78 @@ async def init_db() -> None:
         try:
             from sqlalchemy import text
             await conn.execute(text("ALTER TABLE cities ADD COLUMN unit VARCHAR(1) NOT NULL DEFAULT 'F';"))
-        except Exception as e:
-            # Expected if column already exists
+        except Exception:
+            pass
+
+        try:
+            from sqlalchemy import text
+            await conn.execute(text("ALTER TABLE cities ADD COLUMN lat FLOAT;"))
+        except Exception:
+            pass
+
+        try:
+            from sqlalchemy import text
+            await conn.execute(text("ALTER TABLE cities ADD COLUMN lon FLOAT;"))
+        except Exception:
+            pass
+
+        try:
+            from sqlalchemy import text
+            await conn.execute(text("ALTER TABLE metar_obs ADD COLUMN report_at TIMESTAMP WITH TIME ZONE;"))
+        except Exception:
+            pass
+
+        try:
+            from sqlalchemy import text
+            await conn.execute(text("ALTER TABLE metar_obs ADD COLUMN raw_text TEXT;"))
+        except Exception:
             pass
             
         try:
             from sqlalchemy import text
-            # Postgres syntax to expand column length. SQLite will fail but it's safe to ignore.
             await conn.execute(text("ALTER TABLE buckets ALTER COLUMN label TYPE VARCHAR(256);"))
-        except Exception as e:
+        except Exception:
+            pass
+
+        # Event fields
+        try:
+            from sqlalchemy import text
+            await conn.execute(text("ALTER TABLE events ADD COLUMN forecast_quality VARCHAR(16) NOT NULL DEFAULT 'ok';"))
+        except Exception:
+            pass
+        try:
+            from sqlalchemy import text
+            await conn.execute(text("ALTER TABLE events ADD COLUMN wu_scrape_error TEXT;"))
+        except Exception:
+            pass
+
+        # ForecastObs fields
+        try:
+            from sqlalchemy import text
+            await conn.execute(text("ALTER TABLE forecast_obs ADD COLUMN raw_json TEXT;"))
+        except Exception:
+            pass
+        try:
+            from sqlalchemy import text
+            await conn.execute(text("ALTER TABLE forecast_obs ADD COLUMN parse_error TEXT;"))
+        except Exception:
+            pass
+        try:
+            from sqlalchemy import text
+            await conn.execute(text("ALTER TABLE forecast_obs ADD COLUMN raw_payload_hash VARCHAR(64);"))
+        except Exception:
+            pass
+
+        # Order fields
+        try:
+            from sqlalchemy import text
+            await conn.execute(text("ALTER TABLE orders ADD COLUMN signal_id INTEGER;"))
+        except Exception:
+            pass
+        try:
+            from sqlalchemy import text
+            await conn.execute(text("ALTER TABLE orders ADD COLUMN gates_json TEXT;"))
+        except Exception:
             pass
 
     await _seed_initial_data()
