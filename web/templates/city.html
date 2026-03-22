@@ -47,7 +47,7 @@
 <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
 
   <!-- Current Temp -->
-  <div class="card p-4 relative" x-data="currentTemp('{{ city.slug }}', '{{ city.unit|default('F') }}', {{ 'true' if city.is_us else 'false' }})">
+  <div class="card p-4 relative" x-data="currentTemp('{{ city.city_slug }}', '{{ city.unit|default('F') }}', {{ 'true' if city.is_us else 'false' }})">
     <div class="flex items-center justify-between text-[10px] uppercase tracking-widest mb-2" style="color:var(--text-muted)">
       <div class="flex items-center gap-1.5">
         <span>Current Temp</span>

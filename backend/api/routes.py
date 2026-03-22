@@ -113,50 +113,53 @@ async def get_current_temp(city_slug: str):
 
     try:
         if city.is_us and city.metar_station:
-            url = f"https://aviationweather.gov/api/data/metar?ids={city.metar_station}&format=json&latest=1"
-            async with aiohttp.ClientSession(timeout=timeout, headers=headers) as http:
-                async with http.get(url) as resp:
-                    resp.raise_for_status()
-                    data = await resp.json(content_type=None)
+            try:
+                url = f"https://aviationweather.gov/api/data/metar?ids={city.metar_station}&format=json&latest=1"
+                async with aiohttp.ClientSession(timeout=timeout, headers=headers) as http:
+                    async with http.get(url) as resp:
+                        resp.raise_for_status()
+                        data = await resp.json(content_type=None)
 
-            if not data:
-                raise HTTPException(status_code=503, detail="No METAR data returned")
+                if not data:
+                    raise ValueError("No METAR data returned")
 
-            obs = data[0]
-            temp_c = obs.get("temp")
-            if temp_c is None:
-                raise HTTPException(status_code=503, detail="No temperature in METAR")
+                obs = data[0]
+                temp_c = obs.get("temp")
+                if temp_c is None:
+                    raise ValueError("No temperature in METAR")
 
-            temp_c = float(temp_c)
-            temp_f = round(temp_c * 9 / 5 + 32, 1)
+                temp_c = float(temp_c)
+                temp_f = round(temp_c * 9 / 5 + 32, 1)
 
-            # obsTime can be epoch int or ISO string
-            obs_time_raw = obs.get("obsTime")
-            report_time_raw = obs.get("reportTime")
+                obs_time_raw = obs.get("obsTime")
+                report_time_raw = obs.get("reportTime")
 
-            def _parse_time(raw):
-                if raw is None:
-                    return None
-                try:
-                    if isinstance(raw, (int, float)):
-                        return datetime.fromtimestamp(int(raw), tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-                    return datetime.fromisoformat(str(raw).rstrip("Z")).strftime("%Y-%m-%d %H:%M UTC")
-                except Exception:
-                    return str(raw)
+                def _parse_time(raw):
+                    if raw is None:
+                        return None
+                    try:
+                        if isinstance(raw, (int, float)):
+                            return datetime.fromtimestamp(int(raw), tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                        return datetime.fromisoformat(str(raw).rstrip("Z")).strftime("%Y-%m-%d %H:%M UTC")
+                    except Exception:
+                        return str(raw)
 
-            return {
-                "temp_f": temp_f,
-                "temp_c": round(temp_c, 1),
-                "observed_at": _parse_time(obs_time_raw),
-                "report_at": _parse_time(report_time_raw),
-                "station": obs.get("stationId") or city.metar_station,
-                "raw_text": obs.get("rawOb"),
-                "source": "aviationweather.gov",
-                "source_url": url,
-                "unit": city.unit or "F",
-            }
+                return {
+                    "temp_f": temp_f,
+                    "temp_c": round(temp_c, 1),
+                    "observed_at": _parse_time(obs_time_raw),
+                    "report_at": _parse_time(report_time_raw),
+                    "station": obs.get("stationId") or city.metar_station,
+                    "raw_text": obs.get("rawOb"),
+                    "source": "aviationweather.gov",
+                    "source_url": url,
+                    "unit": city.unit or "F",
+                }
+            except Exception as metar_err:
+                log.warning("METAR fetch failed for %s, falling back to Open-Meteo: %s", city_slug, metar_err)
+                # Fall through to Open-Meteo logic below
 
-        elif not city.is_us and city.lat and city.lon:
+        if city.lat and city.lon:
             url = f"https://api.open-meteo.com/v1/forecast?latitude={city.lat}&longitude={city.lon}&current_weather=true"
             async with aiohttp.ClientSession(timeout=timeout) as http:
                 async with http.get(url) as resp:
@@ -178,9 +181,9 @@ async def get_current_temp(city_slug: str):
                 "report_at": obs_time,
                 "station": city.metar_station or "OM",
                 "raw_text": None,
-                "source": "open-meteo.com",
+                "source": "open-meteo.com (fallback)" if city.is_us else "open-meteo.com",
                 "source_url": url,
-                "unit": city.unit or "C",
+                "unit": city.unit or ("F" if city.is_us else "C"),
             }
 
         else:
