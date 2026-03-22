@@ -288,8 +288,8 @@ async def fetch_wu_all() -> None:
 
 async def _scrape_wu_city(city: City, date_et: str) -> None:
     daily_high = await _scrape_wu_daily(city)
-    hourly_peak = await _scrape_wu_hourly(city)
-    history_high = await _fetch_wu_history_api(city, date_et)
+    hourly_peak, peak_hour = await _fetch_wu_hourly_api(city)
+    history_high, obs_time = await _fetch_wu_history_api(city, date_et)
 
     wu_ok = daily_high is not None or hourly_peak is not None or history_high is not None
     parse_err = None if wu_ok else "all_wu_sources_failed"
@@ -309,7 +309,7 @@ async def _scrape_wu_city(city: City, date_et: str) -> None:
             )
 
         if hourly_peak is not None or True:
-            raw = json.dumps({"high_f": hourly_peak, "source": "wu_hourly"})
+            raw = json.dumps({"high_f": hourly_peak, "peak_hour": peak_hour, "source": "wu_hourly"})
             await insert_forecast_obs(
                 sess,
                 city_id=city.id,
@@ -322,7 +322,7 @@ async def _scrape_wu_city(city: City, date_et: str) -> None:
             )
 
         if history_high is not None or True:
-            raw = json.dumps({"high_f": history_high, "source": "wu_history"})
+            raw = json.dumps({"high_f": history_high, "obs_time": obs_time, "source": "wu_history"})
             await insert_forecast_obs(
                 sess,
                 city_id=city.id,
@@ -403,37 +403,66 @@ async def _scrape_wu_daily(city: City) -> Optional[float]:
     return None
 
 
-async def _scrape_wu_hourly(city: City) -> Optional[float]:
-    """Scrape WU hourly page and return max hourly temp for the day."""
-    url = _wu_hourly_url(city)
-    html = await _fetch_html(url)
-    if not html:
-        return None
+async def _fetch_wu_hourly_api(city: City) -> tuple[Optional[float], Optional[str]]:
+    """Fetch WU hourly forecast via weather.com v1 API, returning (max_temp_f, peak_hour_et_str).
 
-    soup = BeautifulSoup(html, "lxml")
+    Uses the same v1 API pattern as wu_history to avoid HTML-scraping accuracy issues
+    (the HTML page mixes actual temp and feels-like temp columns, causing off-by-1 errors).
+    Filters to today's ET hours only so tomorrow's highs don't inflate the result.
+    """
+    country = "US"
+    if not getattr(city, "is_us", True):
+        country = (getattr(city, "wu_state", "") or "GB").upper()
+    units = "m" if getattr(city, "unit", "F") == "C" else "e"
 
-    temps: list[float] = []
+    url = (
+        f"https://api.weather.com/v1/location/{city.metar_station}:9:{country}"
+        f"/forecast/hourly/48hour.json"
+        f"?apiKey=e1f10a1e78da46f5b10a1e78da96f525&units={units}"
+    )
 
-    # Primary: table rows with hourly temps
-    for row in soup.find_all("tr"):
-        cells = row.find_all(["td", "th"])
-        for cell in cells:
-            t = _extract_temp_from_element(cell)
-            if t and 20 <= t <= 130:
-                temps.append(t)
+    today_et = date.today().isoformat()  # YYYY-MM-DD
 
-    if not temps:
-        # Fallback: all temperature-looking spans
-        for el in soup.find_all(["span", "div"], string=re.compile(r"^\s*\d{2,3}\s*°?\s*$")):
-            t = _extract_temp_from_element(el)
-            if t and 20 <= t <= 130:
-                temps.append(t)
+    for attempt in range(3):
+        try:
+            async with aiohttp.ClientSession(timeout=_TIMEOUT, headers=_WU_HEADERS) as http:
+                async with http.get(url) as resp:
+                    if resp.status == 200:
+                        data = await resp.json(content_type=None)
+                        forecasts = data.get("forecasts", [])
 
-    if not temps:
-        log.warning("wu_hourly: %s — no temps found", city.city_slug)
-        return None
+                        # Filter to today's ET hours only
+                        today_forecasts = [
+                            f for f in forecasts
+                            if f.get("fcst_valid_local", "")[:10] == today_et
+                            and f.get("temp") is not None
+                        ]
 
-    return max(temps)
+                        if today_forecasts:
+                            best = max(today_forecasts, key=lambda f: f["temp"])
+                            high_f = float(best["temp"])
+                            peak_hour_str = None
+                            local_dt_str = best.get("fcst_valid_local", "")
+                            if local_dt_str:
+                                try:
+                                    dt_et = datetime.fromisoformat(local_dt_str).astimezone(ET)
+                                    peak_hour_str = dt_et.strftime("%-I:%M %p ET")
+                                except Exception:
+                                    pass
+                            return high_f, peak_hour_str
+                        log.warning("wu_hourly_api: %s — no today forecasts in response", city.city_slug)
+                        return None, None
+                    elif resp.status == 404:
+                        log.warning("wu_hourly_api: %s — 404", city.city_slug)
+                        return None, None
+                    else:
+                        log.warning("wu_hourly_api: HTTP %d for %s", resp.status, city.city_slug)
+        except Exception as e:
+            log.warning("wu_hourly_api: failed for %s (attempt %d/3): %s", city.city_slug, attempt + 1, e)
+            if attempt < 2:
+                await asyncio.sleep(2)
+
+    return None, None
 
 
 def _extract_temp_from_element(el) -> Optional[float]:
@@ -479,8 +508,12 @@ async def _fetch_html(url: str, retries: int = 3) -> Optional[str]:
     return None
 
 
-async def _fetch_wu_history_api(city: City, date_et: str) -> Optional[float]:
-    """Fetch WU actual historical observations using the internal API to resolve settlement ground truth."""
+async def _fetch_wu_history_api(city: City, date_et: str) -> tuple[Optional[float], Optional[str]]:
+    """Fetch WU actual historical observations, returning (max_temp_f, obs_time_et_str).
+
+    obs_time_et_str is the ET local time when the max temperature was observed,
+    e.g. "1:52 PM ET", derived from valid_time_gmt on the peak observation.
+    """
     url = _wu_history_url(city, date_et)
     for attempt in range(3):
         try:
@@ -489,12 +522,22 @@ async def _fetch_wu_history_api(city: City, date_et: str) -> Optional[float]:
                     if resp.status == 200:
                         data = await resp.json(content_type=None)
                         obs = data.get("observations", [])
-                        temps = [o.get("temp") for o in obs if o.get("temp") is not None]
-                        if temps:
-                            return float(max(temps))
+                        valid_obs = [o for o in obs if o.get("temp") is not None]
+                        if valid_obs:
+                            best = max(valid_obs, key=lambda o: o["temp"])
+                            high_f = float(best["temp"])
+                            obs_time_str = None
+                            gmt = best.get("valid_time_gmt")
+                            if gmt:
+                                try:
+                                    dt_et = datetime.fromtimestamp(int(gmt), tz=ET)
+                                    obs_time_str = dt_et.strftime("%-I:%M %p ET")
+                                except Exception:
+                                    pass
+                            return high_f, obs_time_str
                     elif resp.status == 404:
-                        return None
+                        return None, None
         except Exception as e:
             log.warning("wu_history: fetch failed for %s: %s", city.city_slug, e)
             await asyncio.sleep(2)
-    return None
+    return None, None

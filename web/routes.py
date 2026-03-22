@@ -215,6 +215,16 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
             dt = dt.replace(tzinfo=timezone.utc)
         return round((datetime.now(timezone.utc) - dt).total_seconds(), 0)
 
+    def _fmt_time_et(dt) -> str | None:
+        if not dt:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(et_tz).strftime("%-I:%M %p ET")
+
+    wu_history_raw = json.loads(wu_history.raw_json) if (wu_history and wu_history.raw_json) else {}
+    wu_hourly_raw = json.loads(wu_h.raw_json) if (wu_h and wu_h.raw_json) else {}
+
     return templates.TemplateResponse(
         "city.html",
         {
@@ -251,14 +261,18 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                     "url": f"https://www.wunderground.com/weather/{city.metar_station}" if city.metar_station else None
                 },
                 "wu_hourly": {
-                    "high_f": wu_h.high_f if wu_h else None, 
+                    "high_f": wu_h.high_f if wu_h else None,
                     "age_s": _age(wu_h.fetched_at if wu_h else None),
-                    "url": f"https://www.wunderground.com/hourly/{city.metar_station}" if city.metar_station else None
+                    "url": f"https://www.wunderground.com/hourly/{city.metar_station}" if city.metar_station else None,
+                    "peak_hour": wu_hourly_raw.get("peak_hour"),
+                    "collected_at": _fmt_time_et(wu_h.fetched_at if wu_h else None),
                 },
                 "wu_history": {
-                    "high_f": wu_history.high_f if wu_history else None, 
+                    "high_f": wu_history.high_f if wu_history else None,
                     "age_s": _age(wu_history.fetched_at if wu_history else None),
-                    "url": f"https://www.wunderground.com/history/daily/{city.metar_station}/date/{target_date_et}" if city.metar_station else None
+                    "url": f"https://www.wunderground.com/history/daily/{city.metar_station}/date/{target_date_et}" if city.metar_station else None,
+                    "obs_time": wu_history_raw.get("obs_time"),
+                    "collected_at": _fmt_time_et(wu_history.fetched_at if wu_history else None),
                 },
             },
             "event": event,

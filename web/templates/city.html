@@ -152,6 +152,12 @@
           <span class="text-yellow-400">Pending</span>
           {% endif %}
         </div>
+        {% if forecasts.wu_history.obs_time %}
+        <div class="flex justify-between"><span style="color:var(--text-muted)">High Observed</span><span class="mono">{{ forecasts.wu_history.obs_time }}</span></div>
+        {% endif %}
+        {% if forecasts.wu_history.collected_at %}
+        <div class="flex justify-between"><span style="color:var(--text-muted)">Data Collected</span><span class="mono">{{ forecasts.wu_history.collected_at }}</span></div>
+        {% endif %}
         {% if forecasts.wu_history.url %}
         <div class="mt-2 pt-2 border-t" style="border-color:var(--border)">
           <a href="{{ forecasts.wu_history.url }}" target="_blank" rel="noopener"
@@ -266,8 +272,16 @@
              style="background:var(--bg-panel); border-color:var(--border);">
              <div class="font-bold mb-1 pb-1 border-b w-full" style="color:var(--cyan); border-color:var(--border)">Weather Underground Hourly Max</div>
              <p class="opacity-80 mb-2 mt-1 italic text-[9px]">The highest individual hour's projection from the WU 24-hour model. Crucial for afternoon temperature spikes.</p>
+             <div class="space-y-1 w-full text-[10px]">
+               {% if forecasts.wu_hourly.peak_hour %}
+               <div class="flex justify-between w-full"><span style="color:var(--text-muted)">Peak Hour</span><span class="mono">{{ forecasts.wu_hourly.peak_hour }}</span></div>
+               {% endif %}
+               {% if forecasts.wu_hourly.collected_at %}
+               <div class="flex justify-between w-full"><span style="color:var(--text-muted)">Data Collected</span><span class="mono">{{ forecasts.wu_hourly.collected_at }}</span></div>
+               {% endif %}
+             </div>
              {% if forecasts.wu_hourly.url %}
-             <a href="{{ forecasts.wu_hourly.url }}" target="_blank" rel="noopener" class="text-[10px] flex items-center gap-1 hover:underline transition-colors" style="color:var(--cyan)">↗ View WU Hourly Chart</a>
+             <a href="{{ forecasts.wu_hourly.url }}" target="_blank" rel="noopener" class="text-[10px] flex items-center gap-1 hover:underline transition-colors mt-2" style="color:var(--cyan)">↗ View WU Hourly Chart</a>
              {% endif %}
         </div>
       </div>
