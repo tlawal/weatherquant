@@ -160,31 +160,75 @@ async def get_current_temp(city_slug: str):
                 # Fall through to Open-Meteo logic below
 
         if city.lat and city.lon:
-            url = f"https://api.open-meteo.com/v1/forecast?latitude={city.lat}&longitude={city.lon}&current_weather=true"
-            async with aiohttp.ClientSession(timeout=timeout) as http:
-                async with http.get(url) as resp:
-                    resp.raise_for_status()
-                    data = await resp.json()
+            try:
+                url = f"https://api.open-meteo.com/v1/forecast?latitude={city.lat}&longitude={city.lon}&current_weather=true"
+                async with aiohttp.ClientSession(timeout=timeout) as http:
+                    async with http.get(url) as resp:
+                        if resp.status == 429:
+                            raise ValueError("Open-Meteo Rate Limited (429)")
+                        resp.raise_for_status()
+                        data = await resp.json()
 
-            cw = data.get("current_weather")
-            if not cw:
-                raise HTTPException(status_code=503, detail="No current_weather in Open-Meteo response")
+                cw = data.get("current_weather")
+                if not cw:
+                    raise HTTPException(status_code=503, detail="No current_weather in Open-Meteo response")
 
-            temp_c = float(cw.get("temperature", 0))
-            temp_display = temp_c if (city.unit or "C") == "C" else round(temp_c * 9 / 5 + 32, 1)
-            obs_time = cw.get("time", "")
+                temp_c = float(cw.get("temperature", 0))
+                temp_display = temp_c if (city.unit or "C") == "C" else round(temp_c * 9 / 5 + 32, 1)
+                obs_time = cw.get("time", "")
 
-            return {
-                "temp_f": temp_display,
-                "temp_c": round(temp_c, 1),
-                "observed_at": obs_time,
-                "report_at": obs_time,
-                "station": city.metar_station or "OM",
-                "raw_text": None,
-                "source": "open-meteo.com (fallback)" if city.is_us else "open-meteo.com",
-                "source_url": url,
-                "unit": city.unit or ("F" if city.is_us else "C"),
-            }
+                return {
+                    "temp_f": temp_display,
+                    "temp_c": round(temp_c, 1),
+                    "observed_at": obs_time,
+                    "report_at": obs_time,
+                    "station": city.metar_station or "OM",
+                    "raw_text": None,
+                    "source": "open-meteo.com (fallback)" if city.is_us else "open-meteo.com",
+                    "source_url": url,
+                    "unit": city.unit or ("F" if city.is_us else "C"),
+                }
+            except Exception as om_err:
+                log.warning("Open-Meteo fetch failed for %s, falling back to OpenWeatherMap: %s", city_slug, om_err)
+
+                owm_url = f"https://api.openweathermap.org/data/2.5/weather?lat={city.lat}&lon={city.lon}&appid=de79374f3007b36700415b6679d810b1&units=metric"
+                async with aiohttp.ClientSession(timeout=timeout) as http:
+                    async with http.get(owm_url) as resp:
+                        if resp.status == 429:
+                            return {
+                                "temp_f": None,
+                                "temp_c": None,
+                                "observed_at": None,
+                                "report_at": None,
+                                "station": "Rate Limited",
+                                "raw_text": "Both Open-Meteo and OpenWeather APIs Rate Limited (HTTP 429)",
+                                "source": "API Fallbacks",
+                                "source_url": owm_url,
+                                "unit": city.unit or ("F" if city.is_us else "C"),
+                            }
+                        resp.raise_for_status()
+                        data = await resp.json()
+
+                temp_c = float(data.get("main", {}).get("temp", 0))
+                temp_display = temp_c if (city.unit or "C") == "C" else round(temp_c * 9 / 5 + 32, 1)
+                
+                obs_time_unix = data.get("dt")
+                if obs_time_unix:
+                    obs_time = datetime.fromtimestamp(obs_time_unix, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                else:
+                    obs_time = ""
+
+                return {
+                    "temp_f": temp_display,
+                    "temp_c": round(temp_c, 1),
+                    "observed_at": obs_time,
+                    "report_at": obs_time,
+                    "station": data.get("name", "OWM"),
+                    "raw_text": None,
+                    "source": "openweathermap.org (fallback)",
+                    "source_url": owm_url,
+                    "unit": city.unit or ("F" if city.is_us else "C"),
+                }
 
         else:
             raise HTTPException(status_code=400, detail="City has no METAR station or coordinates")

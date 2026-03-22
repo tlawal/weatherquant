@@ -94,7 +94,14 @@
     </div>
     <div class="text-4xl font-bold mono leading-none" style="color:var(--cyan)">
       <template x-if="data">
-        <span><span x-text="data.temp_f.toFixed(1)"></span>°<span x-text="unit"></span></span>
+        <span>
+          <template x-if="data.temp_f !== null">
+            <span><span x-text="data.temp_f.toFixed(1)"></span>°<span x-text="unit"></span></span>
+          </template>
+          <template x-if="data.temp_f === null">
+            <span class="text-2xl text-red-500 uppercase tracking-widest font-extrabold pb-1">Rate Limited</span>
+          </template>
+        </span>
       </template>
       <template x-if="!data && !error">
         <span class="opacity-50 animate-pulse">---</span>

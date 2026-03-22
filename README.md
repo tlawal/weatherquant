@@ -60,3 +60,9 @@ Official real-time temperature observations (ground truth).
 
 ### National Weather Service (NWS)
 Baseline gridpoint forecasts from `api.weather.gov`.
+
+### Open-Meteo & OpenWeatherMap (International Fallbacks)
+Provides global current weather and forecast models used entirely for non-US markets.
+- **Open-Meteo Documentation:** [https://open-meteo.com/en/docs](https://open-meteo.com/en/docs?daily=temperature_2m_max&latitude=33.641&longitude=-84.4227&timezone=America%2FNew_York&forecast_days=1&temperature_unit=fahrenheit)
+ *(Helpful to pull `temperature_2m_max` from `daily` parameter endpoints)*
+- **OpenWeatherMap Backup**: Used dynamically when the primary Open-Meteo endpoint enforces rate limits on Railway's shared IPs.
