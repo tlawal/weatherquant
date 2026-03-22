@@ -174,6 +174,15 @@ def compute_model(
             current_projected = current_temp_f + remaining_rise
             projected_high = max(projected_high, current_projected)
 
+    # After 5 PM ET with declining temps, cap projected_high —
+    # no meaningful temperature rises expected after sunset.
+    if hour_et >= 17 and daily_high_metar is not None:
+        projected_ceiling = max(
+            daily_high_metar,
+            (current_temp_f or daily_high_metar) + 1.0,
+        )
+        projected_high = min(projected_high, projected_ceiling)
+
     # Weighted combination
     mu_final = (1.0 - w_metar) * mu_forecast + w_metar * projected_high
 

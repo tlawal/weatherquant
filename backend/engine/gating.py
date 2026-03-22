@@ -19,6 +19,7 @@ from backend.storage.models import Event
 from backend.storage.repos import (
     get_all_positions,
     get_arming_state,
+    get_daily_high_metar,
     get_daily_realized_pnl,
     get_event,
     get_latest_forecast,
@@ -148,6 +149,18 @@ async def run_all_gates(
             f"GATE_MAX_POSITIONS: total open positions={len(all_positions)} "
             f"excessive, review required"
         )
+
+    # ── Gate: Already-surpassed bracket ─────────────────────────────────────
+    # If METAR daily high already exceeds this bucket's ceiling, the bracket
+    # is impossible — the final high will be at least as high as what's observed.
+    if signal.high_f is not None:
+        async with get_session() as sess:
+            obs_high = await get_daily_high_metar(sess, city_id, today_et)
+        if obs_high is not None and obs_high >= signal.high_f:
+            failures.append(
+                f"GATE_BRACKET_SURPASSED: observed high {obs_high:.1f} "
+                f"already exceeds bucket ceiling {signal.high_f:.1f}"
+            )
 
     if failures:
         log.warning(

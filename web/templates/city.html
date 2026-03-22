@@ -309,12 +309,34 @@
             {% if model.inputs.projected_high %}{{ "%.1f"|format(model.inputs.projected_high) }}°{{ city.unit|default('F') }}{% else %}—{% endif %}
           </div>
         </div>
-        <div class="panel rounded p-2">
+        <div class="panel rounded p-2 relative" x-data="{ showMeta: false }">
           <div class="flex items-center justify-between">
-            <span style="color:var(--text-muted)">METAR Weight</span>
-            <span title="Dynamic weighting between forecast inputs and live METAR. Increases as day progresses." style="cursor:help;color:var(--cyan);font-size:10px;opacity:0.5">ⓘ</span>
+            <div class="flex items-center gap-1">
+              <span style="color:var(--text-muted)">METAR Weight</span>
+              <button @click="showMeta = !showMeta" @click.outside="showMeta = false"
+                      class="hover:text-cyan-400 opacity-50 hover:opacity-100 transition-all text-[10px]">ⓘ</button>
+            </div>
+            <span class="mono font-semibold">{{ "%.0f"|format((model.inputs.w_metar|default(0)) * 100) }}%</span>
           </div>
-          <div class="mono font-semibold">{{ "%.0f"|format((model.inputs.w_metar|default(0)) * 100) }}%</div>
+          <!-- Meta Popover -->
+          <div x-show="showMeta" x-cloak
+               x-transition:enter="transition ease-out duration-100"
+               x-transition:enter-start="opacity-0 scale-95"
+               x-transition:enter-end="opacity-100 scale-100"
+               class="absolute right-0 top-8 w-72 p-3 rounded-xl shadow-2xl z-50 border text-[10px] normal-case tracking-tight font-medium"
+               style="background:var(--bg-card); border-color:var(--border);">
+            <div class="font-bold mb-2 pb-1 border-b" style="color:var(--cyan); border-color:var(--border)">
+              METAR Observation Weight
+            </div>
+            <div class="space-y-1.5">
+              <div class="opacity-80 py-1 italic mb-2">Dynamic blend between forecast sources (NWS, WU) and live METAR observations. Early AM: forecasts dominate (~0%). By evening: METAR dominates (~80%).</div>
+              <div class="flex justify-between"><span style="color:var(--text-muted)">Current Hour (ET)</span><span class="mono">{{ now_hour_et }}:00</span></div>
+              <div class="flex justify-between"><span style="color:var(--text-muted)">Weight</span><span class="mono">{{ "%.0f"|format((model.inputs.w_metar|default(0)) * 100) }}%</span></div>
+              <div class="mt-2 pt-2 border-t opacity-70" style="border-color:var(--border)">
+                As the day progresses, the observed temperature becomes more reliable than model forecasts for predicting the final daily high.
+              </div>
+            </div>
+          </div>
         </div>
         <div class="panel rounded p-2">
           <div style="color:var(--text-muted)">Forecast Spread</div>
@@ -361,9 +383,11 @@
         </thead>
         <tbody>
           {% for b in buckets %}
+          {% set surpassed = b.high_f is not none and obs_high_f is not none and obs_high_f >= b.high_f %}
           <tr class="border-b hover:bg-white/5 transition-colors
-            {% if b.actionable %}edge-hot{% elif b.ev and b.ev >= 0.10 %}edge-warm{% else %}edge-cold{% endif %}"
-            style="border-color:rgba(26,58,107,0.4)">
+            {% if surpassed %}opacity-30 line-through{% elif b.actionable %}edge-hot{% elif b.ev and b.ev >= 0.10 %}edge-warm{% else %}edge-cold{% endif %}"
+            style="border-color:rgba(26,58,107,0.4)"
+            {% if surpassed %}title="Surpassed: observed high {{ '%.1f'|format(obs_high_f) }}° ≥ bucket ceiling {{ '%.1f'|format(b.high_f) }}°"{% endif %}>
             <td class="px-3 py-2.5 mono font-medium text-xs">
               {% if b.low_f is not none and b.high_f is not none %}
                 {{ b.low_f|int }}–{{ b.high_f|int }}°

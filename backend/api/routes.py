@@ -160,10 +160,22 @@ async def get_current_temp(city_slug: str):
                     "unit": city.unit or "F",
                 }
             except Exception as metar_err:
-                log.warning("METAR fetch failed for %s, falling back to Open-Meteo: %s", city_slug, metar_err)
-                # Fall through to Open-Meteo logic below
+                log.error("METAR fetch failed for US city %s: %s", city_slug, metar_err)
+                # US cities: METAR is the ONLY source. No fallback to Open-Meteo/OWM
+                # which can be 1-2°F off — enough to cause bracket misclassification.
+                return {
+                    "temp_f": None,
+                    "temp_c": None,
+                    "observed_at": None,
+                    "report_at": None,
+                    "station": city.metar_station,
+                    "raw_text": f"METAR unavailable: {metar_err}",
+                    "source": "aviationweather.gov (retrying)",
+                    "source_url": url,
+                    "unit": "F",
+                }
 
-        if city.lat and city.lon:
+        if not city.is_us and city.lat and city.lon:
             try:
                 url = f"https://api.open-meteo.com/v1/forecast?latitude={city.lat}&longitude={city.lon}&current_weather=true"
                 async with aiohttp.ClientSession(timeout=timeout) as http:
@@ -188,7 +200,7 @@ async def get_current_temp(city_slug: str):
                     "report_at": obs_time,
                     "station": city.metar_station or "OM",
                     "raw_text": None,
-                    "source": "open-meteo.com (fallback)" if city.is_us else "open-meteo.com",
+                    "source": "open-meteo.com",
                     "source_url": url,
                     "unit": city.unit or ("F" if city.is_us else "C"),
                 }

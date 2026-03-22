@@ -282,6 +282,7 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                 "probs_json": probs_json,
                 "inputs": model_inputs,
             } if model else None,
+            "now_hour_et": now_et.hour,
             "buckets": buckets_with_signals,
             "reliability_json": json.dumps([
                 {"expected": b.expected_prob, "observed": b.observed_prob, "count": b.count}

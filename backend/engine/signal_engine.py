@@ -193,6 +193,12 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
 
         model_prob = model.probs[i]
 
+        # If METAR high already exceeds this bucket's ceiling, probability is 0
+        # (the final daily high can only go up, never down)
+        if ground_truth_high is not None and bucket.high_f is not None:
+            if ground_truth_high >= bucket.high_f:
+                model_prob = 0.0
+
         # Get latest market snapshot
         async with get_session() as sess:
             mkt_snap = await get_latest_market_snapshot(sess, bucket.id)
