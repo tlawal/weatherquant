@@ -61,15 +61,26 @@
          x-transition:enter="transition ease-out duration-100"
          x-transition:enter-start="opacity-0 scale-95"
          x-transition:enter-end="opacity-100 scale-100"
-         class="absolute right-4 top-10 w-72 p-3 rounded-xl shadow-2xl z-50 border text-[10px] normal-case tracking-tight font-medium"
+         class="absolute right-4 top-10 w-80 p-3 rounded-xl shadow-2xl z-50 border text-[10px] normal-case tracking-tight font-medium"
          style="background:var(--bg-card); border-color:var(--border); display: none;">
-      <div class="font-bold mb-2 pb-1 border-b" style="color:var(--cyan); border-color:var(--border)">Technical Observation</div>
+      <div class="font-bold mb-2 pb-1 border-b" style="color:var(--cyan); border-color:var(--border)">
+        {% if city.is_us %}METAR Observation{% else %}Open-Meteo Current Weather{% endif %}
+      </div>
       <div class="space-y-1.5">
-        <div class="flex justify-between"><span style="color:var(--text-muted)">Source</span><span class="mono">{{ metar.station }}</span></div>
-        <div class="flex justify-between"><span style="color:var(--text-muted)">Observed (UTC)</span><span class="mono">{{ metar.observed_at }}</span></div>
-        <div class="flex justify-between"><span style="color:var(--text-muted)">Reported (UTC)</span><span class="mono">{{ metar.report_at }}</span></div>
+        <div class="flex justify-between"><span style="color:var(--text-muted)">Station</span><span class="mono">{{ metar.station or '—' }}</span></div>
+        <div class="flex justify-between"><span style="color:var(--text-muted)">Obs Time (UTC)</span><span class="mono text-right">{{ metar.observed_at.strftime('%Y-%m-%d %H:%M') if metar.observed_at else '—' }}</span></div>
+        <div class="flex justify-between"><span style="color:var(--text-muted)">Report Time (UTC)</span><span class="mono text-right">{{ metar.report_at.strftime('%Y-%m-%d %H:%M') if metar.report_at else '—' }}</span></div>
         {% if metar.raw_text %}
         <div class="mt-2 p-2 rounded bg-black/20 mono break-words leading-relaxed border border-white/5 opacity-80">{{ metar.raw_text }}</div>
+        {% endif %}
+        {% if metar.source_url %}
+        <div class="mt-2 pt-2 border-t" style="border-color:var(--border)">
+          <a href="{{ metar.source_url }}" target="_blank" rel="noopener"
+             class="flex items-center gap-1 hover:underline transition-colors"
+             style="color:var(--cyan)">
+            <span>↗ View Source API</span>
+          </a>
+        </div>
         {% endif %}
       </div>
     </div>

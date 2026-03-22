@@ -226,12 +226,17 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
             "obs_high_f": obs_high_f,
             "metar": {
                 "temp_f": metar.temp_f if (metar and target_date_et == real_today_et) else None,
-                "daily_high_f": obs_high_f, # Use the actual high for that date
+                "daily_high_f": obs_high_f,
                 "observed_at": metar.observed_at if (metar and target_date_et == real_today_et) else None,
                 "report_at": metar.report_at if (metar and target_date_et == real_today_et) else None,
                 "station": metar.metar_station if metar else None,
                 "raw_text": metar.raw_text if (metar and target_date_et == real_today_et) else None,
-                "age_s": _age(metar.fetched_at if (metar and target_date_et == real_today_et) else None),
+                "age_s": _age(metar.observed_at if (metar and target_date_et == real_today_et) else None),
+                "source_url": (
+                    f"https://aviationweather.gov/api/data/metar?ids={city.metar_station}&format=json&latest=1"
+                    if city.is_us
+                    else f"https://api.open-meteo.com/v1/forecast?latitude={city.lat}&longitude={city.lon}&current_weather=true"
+                ) if city else None,
             },
             "forecasts": {
                 "primary": {
