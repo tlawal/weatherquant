@@ -79,12 +79,8 @@ def _parse_obs_time(obs: dict) -> Optional[datetime]:
     return datetime.now(timezone.utc)
 
 
-async def fetch_metar_all(session=None) -> None:
-    """Fetch METAR for all enabled cities and persist to DB."""
-    close_session = session is None
-    if session is None:
-        pass  # handled via context manager
-
+async def fetch_metar_all() -> None:
+    """Fetch Current Weather for all enabled cities. US uses METAR; Intl uses Open-Meteo."""
     async with get_session() as sess:
         cities = await get_all_cities(sess, enabled_only=True)
 
@@ -92,11 +88,18 @@ async def fetch_metar_all(session=None) -> None:
         log.warning("metar: no enabled cities configured")
         return
 
-    station_map = {c.metar_station: c for c in cities if c.metar_station}
-    if not station_map:
-        log.warning("metar: no cities have metar_station configured")
-        return
+    us_cities = [c for c in cities if c.is_us and c.metar_station]
+    intl_cities = [c for c in cities if not c.is_us and c.lat and c.lon]
 
+    if us_cities:
+        await _fetch_us_metars(us_cities)
+    
+    if intl_cities:
+        await _fetch_intl_open_meteo(intl_cities)
+
+
+async def _fetch_us_metars(cities: list[City]) -> None:
+    station_map = {c.metar_station: c for c in cities if c.metar_station}
     stations = ",".join(station_map.keys())
     url = f"{METAR_URL}?ids={stations}&format=json&latest=1"
 
@@ -107,25 +110,16 @@ async def fetch_metar_all(session=None) -> None:
             async with http.get(url) as resp:
                 if resp.status != 200:
                     log.error("metar: HTTP %d from %s", resp.status, url)
-                    await _mark_heartbeat_error(f"HTTP {resp.status}")
                     return
                 data = await resp.json(content_type=None)
-
-    except asyncio.TimeoutError:
-        log.error("metar: request timed out")
-        await _mark_heartbeat_error("timeout")
-        return
     except Exception as e:
         log.error("metar: fetch failed: %s", e)
-        await _mark_heartbeat_error(str(e))
         return
 
     if not isinstance(data, list):
-        log.error("metar: unexpected response format: %r", type(data))
         return
 
-    today_et = date.today().isoformat()  # system TZ is ET per config
-
+    today_et = date.today().isoformat()
     for obs in data:
         station_id = (obs.get("stationId") or obs.get("station") or "").upper()
         city = station_map.get(station_id)
@@ -134,45 +128,105 @@ async def fetch_metar_all(session=None) -> None:
 
         temp = _parse_temp(obs)
         if temp is None:
-            log.warning("metar: could not parse temp for station %s", station_id)
-            temp_c, temp_f = None, None
-        else:
-            temp_c, temp_f = temp
-            
-        # Unify units: if city uses Celsius, map the native C observation into the F column 
-        # so downstream processing stays completely seamless without having to branch.
-        if getattr(city, "unit", "F") == "C" and temp_c is not None:
-            temp_f = temp_c
-
+            continue
+        temp_c, temp_f = temp
+        
         obs_time = _parse_obs_time(obs)
         raw_str = json.dumps(obs, default=str)
 
         async with get_session() as sess:
-            # Compute daily high (query + compare)
             prev_high = await get_daily_high_metar(sess, city.id, today_et)
             daily_high = max(
-                (v for v in [temp_f, prev_high] if v is not None), default=None
+                (v for v in [temp_f, prev_high] if v is not None), default=temp_f
             )
+
+            # Extract reportTime if available separately
+            report_at = _parse_obs_time({"obsTime": obs.get("reportTime")}) if obs.get("reportTime") else obs_time
+            raw_text = obs.get("rawOb")
 
             await insert_metar_obs(
                 sess,
                 city_id=city.id,
                 metar_station=station_id,
                 observed_at=obs_time,
+                report_at=report_at,
                 temp_c=temp_c,
                 temp_f=temp_f,
                 daily_high_f=daily_high,
+                raw_text=raw_text,
                 raw_json=raw_str,
             )
 
-        log.debug(
-            "metar: %s temp=%.1f°F daily_high=%.1f°F",
-            station_id,
-            temp_f or 0,
-            daily_high or 0,
-        )
-
     await _mark_heartbeat_success()
+
+
+async def _fetch_intl_open_meteo(cities: list[City]) -> None:
+    """Fetch current weather for international cities via Open-Meteo."""
+    # Group by lat/lon to use Open-Meteo's bulk API
+    lats = ",".join(str(c.lat) for c in cities)
+    lons = ",".join(str(c.lon) for c in cities)
+    url = f"https://api.open-meteo.com/v1/forecast?latitude={lats}&longitude={lons}&current_weather=true"
+
+    try:
+        async with aiohttp.ClientSession(timeout=_TIMEOUT) as http:
+            async with http.get(url) as resp:
+                if resp.status != 200:
+                    log.error("open-meteo: HTTP %d from %s", resp.status, url)
+                    return
+                data = await resp.json()
+    except Exception as e:
+        log.error("open-meteo: fetch failed: %s", e)
+        return
+
+    # Open-Meteo returns a list if multiple locations are requested
+    if not isinstance(data, list):
+        data = [data]
+
+    today_et = date.today().isoformat()
+    for i, obs_data in enumerate(data):
+        if i >= len(cities):
+            break
+        city = cities[i]
+        curr = obs_data.get("current_weather")
+        if not curr:
+            continue
+
+        temp_c = curr.get("temperature")
+        if temp_c is None:
+            continue
+        
+        # User said for intl cities use C but my internal daily_high_f column handles whatever is passed.
+        # Actually for intl cities I should store C in the F column as well if that's what's used.
+        temp_internal = float(temp_c)
+        if city.unit == "F":
+             temp_internal = _c_to_f(temp_internal)
+
+        obs_time_raw = curr.get("time") # ISO string
+        try:
+            obs_time = datetime.fromisoformat(obs_time_raw).replace(tzinfo=timezone.utc)
+        except Exception:
+            obs_time = datetime.now(timezone.utc)
+
+        raw_str = json.dumps(obs_data)
+
+        async with get_session() as sess:
+            prev_high = await get_daily_high_metar(sess, city.id, today_et)
+            daily_high = max(
+                (v for v in [temp_internal, prev_high] if v is not None), default=temp_internal
+            )
+
+            await insert_metar_obs(
+                sess,
+                city_id=city.id,
+                metar_station=city.metar_station or "OM",
+                observed_at=obs_time,
+                report_at=obs_time, # Open-Meteo usually just has one time
+                temp_c=temp_c,
+                temp_f=temp_internal,
+                daily_high_f=daily_high,
+                raw_text=None,
+                raw_json=raw_str,
+            )
 
 
 async def _mark_heartbeat_success() -> None:

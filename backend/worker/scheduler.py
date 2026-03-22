@@ -53,6 +53,11 @@ async def job_fetch_wu():
     await fetch_wu_all()
 
 
+async def job_fetch_open_meteo():
+    from backend.ingestion.forecasts import fetch_open_meteo_all
+    await fetch_open_meteo_all()
+
+
 async def job_fetch_gamma():
     from backend.ingestion.polymarket_gamma import fetch_gamma_all
     await fetch_gamma_all()
@@ -163,6 +168,7 @@ def create_scheduler() -> AsyncIOScheduler:
     add(job_heartbeat,           seconds=30,   name="scheduler_alive")
     add(job_fetch_metar,         seconds=60,   name="fetch_metar")
     add(job_fetch_nws,           seconds=900,  name="fetch_nws")   # 15 min
+    add(job_fetch_open_meteo,    seconds=900,  name="fetch_open_meteo")
     add(job_fetch_wu,            seconds=300,  name="fetch_wu")    # 5 min
     add(job_fetch_gamma,         seconds=120,  name="fetch_gamma") # 2 min
     add(job_fetch_clob,          seconds=30,   name="fetch_clob")
@@ -187,6 +193,7 @@ async def start_scheduler() -> AsyncIOScheduler:
         (job_fetch_gamma, "fetch_gamma"),
         (job_fetch_metar, "fetch_metar"),
         (job_fetch_nws, "fetch_nws"),
+        (job_fetch_open_meteo, "fetch_open_meteo"),
     ]:
         try:
             await _run_with_heartbeat(name, coro_fn)

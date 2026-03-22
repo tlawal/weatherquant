@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from backend.config import Config
+from backend.strategy.kelly import calculate_kelly_fraction, calculate_expected_value
 
 log = logging.getLogger(__name__)
 
@@ -59,25 +60,22 @@ def compute_size(
         return _rejected(f"bankroll_exhausted: remaining=${bankroll_remaining:.2f}", 0, 0, 0, bankroll_remaining)
 
     # ── Kelly fraction ────────────────────────────────────────────────────────
-    # Binary payout: win (1 - price)/price per $1 risked (net fractional odds)
-    if limit_price <= 0 or limit_price >= 1:
-        return _rejected(f"invalid_price: {limit_price}", 0, 0, 0, bankroll_remaining)
+    kelly_f = calculate_kelly_fraction(
+        model_prob=model_prob,
+        yes_price=limit_price,
+        fractional_kelly=Config.KELLY_FRACTION,
+        max_position_size=Config.MAX_POSITION_PCT,
+    )
 
-    net_odds = (1.0 - limit_price) / limit_price  # profit per $1 risked
-    p = model_prob
-    q = 1.0 - p
-
-    # Kelly formula for binary bet: f* = (b*p - q) / b
-    kelly_f = (net_odds * p - q) / net_odds
-    half_kelly_f = kelly_f / 2.0
-
-    if half_kelly_f <= 0:
+    if kelly_f <= 0:
         return _rejected(
             f"negative_kelly: f={kelly_f:.4f} (no positive edge in sizing)",
             kelly_f, 0, 0, bankroll_remaining
         )
 
-    kelly_size = half_kelly_f * effective_bankroll
+    # Note: calculate_kelly_fraction already applied Config.KELLY_FRACTION
+    # and capped it at MAX_POSITION_PCT.
+    kelly_size = kelly_f * effective_bankroll
 
     # ── Hard caps ────────────────────────────────────────────────────────────
     position_cap = effective_bankroll * Config.MAX_POSITION_PCT
@@ -96,9 +94,9 @@ def compute_size(
         )
 
     log.info(
-        "sizing: kelly_f=%.4f half_kelly=%.4f kelly_size=$%.2f position_cap=$%.2f "
+        "sizing: kelly_f=%.4f kelly_size=$%.2f position_cap=$%.2f "
         "liquidity_cap=$%.2f final_size=$%.2f (%.2f shares @ ${:.4f})",
-        kelly_f, half_kelly_f, kelly_size, position_cap, liquidity_cap,
+        kelly_f, kelly_size, position_cap, liquidity_cap,
         dollar_cost, shares, limit_price,
     )
 

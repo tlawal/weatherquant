@@ -20,6 +20,7 @@ from backend.config import Config
 from backend.modeling.distribution import edge as compute_edge
 from backend.modeling.temperature_model import compute_model, ModelResult
 from backend.modeling.calibration import get_calibration_async
+from backend.modeling.calibration_engine import get_reliability_metrics, remap_probability
 from backend.storage.db import get_session
 from backend.storage.models import Bucket, Event, City
 from backend.storage.repos import (
@@ -82,7 +83,7 @@ def _execution_cost(spread: Optional[float], ask_depth: float) -> float:
         slippage = 0.015
     else:
         slippage = 0.025  # thin market, high impact
-    return round(half_spread + slippage, 4)
+    return float(round(half_spread + slippage, 4))
 
 
 async def run_signal_engine() -> list[BucketSignal]:
@@ -130,6 +131,8 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         wu_history_obs = await get_latest_forecast(sess, city.id, "wu_history", today_et)
 
         cal = await get_calibration(sess, city.id)
+        # NEW: Reliability metrics for probability remapping
+        reliability_bins = await get_reliability_metrics(city.id)
 
     if not buckets:
         log.debug("signal: %s — no buckets", city.city_slug)
@@ -206,7 +209,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
                 label=bucket.label or f"Bucket {i}",
                 low_f=bucket.low_f,
                 high_f=bucket.high_f,
-                model_prob=round(model_prob, 4),
+                model_prob=float(round(model_prob, 4)),
                 mkt_prob=0.0,
                 raw_edge=0.0,
                 exec_cost=0.0,
@@ -225,20 +228,24 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         ask_depth = mkt_snap.yes_ask_depth or 0.0
         spread = mkt_snap.spread
         exec_cost = _execution_cost(spread, ask_depth)
-        raw_edge = mkt_prob - model_prob  # note: we're asking if market is mispriced
-        # We want: model thinks it's higher → BUY YES
-        raw_edge_buy = model_prob - mkt_prob
+
+        # Apply probability calibration (remap based on historical reliability)
+        calibrated_prob = remap_probability(model_prob, reliability_bins)
+
+        # Edge calculation based on calibrated probability
+        raw_edge_buy = calibrated_prob - mkt_prob
         true_edge = raw_edge_buy - exec_cost
 
         reason = {
             **model.inputs,
             "bucket_idx": i,
             "label": bucket.label,
-            "model_prob": round(model_prob, 4),
-            "mkt_prob": round(mkt_prob, 4),
-            "raw_edge": round(raw_edge_buy, 4),
-            "exec_cost": round(exec_cost, 4),
-            "true_edge": round(true_edge, 4),
+            "model_prob_raw": float(round(model_prob, 4)),
+            "model_prob_cal": float(round(calibrated_prob, 4)),
+            "mkt_prob": float(round(mkt_prob, 4)),
+            "raw_edge": float(round(raw_edge_buy, 4)),
+            "exec_cost": float(round(exec_cost, 4)),
+            "true_edge": float(round(true_edge, 4)),
             "spread": spread,
             "ask_depth": ask_depth,
         }
@@ -260,14 +267,14 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
             label=bucket.label or f"Bucket {i}",
             low_f=bucket.low_f,
             high_f=bucket.high_f,
-            model_prob=round(model_prob, 4),
-            mkt_prob=round(mkt_prob, 4),
+            model_prob=float(round(model_prob, 4)),
+            mkt_prob=float(round(mkt_prob, 4)),
             raw_edge=round(raw_edge_buy, 4),
             exec_cost=round(exec_cost, 4),
             true_edge=round(true_edge, 4),
             yes_bid=mkt_snap.yes_bid,
             yes_ask=mkt_snap.yes_ask,
-            yes_mid=round(mkt_prob, 4),
+            yes_mid=float(round(mkt_prob, 4)),
             spread=spread,
             yes_ask_depth=ask_depth,
             reason=reason,

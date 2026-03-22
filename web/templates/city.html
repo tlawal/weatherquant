@@ -4,40 +4,97 @@
 
 {% block content %}
 <!-- ── HEADER ROW ────────────────────────────────────────────────────────── -->
-<div class="flex items-center justify-between mb-5">
+<div class="flex flex-wrap items-center justify-between gap-4 mb-5">
   <div class="flex items-center gap-3">
     <a href="/" class="text-sm hover:underline" style="color:var(--text-muted)">← Signals</a>
     <span style="color:var(--text-muted)">/</span>
-    <h1 class="text-3xl font-bold tracking-tight mb-1">
+    <h1 class="text-3xl font-bold tracking-tight">
       {{ city.display_name }}
       {% if not city.is_us %}
-      <span class="ml-2 text-xs px-2 py-0.5 rounded uppercase tracking-widest align-middle" style="background:var(--bg-panel); color:var(--cyan)">Intl</span>
+      <span class="ml-1 text-[10px] px-1.5 py-0.5 rounded uppercase tracking-widest align-middle" style="background:var(--bg-panel); color:var(--cyan)">Intl</span>
       {% endif %}
     </h1>
     {% if event %}
-    <span class="text-xs px-2 py-0.5 rounded"
+    <span class="text-xs px-2 py-0.5 rounded font-bold"
       style="background:{% if event.forecast_quality == 'ok' %}rgba(34,197,94,0.15){% else %}rgba(239,68,68,0.15){% endif %};
              color:{% if event.forecast_quality == 'ok' %}#86efac{% else %}#fca5a5{% endif %}">
       {{ event.forecast_quality|upper }}
     </span>
     {% endif %}
   </div>
-  <span class="text-sm mono" style="color:var(--text-muted)">{{ today_et }}</span>
+
+  <div class="flex items-center gap-4 ml-auto">
+    <!-- Date Selector -->
+    <div class="flex items-center gap-2">
+      <span class="text-[10px] uppercase tracking-widest font-bold" style="color:var(--text-muted)">Event Date</span>
+      <select onchange="window.location.href='/city/{{ city.city_slug }}?date=' + this.value"
+              class="text-xs mono px-2 py-1 rounded bg-transparent border border-white/10 hover:border-cyan-500/50 outline-none transition-colors cursor-pointer">
+        {% for d in available_dates %}
+        <option value="{{ d }}" {% if d == today_et %}selected{% endif %} style="background:var(--bg-card)">{{ d }}</option>
+        {% endfor %}
+      </select>
+    </div>
+
+    <!-- Live Link -->
+    {% if event and event.gamma_slug %}
+    <a href="https://polymarket.com/event/{{ event.gamma_slug }}" target="_blank"
+       class="text-[10px] px-3 py-1.5 rounded-full font-bold tracking-widest transition-all hover:glow-cyan border"
+       style="background:var(--bg-panel); border-color:var(--cyan); color:var(--cyan)">
+      VIEW MARKET ↗
+    </a>
+    {% endif %}
+  </div>
 </div>
 
 <!-- ── TOP METRICS GRID ──────────────────────────────────────────────────── -->
 <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-5">
   <!-- Current Temp -->
-  <div class="card p-4">
-    <div class="flex items-center justify-between text-xs uppercase tracking-widest mb-1" style="color:var(--text-muted)">
-      <span>Current Temp</span>
-      <span title="METAR is the official aviation weather report. This is the latest observed temperature at the airport." style="cursor:help;color:var(--cyan);font-size:12px;opacity:0.7">ⓘ</span>
+  <div class="card p-4 relative" x-data="{ showMeta: false }">
+    <div class="flex items-center justify-between text-[10px] uppercase tracking-widest mb-1" style="color:var(--text-muted)">
+      <div class="flex items-center gap-1.5">
+        <span>Current Temp</span>
+        <button @click="showMeta = !showMeta" @click.outside="showMeta = false" 
+                class="hover:text-cyan-400 opacity-50 hover:opacity-100 transition-all">ⓘ</button>
+      </div>
+      <span class="mono opacity-50">{{ metar.station }}</span>
     </div>
-    <div class="text-3xl font-bold mono" style="color:var(--cyan)">
+
+    <!-- Meta Popover -->
+    <div x-show="showMeta" 
+         x-transition:enter="transition ease-out duration-100"
+         x-transition:enter-start="opacity-0 scale-95"
+         x-transition:enter-end="opacity-100 scale-100"
+         class="absolute right-4 top-10 w-72 p-3 rounded-xl shadow-2xl z-50 border text-[10px] normal-case tracking-tight font-medium"
+         style="background:var(--bg-card); border-color:var(--border); display: none;">
+      <div class="font-bold mb-2 pb-1 border-b" style="color:var(--cyan); border-color:var(--border)">Technical Observation</div>
+      <div class="space-y-1.5">
+        <div class="flex justify-between">
+          <span style="color:var(--text-muted)">Source</span>
+          <span class="mono">{{ metar.station }}</span>
+        </div>
+        <div class="flex justify-between">
+          <span style="color:var(--text-muted)">Observed (UTC)</span>
+          <span class="mono">{{ metar.observed_at }}</span>
+        </div>
+        <div class="flex justify-between">
+          <span style="color:var(--text-muted)">Reported (UTC)</span>
+          <span class="mono">{{ metar.report_at }}</span>
+        </div>
+        {% if metar.raw_text %}
+        <div class="mt-2 p-2 rounded bg-black/20 mono break-words leading-relaxed border border-white/5 opacity-80">
+          {{ metar.raw_text }}
+        </div>
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="text-3xl font-bold mono leading-none mt-1" style="color:var(--cyan)">
       {% if metar and metar.temp_f is not none %}{{ "%.1f"|format(metar.temp_f) }}°{{ city.unit|default('F') }}{% else %}—{% endif %}
     </div>
-    {% if metar and metar.age_s is not none %}
-    <div class="text-xs mt-1" style="color:var(--text-muted)">{{ metar.age_s|int }}s ago (METAR)</div>
+
+    <div class="flex items-center justify-between mt-3">
+      {% if metar and metar.age_s is not none %}
+    <div class="text-xs mt-1" style="color:var(--text-muted)">{{ metar.age_s|int }}s ago ({% if city.is_us %}METAR{% else %}Open-Meteo{% endif %})</div>
     {% endif %}
   </div>
 
@@ -48,7 +105,7 @@
       <span title="The official settlement source for Polymarket weather outcomes. Read from Wunderground's daily history API." style="cursor:help;color:var(--cyan);font-size:12px;opacity:0.7">ⓘ</span>
     </div>
     <div class="text-3xl font-bold mono" style="color:#FBBF24">
-      {% if daily_high_f is not none %}{{ "%.1f"|format(daily_high_f) }}°{{ city.unit|default('F') }}{% else %}—{% endif %}
+      {% if forecasts.wu_history.high_f is not none %}{{ "%.1f"|format(forecasts.wu_history.high_f) }}°{{ city.unit|default('F') }}{% else %}—{% endif %}
     </div>
     <div class="text-xs mt-1" style="color:var(--text-muted)">Settlement Source (WU)</div>
   </div>
@@ -62,8 +119,10 @@
     <div class="text-3xl font-bold mono" style="color:#A78BFA">
       {% if model and model.mu is not none %}{{ "%.1f"|format(model.mu) }}°{{ city.unit|default('F') }}{% else %}—{% endif %}
     </div>
-    {% if model and model.sigma %}
-    <div class="text-xs mt-1" style="color:var(--text-muted)">σ = {{ "%.2f"|format(model.sigma) }}°{{ city.unit|default('F') }}</div>
+    {% if obs_high_f is not none %}
+    <div class="text-xs mt-1 font-medium" style="color:var(--cyan)">Obs. High: {{ "%.1f"|format(obs_high_f) }}°</div>
+    {% else %}
+    <div class="text-xs mt-1" style="color:var(--text-muted)">No observed high yet</div>
     {% endif %}
   </div>
 
@@ -72,15 +131,21 @@
     <div class="text-xs uppercase tracking-widest mb-2" style="color:var(--text-muted)">Forecasts</div>
     <div class="space-y-1 text-xs">
       <div class="flex justify-between">
-        <span style="color:var(--text-muted)" class="flex items-center gap-1">NWS <span title="National Weather Service official gridpoint forecast. Highly reliable base forecast." style="cursor:help;color:var(--cyan);font-size:10px;opacity:0.5">ⓘ</span></span>
-        <span class="mono font-medium {% if forecasts.nws.high_f is not none %}text-white{% else %}text-red-400{% endif %}">
-          {% if forecasts.nws.high_f is not none %}{{ "%.1f"|format(forecasts.nws.high_f) }}°{{ city.unit|default('F') }}{% else %}—{% endif %}
+        <span style="color:var(--text-muted)" class="flex items-center gap-1">{{ forecasts.primary.source }} <span title="{{ forecasts.primary.source }} official forecast. Highly reliable base forecast." style="cursor:help;color:var(--cyan);font-size:10px;opacity:0.5">ⓘ</span></span>
+        <span class="mono font-medium {% if forecasts.primary.high_f is not none %}text-white{% else %}text-red-400{% endif %}">
+          {% if forecasts.primary.high_f is not none %}{{ "%.1f"|format(forecasts.primary.high_f) }}°{{ city.unit|default('F') }}{% else %}—{% endif %}
         </span>
       </div>
       <div class="flex justify-between">
-        <span style="color:var(--text-muted)" class="flex items-center gap-1">WU Today Forecast <span title="Weather Underground 'Today' forecast." style="cursor:help;color:var(--cyan);font-size:10px;opacity:0.5">ⓘ</span></span>
+        <span style="color:var(--text-muted)" class="flex items-center gap-1">WU Forecast <span title="Weather Underground 'Today' forecast (adjusted if observed temp is higher)." style="cursor:help;color:var(--cyan);font-size:10px;opacity:0.5">ⓘ</span></span>
         <span class="mono font-medium {% if forecasts.wu_daily.high_f is not none %}text-white{% else %}text-red-400{% endif %}">
           {% if forecasts.wu_daily.high_f is not none %}{{ "%.1f"|format(forecasts.wu_daily.high_f) }}°{{ city.unit|default('F') }}{% else %}—{% endif %}
+        </span>
+      </div>
+      <div class="flex justify-between">
+        <span style="color:var(--text-muted)" class="flex items-center gap-1">WU Hourly Peak <span title="Max temperature extracted from WU hourly forecast." style="cursor:help;color:var(--cyan);font-size:10px;opacity:0.5">ⓘ</span></span>
+        <span class="mono font-medium {% if forecasts.wu_hourly.high_f is not none %}text-white{% else %}text-red-400{% endif %}">
+          {% if forecasts.wu_hourly.high_f is not none %}{{ "%.1f"|format(forecasts.wu_hourly.high_f) }}°{{ city.unit|default('F') }}{% else %}—{% endif %}
         </span>
       </div>
       <div class="flex justify-between">
@@ -111,7 +176,10 @@
         </div>
       </div>
       <div class="panel rounded p-2">
-        <div style="color:var(--text-muted)">METAR Weight</div>
+        <div class="flex items-center justify-between">
+          <span style="color:var(--text-muted)">METAR Weight</span>
+          <span title="Blending factor between forecast sources (NWS/WU) and live airport observations. Increases as the day progresses (dynamic weighting)." style="cursor:help;color:var(--cyan);font-size:10px;opacity:0.5">ⓘ</span>
+        </div>
         <div class="mono font-semibold">
           {{ "%.0f"|format((model.inputs.w_metar|default(0)) * 100) }}%
         </div>
@@ -134,39 +202,46 @@
     <table class="w-full text-xs">
       <thead>
         <tr class="text-xs uppercase tracking-widest" style="color:var(--text-muted);border-bottom:1px solid var(--border)">
-          <th class="px-3 py-2 text-left">Range</th>
-          <th class="px-3 py-2 text-right">Mkt</th>
-          <th class="px-3 py-2 text-right">Model</th>
-          <th class="px-3 py-2 text-right" style="color:var(--cyan)">Edge</th>
-          <th class="px-3 py-2 text-center">Trade</th>
+          <th class="px-2 py-2 text-left">Range</th>
+          <th class="px-2 py-2 text-right">Mkt</th>
+          <th class="px-2 py-2 text-right">Model</th>
+          <th class="px-2 py-2 text-right" style="color:var(--cyan)">EV</th>
+          <th class="px-2 py-2 text-right" title="Kelly Suggested Size (% of bankroll)">Kelly</th>
+          <th class="px-2 py-2 text-center">Trade</th>
         </tr>
       </thead>
       <tbody>
         {% for b in buckets %}
         <tr class="border-b hover:bg-white/5 transition-colors
-          {% if b.actionable %}edge-hot{% elif b.true_edge and b.true_edge >= 0.05 %}edge-warm{% else %}edge-cold{% endif %}"
+          {% if b.actionable %}edge-hot{% elif b.ev and b.ev >= 0.10 %}edge-warm{% else %}edge-cold{% endif %}"
           style="border-color:rgba(26,58,107,0.4)">
-          <td class="px-3 py-2 mono font-medium">
+          <td class="px-2 py-2 mono font-medium">
             {% if b.low_f is not none and b.high_f is not none %}
               {{ b.low_f|int }}–{{ b.high_f|int }}°
             {% elif b.low_f is not none %}≥{{ b.low_f|int }}°
             {% elif b.high_f is not none %}&lt;{{ b.high_f|int }}°
             {% else %}{{ b.label }}{% endif %}
           </td>
-          <td class="px-3 py-2 text-right mono" style="color:var(--text-muted)">
+          <td class="px-2 py-2 text-right mono" style="color:var(--text-muted)">
             {% if b.mkt_prob is not none %}{{ "%.1f"|format(b.mkt_prob * 100) }}%{% else %}—{% endif %}
           </td>
-          <td class="px-3 py-2 text-right mono font-medium text-white">
+          <td class="px-2 py-2 text-right mono font-medium text-white">
             {% if b.model_prob is not none %}{{ "%.1f"|format(b.model_prob * 100) }}%{% else %}—{% endif %}
           </td>
-          <td class="px-3 py-2 text-right mono font-bold">
-            {% if b.true_edge is not none %}
-              {% if b.true_edge >= 0.10 %}<span class="text-green-400">+{{ "%.1f"|format(b.true_edge * 100) }}%</span>
-              {% elif b.true_edge >= 0.05 %}<span class="text-yellow-400">+{{ "%.1f"|format(b.true_edge * 100) }}%</span>
-              {% else %}<span style="color:var(--text-muted)">{{ "%.1f"|format(b.true_edge * 100) }}%</span>{% endif %}
+          <td class="px-2 py-2 text-right mono font-bold">
+            {% if b.ev is not none %}
+              {% if b.ev >= 0.20 %}<span class="text-green-400">+{{ "%.2f"|format(b.ev) }}</span>
+              {% elif b.ev >= 0.10 %}<span class="text-yellow-400">+{{ "%.2f"|format(b.ev) }}</span>
+              {% elif b.ev > 0 %}<span class="text-yellow-600">+{{ "%.2f"|format(b.ev) }}</span>
+              {% else %}<span style="color:var(--text-muted)">{{ "%.2f"|format(b.ev) }}</span>{% endif %}
             {% else %}—{% endif %}
           </td>
-          <td class="px-3 py-2 text-center">
+          <td class="px-2 py-2 text-right mono">
+            {% if b.kelly_f is not none and b.kelly_f > 0 %}
+              <span class="text-cyan-400 font-bold">{{ "%.1f"|format(b.kelly_f * 100) }}%</span>
+            {% else %}—{% endif %}
+          </td>
+          <td class="px-2 py-2 text-center">
             {% if b.actionable %}
             <button onclick="quickTrade('{{ city.city_slug }}', {{ b.bucket_idx }})"
               class="px-2 py-0.5 rounded text-xs font-semibold"
@@ -189,6 +264,12 @@
   <pre class="px-5 pb-4 text-xs overflow-auto mono" style="color:var(--text-muted)">{{ model.inputs|tojson(indent=2) }}</pre>
 </details>
 {% endif %}
+
+<!-- ── RELIABILITY DIAGRAM (Calibration) ────────────────────────────────── -->
+<div class="mt-5 card p-4">
+  <h2 class="font-semibold text-sm mb-4">Probability Calibration (Reliability)</h2>
+  <div id="reliability-plot" style="width:100%;height:300px"></div>
+</div>
 
 <!-- Hidden Trade Modal (shared with dashboard layout) -->
 <div id="trade-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center"
@@ -273,6 +354,46 @@ document.addEventListener('DOMContentLoaded', function() {
   };
 
   Plotly.newPlot('prob-chart', data, layout, {responsive: true, displayModeBar: false});
+
+  // Reliability Diagram
+  const reliabilityData = {{ reliability_json|safe }};
+  const relPlotEl = document.getElementById('reliability-plot');
+  if (reliabilityData && relPlotEl && typeof Plotly !== 'undefined') {
+    const x = reliabilityData.map(d => d.expected * 100);
+    const y = reliabilityData.map(d => d.observed * 100);
+    const text = reliabilityData.map(d => `n=${d.count}<br>Obs: ${(d.observed*100).toFixed(1)}%<br>Exp: ${(d.expected*100).toFixed(1)}%`);
+    
+    const relData = [
+      {
+        x: [0, 100], y: [0, 100],
+        type: 'scatter', mode: 'lines',
+        name: 'Perfect Calibration',
+        line: { color: 'rgba(148,163,184,0.3)', width: 1, dash: 'dash' },
+        hoverinfo: 'skip'
+      },
+      {
+        x: x, y: y, text: text,
+        type: 'scatter', mode: 'lines+markers',
+        name: 'Model Performance',
+        line: { color: '#22D3EE', width: 2 },
+        marker: { color: '#22D3EE', size: 8 },
+        hoverinfo: 'text'
+      }
+    ];
+    
+    const relLayout = {
+      paper_bgcolor: 'transparent',
+      plot_bgcolor: 'transparent',
+      font: { family: 'JetBrains Mono', color: '#94A3B8', size: 10 },
+      xaxis: { title: 'Expected Prob (%)', range: [0, 100], gridcolor: 'rgba(26,58,107,0.3)' },
+      yaxis: { title: 'Observed Hit Rate (%)', range: [0, 100], gridcolor: 'rgba(26,58,107,0.3)' },
+      margin: { t: 20, r: 20, b: 40, l: 40 },
+      showlegend: false,
+      hovermode: 'closest'
+    };
+    
+    Plotly.newPlot('reliability-plot', relData, relLayout, {responsive: true, displayModeBar: false});
+  }
 });
 
 async function apiCall(path, method='POST', body=null) {

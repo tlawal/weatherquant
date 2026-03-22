@@ -39,6 +39,8 @@ class City(Base):
     nws_grid_y: Mapped[Optional[int]] = mapped_column(Integer)
     wu_state: Mapped[Optional[str]] = mapped_column(String(32))
     wu_city: Mapped[Optional[str]] = mapped_column(String(64))
+    lat: Mapped[Optional[float]] = mapped_column(Float)
+    lon: Mapped[Optional[float]] = mapped_column(Float)
     enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_us: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     # "F" or "C"
@@ -135,6 +137,8 @@ class MetarObs(Base):
     temp_c: Mapped[Optional[float]] = mapped_column(Float)
     temp_f: Mapped[Optional[float]] = mapped_column(Float)
     daily_high_f: Mapped[Optional[float]] = mapped_column(Float)
+    report_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    raw_text: Mapped[Optional[str]] = mapped_column(Text)
     raw_json: Mapped[Optional[str]] = mapped_column(Text)
 
     city_ref: Mapped[City] = relationship("City", back_populates="metar_obs")

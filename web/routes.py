@@ -6,11 +6,17 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone, date
+from zoneinfo import ZoneInfo
+from typing import Optional
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
+
+from backend.config import Config
+from backend.strategy.kelly import calculate_expected_value, calculate_kelly_fraction
+from backend.modeling.calibration_engine import get_reliability_metrics
 
 log = logging.getLogger(__name__)
 
@@ -107,7 +113,7 @@ async def dashboard(request: Request):
 
 
 @dashboard_router.get("/city/{city_slug}", response_class=HTMLResponse)
-async def city_detail(request: Request, city_slug: str):
+async def city_detail(request: Request, city_slug: str, date: str | None = None):
     from backend.storage.db import get_session
     from backend.storage.repos import (
         get_city_by_slug,
@@ -118,21 +124,44 @@ async def city_detail(request: Request, city_slug: str):
         get_latest_model_snapshot,
         get_latest_signal_for_bucket,
         get_latest_market_snapshot,
+        get_daily_high_metar,
     )
 
-    today_et = date.today().isoformat()
+    # Determine "today" in ET
+    now_utc = datetime.now(timezone.utc)
+    # The app follows America/New_York (ET)
+    et_tz = ZoneInfo("America/New_York")
+    now_et = now_utc.astimezone(et_tz)
+    real_today_et = now_et.strftime("%Y-%m-%d")
+
+    target_date_et = date if date else real_today_et
 
     async with get_session() as sess:
         city = await get_city_by_slug(sess, city_slug)
         if not city:
             return HTMLResponse("<h1>City not found</h1>", status_code=404)
 
+        # Fetch available event dates for this city
+        from sqlalchemy import select, distinct
+        from backend.storage.models import Event
+        date_query = select(distinct(Event.date_et)).where(Event.city_id == city.id).order_by(Event.date_et.desc())
+        available_dates = (await sess.execute(date_query)).scalars().all()
+
         metar = await get_latest_metar(sess, city.id)
-        nws = await get_latest_forecast(sess, city.id, "nws", today_et)
-        wu_d = await get_latest_forecast(sess, city.id, "wu_daily", today_et)
-        wu_h = await get_latest_forecast(sess, city.id, "wu_hourly", today_et)
-        wu_history = await get_latest_forecast(sess, city.id, "wu_history", today_et)
-        event = await get_event(sess, city.id, today_et)
+        # For the selected date, we also want the official high observed by METAR
+        obs_high_f = await get_daily_high_metar(sess, city.id, target_date_et)
+
+        wu_d = await get_latest_forecast(sess, city.id, "wu_daily", target_date_et)
+        wu_h = await get_latest_forecast(sess, city.id, "wu_hourly", target_date_et)
+        wu_history = await get_latest_forecast(sess, city.id, "wu_history", target_date_et)
+        
+        primary_fc = None
+        if city.is_us:
+             primary_fc = await get_latest_forecast(sess, city.id, "nws", target_date_et)
+        else:
+             primary_fc = await get_latest_forecast(sess, city.id, "open_meteo", target_date_et)
+        
+        event = await get_event(sess, city.id, target_date_et)
 
     model = None
     buckets_with_signals = []
@@ -150,6 +179,15 @@ async def city_detail(request: Request, city_slug: str):
             probs = json.loads(model.probs_json) if model and model.probs_json else []
             model_prob = probs[bucket.bucket_idx] if bucket.bucket_idx < len(probs) else None
 
+            yes_price = mkt.yes_ask if mkt else None
+            ev = calculate_expected_value(model_prob, yes_price) if model_prob is not None and yes_price else None
+            kelly_f = calculate_kelly_fraction(
+                model_prob, 
+                yes_price, 
+                fractional_kelly=Config.KELLY_FRACTION,
+                max_position_size=Config.MAX_POSITION_PCT
+            ) if model_prob is not None and yes_price else None
+
             buckets_with_signals.append({
                 "bucket_idx": bucket.bucket_idx,
                 "label": bucket.label or f"Bucket {bucket.bucket_idx}",
@@ -161,6 +199,8 @@ async def city_detail(request: Request, city_slug: str):
                 "yes_ask": mkt.yes_ask if mkt else None,
                 "spread": mkt.spread if mkt else None,
                 "true_edge": sig.true_edge if sig else None,
+                "ev": ev,
+                "kelly_f": kelly_f,
                 "exec_cost": sig.exec_cost if sig else None,
                 "actionable": (sig.true_edge >= 0.10) if sig else False,
             })
@@ -180,18 +220,31 @@ async def city_detail(request: Request, city_slug: str):
         {
             "request": request,
             "city": city,
-            "today_et": today_et,
+            "today_et": target_date_et,
+            "real_today_et": real_today_et,
+            "available_dates": available_dates,
+            "obs_high_f": obs_high_f,
             "metar": {
-                "temp_f": metar.temp_f if metar else None,
-                "daily_high_f": metar.daily_high_f if metar else None,
-                "observed_at": metar.observed_at.isoformat() if metar else None,
-                "age_s": _age(metar.fetched_at if metar else None),
+                "temp_f": metar.temp_f if (metar and target_date_et == real_today_et) else None,
+                "daily_high_f": obs_high_f, # Use the actual high for that date
+                "observed_at": metar.observed_at if (metar and target_date_et == real_today_et) else None,
+                "report_at": metar.report_at if (metar and target_date_et == real_today_et) else None,
+                "station": metar.metar_station if metar else None,
+                "raw_text": metar.raw_text if (metar and target_date_et == real_today_et) else None,
+                "age_s": _age(metar.fetched_at if (metar and target_date_et == real_today_et) else None),
             },
-            "daily_high_f": wu_history.high_f if wu_history else None,
             "forecasts": {
-                "nws": {"high_f": nws.high_f if nws else None, "age_s": _age(nws.fetched_at if nws else None)},
-                "wu_daily": {"high_f": wu_d.high_f if wu_d else None, "age_s": _age(wu_d.fetched_at if wu_d else None)},
+                "primary": {
+                    "source": "nws" if city.is_us else "Open-Meteo",
+                    "high_f": primary_fc.high_f if primary_fc else None,
+                    "age_s": _age(primary_fc.fetched_at if primary_fc else None)
+                },
+                "wu_daily": {
+                    "high_f": max((v for v in [wu_d.high_f if wu_d else None, obs_high_f] if v is not None), default=None),
+                    "age_s": _age(wu_d.fetched_at if wu_d else None)
+                },
                 "wu_hourly": {"high_f": wu_h.high_f if wu_h else None, "age_s": _age(wu_h.fetched_at if wu_h else None)},
+                "wu_history": {"high_f": wu_history.high_f if wu_history else None, "age_s": _age(wu_history.fetched_at if wu_history else None)},
             },
             "event": event,
             "model": {
@@ -201,6 +254,10 @@ async def city_detail(request: Request, city_slug: str):
                 "inputs": model_inputs,
             } if model else None,
             "buckets": buckets_with_signals,
+            "reliability_json": json.dumps([
+                {"expected": b.expected_prob, "observed": b.observed_prob, "count": b.count}
+                for b in (await get_reliability_metrics(city.id))
+            ]),
         },
     )
 

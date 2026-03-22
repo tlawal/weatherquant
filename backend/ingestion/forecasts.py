@@ -61,7 +61,7 @@ _WU_HEADERS = {
 # ─── NWS API ──────────────────────────────────────────────────────────────────
 
 async def fetch_nws_all() -> None:
-    """Fetch NWS API daily high for all enabled cities."""
+    """Fetch NWS API daily high for all enabled US cities."""
     async with get_session() as sess:
         cities = await get_all_cities(sess, enabled_only=True)
 
@@ -69,11 +69,10 @@ async def fetch_nws_all() -> None:
 
     for city in cities:
         if not city.is_us:
-            log.debug("nws: skipping city %s (not US)", city.city_slug)
             continue
         if not (city.nws_office and city.nws_grid_x and city.nws_grid_y):
-            log.debug("nws: city %s missing NWS config, skipping", city.city_slug)
             continue
+
         try:
             high_f = await _fetch_nws_high(city)
         except Exception as e:
@@ -98,8 +97,87 @@ async def fetch_nws_all() -> None:
         log.info("nws: %s high_f=%s", city.city_slug, high_f)
 
 
+async def fetch_open_meteo_all() -> None:
+    """Fetch Open-Meteo forecast for all enabled international cities."""
+    async with get_session() as sess:
+        cities = await get_all_cities(sess, enabled_only=True)
+
+    today_et = date.today().isoformat()
+
+    for city in cities:
+        if city.is_us:
+            continue
+        
+        try:
+            high_f = await _fetch_open_meteo_high(city)
+        except Exception as e:
+            log.error("open-meteo: %s failed: %s", city.city_slug, e)
+            high_f = None
+
+        async with get_session() as sess:
+            raw = json.dumps({"source": "open_meteo", "high_f": high_f})
+            await insert_forecast_obs(
+                sess,
+                city_id=city.id,
+                source="open_meteo",
+                date_et=today_et,
+                high_f=high_f,
+                raw_payload_hash=hashlib.md5(raw.encode()).hexdigest(),
+                raw_json=raw,
+                parse_error=None if high_f is not None else "parse_failed",
+            )
+            await update_heartbeat(
+                sess, "fetch_open_meteo", success=(high_f is not None)
+            )
+        log.info("open-meteo: %s high_f=%s", city.city_slug, high_f)
+
+
+async def _fetch_open_meteo_high(city: City) -> Optional[float]:
+    """Fetch Open-Meteo hourly forecast and return today's max temperature (°C or °F)."""
+    if city.lat is None or city.lon is None:
+        log.warning("open-meteo: missing coords for %s", city.city_slug)
+        return None
+
+    url = "https://api.open-meteo.com/v1/forecast"
+    params = {
+        "latitude": city.lat,
+        "longitude": city.lon,
+        "hourly": "temperature_2m",
+        "forecast_days": 1,
+    }
+
+    try:
+        async with aiohttp.ClientSession(timeout=_TIMEOUT) as http:
+            async with http.get(url, params=params) as resp:
+                if resp.status != 200:
+                    log.error("open-meteo: HTTP %d for %s", resp.status, url)
+                    return None
+                data = await resp.json()
+
+        hourly = data.get("hourly", {})
+        temps = hourly.get("temperature_2m", [])
+        if not temps:
+            return None
+
+        # Filter for "today" based on the city's ET context or UTC? 
+        # Open-Meteo returns 24 values for 1 day usually starting from 00:00 of the requested day.
+        # User said: "Math needs to be done so that it's still from the current day at which its called and doesn't roll over".
+        # Since we are fetching 'forecast_days=1', it returns 24 hours starting from 00:00 of the current day (local time of the lat/lon).
+        
+        high_c = max(temps)
+        if city.unit == "F":
+            return round(high_c * 9 / 5 + 32, 1)
+        return round(high_c, 1)
+
+    except Exception as e:
+        log.exception("open-meteo: failed for %s", city.city_slug)
+        return None
+
+
 async def _fetch_nws_high(city: City) -> Optional[float]:
     """Fetch NWS gridpoint forecast and return today's daytime high (°F)."""
+    if not city.is_us or not city.nws_office:
+        return None
     url = (
         f"{NWS_BASE}/gridpoints/{city.nws_office}"
         f"/{city.nws_grid_x},{city.nws_grid_y}/forecast"
@@ -241,6 +319,19 @@ async def _scrape_wu_city(city: City, date_et: str) -> None:
                 raw_payload_hash=hashlib.md5(raw.encode()).hexdigest(),
                 raw_json=raw,
                 parse_error=None if hourly_peak is not None else "parse_failed",
+            )
+
+        if history_high is not None or True:
+            raw = json.dumps({"high_f": history_high, "source": "wu_history"})
+            await insert_forecast_obs(
+                sess,
+                city_id=city.id,
+                source="wu_history",
+                date_et=date_et,
+                high_f=history_high,
+                raw_payload_hash=hashlib.md5(raw.encode()).hexdigest(),
+                raw_json=raw,
+                parse_error=None if history_high is not None else "parse_failed",
             )
 
         # Update forecast_quality on the event
