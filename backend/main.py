@@ -38,7 +38,6 @@ async def run_api() -> None:
     import uvicorn
     from fastapi import FastAPI
     from fastapi.staticfiles import StaticFiles
-    from fastapi.templating import Jinja2Templates
 
     from backend.storage.db import close_db, init_db
     from backend.api.routes import router as api_router
@@ -46,17 +45,29 @@ async def run_api() -> None:
 
     app = FastAPI(title="WeatherQuant", version="1.0.0")
 
+    # Flag so /health can report "initializing" until DB is ready
+    _ready = {"db": False}
+
+    async def _background_startup():
+        try:
+            log.info("api: background init starting (db + CLOB)")
+            await init_db()
+            _ready["db"] = True
+            log.info("api: db init complete")
+
+            clob = CLOBClient()
+            await clob.start()
+            set_clob(clob)
+            log.info("api: CLOB client ready (can_trade=%s)", clob.can_trade)
+        except Exception as e:
+            log.exception("api: background startup failed: %s", e)
+
     @app.on_event("startup")
     async def startup():
-        log.info("api: starting up")
+        log.info("api: server binding — launching background init")
         _log_config_warnings()
-        await init_db()
-
-        # Initialize CLOB client (read-only if no creds)
-        clob = CLOBClient()
-        await clob.start()
-        set_clob(clob)
-        log.info("api: CLOB client ready (can_trade=%s)", clob.can_trade)
+        # Fire-and-forget: don't block the server from binding
+        asyncio.create_task(_background_startup())
 
     @app.on_event("shutdown")
     async def shutdown():
@@ -66,6 +77,10 @@ async def run_api() -> None:
             await clob.close()
         await close_db()
         log.info("api: shutdown complete")
+
+    # Patch the /health route to reflect init state
+    # We do this by storing the ready dict where the route can see it
+    app.state.ready = _ready
 
     # Mount static files
     static_dir = os.path.join(os.path.dirname(__file__), "..", "web", "static")

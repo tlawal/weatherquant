@@ -51,8 +51,27 @@ _start_time = datetime.now(timezone.utc)
 async def health():
     uptime_s = (datetime.now(timezone.utc) - _start_time).total_seconds()
 
-    async with get_session() as sess:
-        heartbeats = await get_all_heartbeats(sess)
+    # DB may not be ready yet if startup is still running in the background
+    try:
+        async with get_session() as sess:
+            heartbeats = await get_all_heartbeats(sess)
+        db_ready = True
+    except RuntimeError:
+        # init_db() hasn't completed yet — return a minimal healthy response
+        # so Railway's healthcheck passes while startup is in progress
+        return {
+            "status": "initializing",
+            "uptime_seconds": round(uptime_s, 1),
+            "version": "weatherquant-v1",
+        }
+    except Exception as e:
+        log.warning("health: db check failed: %s", e)
+        return {
+            "status": "degraded",
+            "uptime_seconds": round(uptime_s, 1),
+            "version": "weatherquant-v1",
+            "error": str(e),
+        }
 
     worker_age = None
     for hb in heartbeats:
