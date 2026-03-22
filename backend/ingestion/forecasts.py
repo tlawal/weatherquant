@@ -404,33 +404,36 @@ async def _scrape_wu_daily(city: City) -> Optional[float]:
 
 
 async def _scrape_wu_hourly(city: City) -> Optional[float]:
-    """Fetch WU v3 API for hourly forecast and return max hourly temp for the day."""
-    if not city.lat or not city.lon:
-        log.warning("wu_hourly: %s missing coords", city.city_slug)
+    """Scrape WU hourly page and return max hourly temp for the day."""
+    url = _wu_hourly_url(city)
+    html = await _fetch_html(url)
+    if not html:
         return None
 
-    # Use the common public v3 API key
-    url = f"https://api.weather.com/v3/wx/forecast/hourly/2day?apiKey=e1f10a1e78da46f5b10a1e78da96f525&geocode={city.lat},{city.lon}&format=json&units=e&language=en-US"
-    
-    try:
-        async with aiohttp.ClientSession(timeout=_TIMEOUT, headers=_WU_HEADERS) as http:
-            async with http.get(url) as resp:
-                if resp.status != 200:
-                    log.error("wu_hourly: HTTP %d for %s", resp.status, url)
-                    return None
-                data = await resp.json()
-        
-        temps = data.get("temperature", [])
-        if not temps:
-            return None
-        
-        # Take the max of the next 24 hours to capture today's remains and tomorrow's peak if relevant
-        # or just the max of the whole set (2 days). Usually max of next 24h is safest for "today".
-        return float(max(temps[:24]))
+    soup = BeautifulSoup(html, "lxml")
 
-    except Exception as e:
-        log.error("wu_hourly: api failed for %s: %s", city.city_slug, e)
+    temps: list[float] = []
+
+    # Primary: table rows with hourly temps
+    for row in soup.find_all("tr"):
+        cells = row.find_all(["td", "th"])
+        for cell in cells:
+            t = _extract_temp_from_element(cell)
+            if t and 20 <= t <= 130:
+                temps.append(t)
+
+    if not temps:
+        # Fallback: all temperature-looking spans
+        for el in soup.find_all(["span", "div"], string=re.compile(r"^\s*\d{2,3}\s*°?\s*$")):
+            t = _extract_temp_from_element(el)
+            if t and 20 <= t <= 130:
+                temps.append(t)
+
+    if not temps:
+        log.warning("wu_hourly: %s — no temps found", city.city_slug)
         return None
+
+    return max(temps)
 
 
 def _extract_temp_from_element(el) -> Optional[float]:
