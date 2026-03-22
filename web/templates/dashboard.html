@@ -28,13 +28,63 @@
   </div>
 
   <!-- City quick links -->
-  <div class="ml-auto flex gap-2">
-    {% for city_slug in cities %}
-    <a href="/city/{{ city_slug }}" class="text-xs px-3 py-1.5 rounded font-medium transition-all hover:opacity-90"
-       style="background:var(--bg-panel);border:1px solid var(--border);color:var(--cyan)">
-      {{ city_slug|replace('-',' ')|title }}
-    </a>
-    {% endfor %}
+  <div class="ml-auto w-full 2xl:w-auto flex justify-start 2xl:justify-end gap-2 mt-2 2xl:mt-0 items-center pt-3 2xl:pt-0 border-t 2xl:border-t-0" style="border-color:var(--border)">
+    <!-- Visible cities (Responsive breakpoints shift these into the dropdown) -->
+    <div class="flex gap-2 items-center">
+      {% for city_slug in cities %}
+      <a href="/city/{{ city_slug }}" class="text-xs px-3 py-1.5 rounded font-medium transition-all hover:opacity-90 whitespace-nowrap
+           {% if loop.index <= 4 %} inline-block
+           {% elif loop.index <= 8 %} hidden sm:inline-block
+           {% elif loop.index <= 12 %} hidden md:inline-block
+           {% elif loop.index <= 16 %} hidden xl:inline-block
+           {% else %} hidden
+           {% endif %}"
+         style="background:var(--bg-panel);border:1px solid var(--border);color:var(--cyan)">
+        {{ city_slug|replace('-',' ')|title }}
+      </a>
+      {% endfor %}
+    </div>
+
+    <!-- Dropdown for the rest -->
+    {% if cities|length > 4 %}
+    <div class="relative" x-data="{ open: false }">
+      <button @click="open = !open" @click.outside="open = false" 
+              class="text-xs px-4 py-1.5 rounded font-bold transition-all hover:opacity-90 flex items-center gap-1.5 whitespace-nowrap shadow-sm"
+              style="background:var(--bg-panel);border:1px solid var(--border);color:var(--text-main)">
+        More
+        <svg class="w-3.5 h-3.5 transition-transform duration-200" :class="{'rotate-180': open}" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+      </button>
+      
+      <!-- Dropdown Popup -->
+      <div x-show="open" 
+           x-transition.opacity.duration.150ms
+           class="absolute right-0 top-full mt-2 w-72 md:w-96 z-50 rounded-xl shadow-[0_10px_40px_-10px_rgba(0,0,0,0.5)] overflow-hidden"
+           style="background:var(--bg-card); border:1px solid var(--border); display: none;">
+           
+           <div class="p-3 text-xs font-semibold uppercase tracking-wider flex justify-between items-center" 
+                style="color:var(--text-muted); border-bottom:1px solid var(--border); background:var(--bg-panel)">
+              <span>All Markets</span>
+              <a href="/admin/cities" class="opacity-70 hover:opacity-100 hover:text-white transition-opacity hidden sm:block">Manage &#8594;</a>
+           </div>
+           
+           <div class="p-3 grid grid-cols-2 sm:grid-cols-3 gap-2 max-h-[50vh] overflow-y-auto">
+             {% for city_slug in cities %}
+             <a href="/city/{{ city_slug }}" 
+                class="text-xs px-2 py-2 rounded text-center transition-colors hover:opacity-100 opacity-80 overflow-hidden text-ellipsis whitespace-nowrap
+                  {% if loop.index <= 4 %} hidden
+                  {% elif loop.index <= 8 %} block sm:hidden
+                  {% elif loop.index <= 12 %} block md:hidden
+                  {% elif loop.index <= 16 %} block xl:hidden
+                  {% else %} block
+                  {% endif %}"
+                style="background:var(--bg-panel);border:1px solid var(--border);color:var(--text-main);">
+               {{ city_slug|replace('-',' ')|title }}
+             </a>
+             {% endfor %}
+           </div>
+      </div>
+    </div>
+    {% endif %}
   </div>
 </div>
 
