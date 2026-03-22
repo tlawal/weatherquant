@@ -242,14 +242,24 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                 "primary": {
                     "source": "nws" if city.is_us else "Open-Meteo",
                     "high_f": primary_fc.high_f if primary_fc else None,
-                    "age_s": _age(primary_fc.fetched_at if primary_fc else None)
+                    "age_s": _age(primary_fc.fetched_at if primary_fc else None),
+                    "url": f"https://api.weather.gov/gridpoints/{city.nws_office}/{city.nws_grid_x},{city.nws_grid_y}/forecast" if city.is_us else f"https://api.open-meteo.com/v1/forecast?latitude={city.lat}&longitude={city.lon}&hourly=temperature_2m&forecast_days=1"
                 },
                 "wu_daily": {
                     "high_f": max((v for v in [wu_d.high_f if wu_d else None, obs_high_f] if v is not None), default=None),
-                    "age_s": _age(wu_d.fetched_at if wu_d else None)
+                    "age_s": _age(wu_d.fetched_at if wu_d else None),
+                    "url": f"https://www.wunderground.com/weather/{city.metar_station}" if city.metar_station else None
                 },
-                "wu_hourly": {"high_f": wu_h.high_f if wu_h else None, "age_s": _age(wu_h.fetched_at if wu_h else None)},
-                "wu_history": {"high_f": wu_history.high_f if wu_history else None, "age_s": _age(wu_history.fetched_at if wu_history else None)},
+                "wu_hourly": {
+                    "high_f": wu_h.high_f if wu_h else None, 
+                    "age_s": _age(wu_h.fetched_at if wu_h else None),
+                    "url": f"https://www.wunderground.com/hourly/{city.metar_station}" if city.metar_station else None
+                },
+                "wu_history": {
+                    "high_f": wu_history.high_f if wu_history else None, 
+                    "age_s": _age(wu_history.fetched_at if wu_history else None),
+                    "url": f"https://www.wunderground.com/history/daily/{city.metar_station}/date/{target_date_et}" if city.metar_station else None
+                },
             },
             "event": event,
             "model": {

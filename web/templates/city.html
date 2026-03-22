@@ -124,10 +124,44 @@
   </div>
 
   <!-- WU Actual History (Settlement) -->
-  <div class="card p-4" style="border:1px solid rgba(234,179,8,0.3)">
+  <div class="card p-4 relative" x-data="{ showMeta: false }" style="border:1px solid rgba(234,179,8,0.3)">
     <div class="flex items-center justify-between text-[10px] uppercase tracking-widest mb-2" style="color:var(--text-muted)">
-      <span>WU Settlement High</span>
-      <span title="Official Polymarket settlement source from WU daily history." style="cursor:help;color:var(--cyan);font-size:12px;opacity:0.7">ⓘ</span>
+      <div class="flex items-center gap-1.5">
+        <span>WU Settlement High</span>
+        <button @click="showMeta = !showMeta" @click.outside="showMeta = false"
+                class="hover:text-cyan-400 opacity-50 hover:opacity-100 transition-all">ⓘ</button>
+      </div>
+    </div>
+    <!-- Meta Popover -->
+    <div x-show="showMeta" x-cloak
+         x-transition:enter="transition ease-out duration-100"
+         x-transition:enter-start="opacity-0 scale-95"
+         x-transition:enter-end="opacity-100 scale-100"
+         class="absolute right-4 top-10 w-80 p-3 rounded-xl shadow-2xl z-50 border text-[10px] normal-case tracking-tight font-medium"
+         style="background:var(--bg-card); border-color:var(--border);">
+      <div class="font-bold mb-2 pb-1 border-b" style="color:var(--cyan); border-color:var(--border)">
+        <span>Weather Underground History</span>
+      </div>
+      <div class="space-y-1.5">
+        <div class="opacity-80 py-1 italic mb-2">Official Polymarket settlement ground truth. Scraped daily after the event concludes.</div>
+        <div class="flex justify-between"><span style="color:var(--text-muted)">Station</span><span class="mono">{{ city.metar_station }}</span></div>
+        <div class="flex justify-between"><span style="color:var(--text-muted)">Status</span>
+          {% if forecasts.wu_history.high_f is not none %}
+          <span class="text-green-400">Settled</span>
+          {% else %}
+          <span class="text-yellow-400">Pending</span>
+          {% endif %}
+        </div>
+        {% if forecasts.wu_history.url %}
+        <div class="mt-2 pt-2 border-t" style="border-color:var(--border)">
+          <a href="{{ forecasts.wu_history.url }}" target="_blank" rel="noopener"
+             class="flex items-center gap-1 hover:underline transition-colors"
+             style="color:var(--cyan)">
+            <span>↗ View Source Page</span>
+          </a>
+        </div>
+        {% endif %}
+      </div>
     </div>
     <div class="text-4xl font-bold mono" style="color:#FBBF24">
       {% if forecasts.wu_history.high_f is not none %}{{ "%.1f"|format(forecasts.wu_history.high_f) }}°{{ city.unit|default('F') }}{% else %}—{% endif %}
@@ -136,10 +170,29 @@
   </div>
 
   <!-- Model Forecast μ -->
-  <div class="card p-4">
+  <div class="card p-4 relative" x-data="{ showMeta: false }">
     <div class="flex items-center justify-between text-[10px] uppercase tracking-widest mb-2" style="color:var(--text-muted)">
-      <span>Model Forecast μ</span>
-      <span title="Projected daily high fusing NWS, WU Daily, and WU Hourly." style="cursor:help;color:var(--cyan);font-size:12px;opacity:0.7">ⓘ</span>
+      <div class="flex items-center gap-1.5">
+        <span>Model Forecast μ</span>
+        <button @click="showMeta = !showMeta" @click.outside="showMeta = false"
+                class="hover:text-cyan-400 opacity-50 hover:opacity-100 transition-all">ⓘ</button>
+      </div>
+    </div>
+    <!-- Meta Popover -->
+    <div x-show="showMeta" x-cloak
+         x-transition:enter="transition ease-out duration-100"
+         x-transition:enter-start="opacity-0 scale-95"
+         x-transition:enter-end="opacity-100 scale-100"
+         class="absolute right-4 top-10 w-80 p-3 rounded-xl shadow-2xl z-50 border text-[10px] normal-case tracking-tight font-medium"
+         style="background:var(--bg-card); border-color:var(--border);">
+      <div class="font-bold mb-2 pb-1 border-b" style="color:var(--cyan); border-color:var(--border)">
+        <span>Distribution Model Mean</span>
+      </div>
+      <div class="space-y-1.5 opacity-90">
+        <p class="py-1 italic mb-2">Projected true daily high, dynamically fusing NWS, WU Daily, and WU Hourly forecasts. Weighted recursively by past prediction accuracy.</p>
+        <div class="flex justify-between"><span style="color:var(--text-muted)">Sigma Spread</span><span class="mono">{% if model and model.sigma %}{{ "%.2f"|format(model.sigma) }}{% else %}—{% endif %}</span></div>
+        <div class="flex justify-between"><span style="color:var(--text-muted)">Latest Computation</span><span class="mono">{% if event and event.status == 'open' %}Real-time{% else %}Finalized{% endif %}</span></div>
+      </div>
     </div>
     <div class="text-4xl font-bold mono" style="color:#A78BFA">
       {% if model and model.mu is not none %}{{ "%.1f"|format(model.mu) }}°{{ city.unit|default('F') }}{% else %}—{% endif %}
@@ -154,25 +207,71 @@
   <!-- Forecast Sources Summary -->
   <div class="card p-4">
     <div class="text-[10px] uppercase tracking-widest mb-3" style="color:var(--text-muted)">Forecast Sources</div>
-    <div class="space-y-2 text-xs">
-      <div class="flex justify-between">
-        <span style="color:var(--text-muted)">{{ forecasts.primary.source }}</span>
+    <div class="space-y-2 text-[11px]">
+      
+      <!-- Primary Source -->
+      <div class="group relative flex justify-between items-center cursor-pointer hover:bg-white/5 p-1 -mx-1 rounded transition-colors" x-data="{ showMeta: false }">
+        <div class="flex items-center gap-1.5" @click="showMeta = !showMeta" @click.outside="showMeta = false">
+          <span style="color:var(--text-muted)">{{ forecasts.primary.source }}</span>
+          <button class="hover:text-cyan-400 opacity-30 group-hover:opacity-100 transition-all">ⓘ</button>
+        </div>
         <span class="mono font-medium {% if forecasts.primary.high_f is not none %}text-white{% else %}text-red-400{% endif %}">
           {% if forecasts.primary.high_f is not none %}{{ "%.1f"|format(forecasts.primary.high_f) }}°{{ city.unit|default('F') }}{% else %}—{% endif %}
         </span>
+        <!-- Popover -->
+        <div x-show="showMeta" x-cloak
+             x-transition:enter="transition ease-out duration-100" class="absolute left-0 top-6 w-64 p-3 rounded-xl shadow-2xl z-50 border font-medium normal-case flex flex-col items-start text-left"
+             style="background:var(--bg-panel); border-color:var(--border);">
+             <div class="font-bold mb-1 pb-1 border-b w-full" style="color:var(--cyan); border-color:var(--border)">{{ forecasts.primary.source }} Forecast</div>
+             <p class="opacity-80 mb-2 mt-1 italic text-[9px]">Baseline foundational forecast.</p>
+             {% if forecasts.primary.url %}
+             <a href="{{ forecasts.primary.url }}" target="_blank" rel="noopener" class="text-[10px] flex items-center gap-1 hover:underline transition-colors" style="color:var(--cyan)">↗ View API Source</a>
+             {% endif %}
+        </div>
       </div>
-      <div class="flex justify-between">
-        <span style="color:var(--text-muted)">WU Forecast</span>
+
+      <!-- WU Daily Forecast -->
+      <div class="group relative flex justify-between items-center cursor-pointer hover:bg-white/5 p-1 -mx-1 rounded transition-colors" x-data="{ showMeta: false }">
+        <div class="flex items-center gap-1.5" @click="showMeta = !showMeta" @click.outside="showMeta = false">
+          <span style="color:var(--text-muted)">WU Forecast</span>
+          <button class="hover:text-cyan-400 opacity-30 group-hover:opacity-100 transition-all">ⓘ</button>
+        </div>
         <span class="mono font-medium {% if forecasts.wu_daily.high_f is not none %}text-white{% else %}text-red-400{% endif %}">
           {% if forecasts.wu_daily.high_f is not none %}{{ "%.1f"|format(forecasts.wu_daily.high_f) }}°{{ city.unit|default('F') }}{% else %}—{% endif %}
         </span>
+        <!-- Popover -->
+        <div x-show="showMeta" x-cloak
+             x-transition:enter="transition ease-out duration-100" class="absolute left-0 top-6 w-64 p-3 rounded-xl shadow-2xl z-50 border font-medium normal-case flex flex-col items-start text-left"
+             style="background:var(--bg-panel); border-color:var(--border);">
+             <div class="font-bold mb-1 pb-1 border-b w-full" style="color:var(--cyan); border-color:var(--border)">Weather Underground Daily</div>
+             <p class="opacity-80 mb-2 mt-1 italic text-[9px]">The daily highest temperature prediction directly from WU's frontend.</p>
+             {% if forecasts.wu_daily.url %}
+             <a href="{{ forecasts.wu_daily.url }}" target="_blank" rel="noopener" class="text-[10px] flex items-center gap-1 hover:underline transition-colors" style="color:var(--cyan)">↗ View WU Location Page</a>
+             {% endif %}
+        </div>
       </div>
-      <div class="flex justify-between">
-        <span style="color:var(--text-muted)">WU Hourly Peak</span>
+
+      <!-- WU Hourly Peak -->
+      <div class="group relative flex justify-between items-center cursor-pointer hover:bg-white/5 p-1 -mx-1 rounded transition-colors" x-data="{ showMeta: false }">
+        <div class="flex items-center gap-1.5" @click="showMeta = !showMeta" @click.outside="showMeta = false">
+          <span style="color:var(--text-muted)">WU Hourly Peak</span>
+          <button class="hover:text-cyan-400 opacity-30 group-hover:opacity-100 transition-all">ⓘ</button>
+        </div>
         <span class="mono font-medium {% if forecasts.wu_hourly.high_f is not none %}text-white{% else %}text-red-400{% endif %}">
           {% if forecasts.wu_hourly.high_f is not none %}{{ "%.1f"|format(forecasts.wu_hourly.high_f) }}°{{ city.unit|default('F') }}{% else %}—{% endif %}
         </span>
+        <!-- Popover -->
+        <div x-show="showMeta" x-cloak
+             x-transition:enter="transition ease-out duration-100" class="absolute left-0 top-6 w-64 p-3 rounded-xl shadow-2xl z-50 border font-medium normal-case flex flex-col items-start text-left"
+             style="background:var(--bg-panel); border-color:var(--border);">
+             <div class="font-bold mb-1 pb-1 border-b w-full" style="color:var(--cyan); border-color:var(--border)">Weather Underground Hourly Max</div>
+             <p class="opacity-80 mb-2 mt-1 italic text-[9px]">The highest individual hour's projection from the WU 24-hour model. Crucial for afternoon temperature spikes.</p>
+             {% if forecasts.wu_hourly.url %}
+             <a href="{{ forecasts.wu_hourly.url }}" target="_blank" rel="noopener" class="text-[10px] flex items-center gap-1 hover:underline transition-colors" style="color:var(--cyan)">↗ View WU Hourly Chart</a>
+             {% endif %}
+        </div>
       </div>
+
     </div>
   </div>
 </div>
