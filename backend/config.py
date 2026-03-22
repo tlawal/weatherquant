@@ -458,3 +458,17 @@ class Config:
             "unit": "C",
         },
     ]
+
+    @classmethod
+    def validate(cls) -> list[str]:
+        """Return list of critical missing config warnings."""
+        warnings = []
+        if not cls.POLYMARKET_PRIVATE_KEY:
+            warnings.append("POLYMARKET_PRIVATE_KEY not set — trading disabled")
+        if not cls.ADMIN_TOKEN:
+            warnings.append("ADMIN_TOKEN not set — all write endpoints unauthenticated!")
+        if not cls.ARMING_SECRET:
+            warnings.append("ARMING_SECRET not set — arming disabled")
+        if cls.BANKROLL_CAP > 100:
+            warnings.append(f"BANKROLL_CAP={cls.BANKROLL_CAP} exceeds $100 safety limit!")
+        return warnings
