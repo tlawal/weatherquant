@@ -118,6 +118,16 @@ def compute_model(
     w_nws = cal.get("weight_nws", 1/3)
     w_wud = cal.get("weight_wu_daily", 1/3)
     w_wuh = cal.get("weight_wu_hourly", 1/3)
+    # WU Nighttime Rollover Protection
+    # If it's past 18:00 ET and the WU daily forecast deviates wildly from the actual METAR high so far,
+    # it's highly likely WU has rolled over its "Today" block to display tomorrow's high. We discard it.
+    now_et = datetime.now(ET)
+    hour_et = now_et.hour
+    if hour_et >= 18 and wu_daily_high is not None and daily_high_metar is not None:
+        unit_dev = 6.0 if unit == "C" else 10.0
+        if abs(wu_daily_high - daily_high_metar) > unit_dev:
+            log.warning("model: dropping wu_daily_high (%.1f) due to likely nighttime rollover (metar=%.1f)", wu_daily_high, daily_high_metar)
+            wu_daily_high = None
 
     calibrated = {}
     if nws_high is not None:
@@ -148,9 +158,6 @@ def compute_model(
         sigma_raw = 2.5 * unit_mult
 
     # ── METAR intraday adjustment ──────────────────────────────────────────────
-    now_et = datetime.now(ET)
-    hour_et = now_et.hour
-
     w_metar = _metar_weight(hour_et)
     remaining_rise = _expected_remaining_rise(hour_et) * unit_mult
 
@@ -188,24 +195,24 @@ def compute_model(
         "wu_hourly_peak": wu_hourly_peak,
         "daily_high_metar": daily_high_metar,
         "current_temp_f": current_temp_f,
-        "mu_forecast": round(mu_forecast, 2),
-        "projected_high": round(projected_high, 2),
-        "w_metar": round(w_metar, 3),
+        "mu_forecast": float(mu_forecast),
+        "projected_high": float(projected_high),
+        "w_metar": float(w_metar),
         "remaining_rise": remaining_rise,
         "hour_et": hour_et,
-        "spread": round(max(vals) - min(vals), 2) if len(vals) >= 2 else 0,
-        "sigma_raw": round(sigma_raw, 3),
+        "spread": float(max(vals) - min(vals)) if len(vals) >= 2 else 0.0,
+        "sigma_raw": float(sigma_raw),
         "sources_used": list(calibrated.keys()),
         "forecast_quality": forecast_quality,
     }
 
     return ModelResult(
-        mu=round(mu_final, 2),
-        sigma=round(sigma_final, 3),
+        mu=float(mu_final),
+        sigma=float(sigma_final),
         probs=probs,
-        mu_forecast=round(mu_forecast, 2),
-        mu_projected=round(projected_high, 2),
-        w_metar=round(w_metar, 3),
+        mu_forecast=float(mu_forecast),
+        mu_projected=float(projected_high),
+        w_metar=float(w_metar),
         remaining_rise=remaining_rise,
         forecast_quality=forecast_quality,
         inputs=inputs,

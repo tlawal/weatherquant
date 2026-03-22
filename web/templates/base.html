@@ -56,17 +56,30 @@
 
   <style>
     :root {
+      --bg-primary: #F8FAFC;
+      --bg-card:    #FFFFFF;
+      --bg-panel:   #F1F5F9;
+      --border:     #E2E8F0;
+      --text-muted: #64748B;
+      --cyan:       #06B6D4;
+      --green:      #16A34A;
+      --yellow:     #CA8A04;
+      --red:        #DC2626;
+      --text-main:  #0F172A;
+    }
+    .dark {
       --bg-primary: #020B18;
       --bg-card:    #040F1F;
       --bg-panel:   #071428;
       --border:     #1A3A6B;
-      --text-muted: #64748B;
+      --text-muted: #94A3B8;
       --cyan:       #22D3EE;
       --green:      #22C55E;
       --yellow:     #EAB308;
       --red:        #EF4444;
+      --text-main:  #E2E8F0;
     }
-    body { background: var(--bg-primary); color: #E2E8F0; }
+    body { background: var(--bg-primary); color: var(--text-main); }
     .card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; }
     .panel { background: var(--bg-panel); }
     .mono  { font-family: 'JetBrains Mono', monospace; }

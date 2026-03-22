@@ -1,7 +1,7 @@
 {% for row in signal_rows %}
-<tr class="border-b transition-colors hover:bg-white/5 cursor-pointer
+<tr class="border-b transition-colors hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer
   {% if row.true_edge >= 0.15 %}edge-hot{% elif row.true_edge >= 0.10 %}edge-warm{% else %}edge-cold{% endif %}"
-  style="border-color:rgba(26,58,107,0.5)"
+  style="border-color:var(--border)"
   onclick="quickTrade('{{ row.city_slug }}', {{ row.bucket_idx }})">
 
   <!-- City -->
@@ -33,7 +33,7 @@
   </td>
 
   <!-- Model prob -->
-  <td class="px-4 py-3 text-right mono text-sm text-white font-medium">
+  <td class="px-4 py-3 text-right mono text-sm font-medium">
     {% if row.model_prob %}{{ "%.1f"|format(row.model_prob * 100) }}%{% else %}—{% endif %}
   </td>
 
