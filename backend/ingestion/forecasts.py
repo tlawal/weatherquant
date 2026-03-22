@@ -296,20 +296,25 @@ async def _scrape_wu_city(city: City, date_et: str) -> None:
     parse_err = None if wu_ok else "all_wu_sources_failed"
 
     async with get_session() as sess:
-        # Floor: if scraped wu_daily is below today's METAR-observed high, use METAR
-        # instead. The WU daily page transitions to night forecast in late afternoon,
-        # causing the scraper to pick up the overnight low instead of the day's high.
-        # METAR is ground truth — if it's already seen 78°F, 63°F can't be the day high.
+        # Floor: wu_daily can't be below any already-known high for today.
+        # The WU daily page transitions to night forecast in late afternoon, causing
+        # the scraper to pick up the overnight low instead of the day's high.
+        # Use history_high + hourly_peak (already fetched above) as primary floors
+        # since they come from APIs rather than HTML scraping. METAR provides
+        # an additional floor if available.
         metar_high = await get_daily_high_metar(sess, city.id, date_et)
-        if (daily_high is not None
-                and metar_high is not None
-                and daily_high < metar_high):
+        floor = max(
+            (v for v in [metar_high, history_high, hourly_peak] if v is not None),
+            default=None,
+        )
+        if daily_high is not None and floor is not None and daily_high < floor:
             log.info(
-                "wu_daily: %s scraped %.1f < metar obs high %.1f — "
-                "flooring to metar value (page likely shows night forecast)",
-                city.city_slug, daily_high, metar_high,
+                "wu_daily: %s scraped %.1f < floor %.1f "
+                "(metar=%.1f, history=%.1f, hourly=%.1f) — using floor",
+                city.city_slug, daily_high, floor,
+                metar_high or 0, history_high or 0, hourly_peak or 0,
             )
-            daily_high = metar_high
+            daily_high = floor
 
         raw = json.dumps({"high_f": daily_high, "source": "wu_daily"})
         await insert_forecast_obs(
