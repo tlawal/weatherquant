@@ -141,6 +141,7 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
 
     target_date_et = date if date else real_today_et
 
+    async with get_session() as sess:
         # Fetch available event dates for this city
         from sqlalchemy import select, distinct
         from backend.storage.models import Event
