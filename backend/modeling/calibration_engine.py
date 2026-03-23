@@ -11,7 +11,7 @@ import logging
 from dataclasses import dataclass
 from typing import Optional, List, Dict
 
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, func
 from backend.storage.db import get_session
 from backend.storage.models import ModelSnapshot, Event, ForecastObs, Bucket
 
@@ -41,23 +41,53 @@ async def get_reliability_metrics(city_id: int, days_back: int = 30) -> List[Rel
     bins = [ReliabilityBin(i/10, (i+1)/10) for i in range(10)]
     
     async with get_session() as sess:
-        # Join ModelSnapshot -> Event -> ForecastObs (wu_history)
+        # Subquery: latest ModelSnapshot per event (one per event, not hundreds)
+        latest_snap_sub = (
+            select(
+                ModelSnapshot.event_id,
+                func.max(ModelSnapshot.id).label("max_snap_id"),
+            )
+            .group_by(ModelSnapshot.event_id)
+            .subquery()
+        )
+
+        # Subquery: latest wu_history ForecastObs per (city_id, date_et)
+        latest_wu_sub = (
+            select(
+                ForecastObs.city_id,
+                ForecastObs.date_et,
+                func.max(ForecastObs.id).label("max_fo_id"),
+            )
+            .where(ForecastObs.source == "wu_history")
+            .group_by(ForecastObs.city_id, ForecastObs.date_et)
+            .subquery()
+        )
+
+        # Only settled past events (exclude today)
+        from datetime import date, timezone, datetime
+        today_et = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
         query = (
             select(ModelSnapshot, ForecastObs.high_f, Event.id)
+            .join(latest_snap_sub, ModelSnapshot.id == latest_snap_sub.c.max_snap_id)
             .join(Event, ModelSnapshot.event_id == Event.id)
             .join(
-                ForecastObs, 
-                (ForecastObs.city_id == Event.city_id) & 
-                (ForecastObs.date_et == Event.date_et)
+                latest_wu_sub,
+                (latest_wu_sub.c.city_id == Event.city_id)
+                & (latest_wu_sub.c.date_et == Event.date_et),
+            )
+            .join(
+                ForecastObs,
+                ForecastObs.id == latest_wu_sub.c.max_fo_id,
             )
             .where(Event.city_id == city_id)
-            .where(ForecastObs.source == "wu_history")
-            .order_by(desc(ModelSnapshot.computed_at))
-            .limit(500) # Analyze last 500 snapshots
+            .where(Event.date_et < today_et)
+            .order_by(desc(Event.date_et))
+            .limit(200)
         )
-        
+
         results = (await sess.execute(query)).all()
-        
+
         # We also need the bucket boundaries for each event to check for "hits"
         event_ids = list(set([r[2] for r in results]))
         event_buckets = {}

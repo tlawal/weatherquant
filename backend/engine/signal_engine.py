@@ -71,6 +71,7 @@ class BucketSignal:
     actionable: bool = False
     prob_new_high: float = 1.0
     city_state: str = "early"
+    resolution_mismatch: Optional[float] = None
 
 
 def classify_city_state(prob_new_high: float) -> str:
@@ -176,6 +177,20 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
     else:
         ground_truth_high = daily_high  # raw MAX fallback
 
+    # Observed high floor for conditional probabilities:
+    # Use ground_truth_high if available, otherwise fall back to current METAR temp
+    # (current temp is always a lower bound for the daily high)
+    observed_high_floor = ground_truth_high
+    if observed_high_floor is None and metar and metar.temp_f is not None:
+        observed_high_floor = metar.temp_f
+
+    # Resolution mismatch: raw_high exceeds resolution_high
+    resolution_mismatch = None
+    if daily_high is not None and resolution_high is not None:
+        mismatch = daily_high - resolution_high
+        if mismatch >= 1.0:
+            resolution_mismatch = round(mismatch, 1)
+
     # Build calibration dict
     cal_dict = None
     if cal:
@@ -200,6 +215,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         forecast_quality=event.forecast_quality or "ok",
         unit=getattr(city, "unit", "F"),
         city_tz=getattr(city, "tz", "America/New_York"),
+        observed_high=observed_high_floor,
     )
 
     if model is None:
@@ -268,6 +284,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
                 gate_failures=["no_market_data"],
                 prob_new_high=prob_new_high,
                 city_state=city_state,
+                resolution_mismatch=resolution_mismatch,
             )
             signals.append(sig)
             continue
@@ -300,6 +317,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
             "resolution_high": resolution_high,
             "raw_high": daily_high,
             "observation_minutes": valid_minutes,
+            "resolution_mismatch": resolution_mismatch,
         }
 
         actionable = (
@@ -333,6 +351,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
             actionable=actionable,
             prob_new_high=prob_new_high,
             city_state=city_state,
+            resolution_mismatch=resolution_mismatch,
         )
         signals.append(sig)
 

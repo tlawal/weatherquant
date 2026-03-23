@@ -91,6 +91,7 @@ async def dashboard(request: Request):
             "resolution_high": reason.get("resolution_high"),
             "raw_high": reason.get("raw_high"),
             "observation_minutes": reason.get("observation_minutes"),
+            "resolution_mismatch": reason.get("resolution_mismatch"),
         })
 
     # Deduplicate — keep latest signal per (city, bucket_idx)
@@ -255,6 +256,7 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
             "available_dates": available_dates,
             "obs_high_f": obs_high_f,
             "resolution_high_f": resolution_high_f,
+            "resolution_mismatch": round(obs_high_f - resolution_high_f, 1) if (obs_high_f is not None and resolution_high_f is not None and obs_high_f - resolution_high_f >= 1.0) else None,
             "observation_minutes": obs_minutes_list,
             "station_confidence": station_profile.confidence if station_profile else None,
             "station_frequency": station_profile.observation_frequency if station_profile else None,
@@ -315,8 +317,9 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
             "buckets": buckets_with_signals,
             "reliability_json": json.dumps([
                 {"expected": b.expected_prob, "observed": b.observed_prob, "count": b.count}
-                for b in (await get_reliability_metrics(city.id))
+                for b in (reliability_bins := await get_reliability_metrics(city.id))
             ]),
+            "reliability_total_samples": sum(b.count for b in reliability_bins),
         },
     )
 
@@ -392,6 +395,7 @@ async def htmx_signals_table(request: Request):
             "resolution_high": reason.get("resolution_high"),
             "raw_high": reason.get("raw_high"),
             "observation_minutes": reason.get("observation_minutes"),
+            "resolution_mismatch": reason.get("resolution_mismatch"),
         })
 
     rows.sort(key=lambda r: (get_city_priority(r["city_slug"]), -r["true_edge"]))

@@ -81,6 +81,13 @@
     {% else %}
       <span class="text-[10px] px-2 py-0.5 rounded-full font-bold" style="background:#1C1917;color:#78716C">DONE</span>
     {% endif %}
+    {% if row.resolution_mismatch %}
+      <span class="text-[9px] px-1.5 py-0.5 rounded-full font-bold ml-1"
+            style="background:#7C2D12;color:#FB923C"
+            title="Raw observed high exceeds resolution high by {{ row.resolution_mismatch }}°">
+        RES +{{ row.resolution_mismatch }}°
+      </span>
+    {% endif %}
   </td>
 
   <!-- Prob New High -->

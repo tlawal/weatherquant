@@ -53,6 +53,54 @@ def bucket_probabilities(
     return probs
 
 
+def conditional_bucket_probabilities(
+    mu: float,
+    sigma: float,
+    buckets: list[tuple[Optional[float], Optional[float]]],
+    floor: float,
+) -> list[float]:
+    """
+    Compute P(T in bucket | T >= floor) for each bucket.
+
+    The daily high can only go up, never down. If the observed high so far
+    is `floor`, any bucket whose ceiling <= floor has zero probability.
+    Remaining buckets get renormalized so probabilities sum to 1.0.
+
+    Args:
+        mu: forecast mean temperature
+        sigma: forecast std deviation (must be > 0)
+        buckets: list of (low_f, high_f) pairs
+        floor: observed high so far — buckets below this are impossible
+
+    Returns:
+        List of probabilities, same length as buckets, summing to ~1.0.
+    """
+    if sigma <= 0:
+        raise ValueError(f"sigma must be positive, got {sigma}")
+    if not buckets:
+        return []
+
+    probs = []
+    for lo, hi in buckets:
+        # Zero out buckets fully below the floor
+        if hi is not None and floor >= hi:
+            probs.append(0.0)
+            continue
+        # For buckets that straddle the floor, clamp the lower bound
+        effective_lo = max(lo, floor) if lo is not None else floor
+        lo_cdf = float(norm.cdf(effective_lo, mu, sigma))
+        hi_cdf = 1.0 if hi is None else float(norm.cdf(hi, mu, sigma))
+        prob = max(0.0, hi_cdf - lo_cdf)
+        probs.append(prob)
+
+    # Renormalize so remaining buckets sum to 1.0
+    total = sum(probs)
+    if total > 0:
+        probs = [p / total for p in probs]
+
+    return probs
+
+
 def implied_prob_from_price(mid_price: float, fee_rate: float = 0.02) -> float:
     """
     Convert YES mid price to implied probability, adjusting for fee.

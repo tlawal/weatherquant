@@ -44,8 +44,8 @@ async def detect_observation_pattern(metar_station: str) -> Optional[dict]:
     async with get_session() as sess:
         obs_list = await get_metar_obs_for_station(sess, metar_station, since)
 
-    if len(obs_list) < 12:
-        log.debug("station_pattern: %s — only %d obs (<12), skipping", metar_station, len(obs_list))
+    if len(obs_list) < 3:
+        log.debug("station_pattern: %s — only %d obs (<3), skipping", metar_station, len(obs_list))
         return None
 
     # Extract minute of each observation
@@ -60,20 +60,20 @@ async def detect_observation_pattern(metar_station: str) -> Optional[dict]:
         for ob in obs_list if ob.observed_at
     ))
 
-    if hours_with_data < 6:
-        log.debug("station_pattern: %s — only %d hours with data (<6)", metar_station, hours_with_data)
+    if hours_with_data < 2:
+        log.debug("station_pattern: %s — only %d hours with data (<2)", metar_station, hours_with_data)
         return None
 
     # Build histogram
     minute_counts = Counter(minutes)
-    threshold = hours_with_data * 0.5  # >50% of hours
+    threshold = hours_with_data * 0.4  # >40% of hours
 
     # Find raw peaks
     raw_peaks = [m for m, count in minute_counts.items() if count >= threshold]
 
     if not raw_peaks:
         # Lower threshold and try again
-        threshold = hours_with_data * 0.3
+        threshold = hours_with_data * 0.2
         raw_peaks = [m for m, count in minute_counts.items() if count >= threshold]
 
     if not raw_peaks:

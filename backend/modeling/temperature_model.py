@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 
 from scipy.stats import norm as _norm
 
-from backend.modeling.distribution import bucket_probabilities
+from backend.modeling.distribution import bucket_probabilities, conditional_bucket_probabilities
 
 log = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")
@@ -95,6 +95,7 @@ def compute_model(
     forecast_quality: str = "ok",
     unit: str = "F",
     city_tz: str = "America/New_York",
+    observed_high: Optional[float] = None,
 ) -> Optional[ModelResult]:
     """
     Fuse all forecast sources and compute temperature distribution + bucket probabilities.
@@ -200,6 +201,11 @@ def compute_model(
     if not buckets:
         log.warning("model: no buckets to compute probabilities for")
         probs = []
+    elif observed_high is not None:
+        # Daily high can only go up — zero out buckets already surpassed
+        probs = conditional_bucket_probabilities(
+            mu_final, sigma_final, buckets, floor=observed_high
+        )
     else:
         probs = bucket_probabilities(mu_final, sigma_final, buckets)
 
@@ -226,6 +232,7 @@ def compute_model(
         "sources_used": list(calibrated.keys()),
         "forecast_quality": forecast_quality,
         "prob_new_high": round(prob_new_high, 4),
+        "observed_high": observed_high,
     }
 
     return ModelResult(
