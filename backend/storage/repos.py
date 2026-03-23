@@ -36,11 +36,15 @@ from backend.storage.models import (
 # ─── Cities ───────────────────────────────────────────────────────────────────
 
 async def get_all_cities(session: AsyncSession, enabled_only: bool = False) -> list[City]:
+    from backend.city_registry import get_city_priority
+
     q = select(City)
     if enabled_only:
         q = q.where(City.enabled.is_(True))
     result = await session.execute(q)
-    return list(result.scalars().all())
+    cities = list(result.scalars().all())
+    cities.sort(key=lambda c: get_city_priority(c.city_slug))
+    return cities
 
 
 async def get_city_by_slug(session: AsyncSession, city_slug: str) -> Optional[City]:
