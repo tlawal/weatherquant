@@ -125,14 +125,22 @@ def _validate_buckets(buckets: list[dict]) -> list[str]:
 
 async def fetch_gamma_all() -> None:
     """Discover/refresh today's events for all enabled cities."""
+    from backend.tz_utils import city_local_date, et_today
+
     async with get_session() as sess:
         cities = await get_all_cities(sess, enabled_only=True)
 
-    today_et = date.today()
-    today_str = today_et.isoformat()
+    et_date = et_today()
+    city_dates = {}
+    for city in cities:
+        city_date = city_local_date(city)
+        city_dates[city.city_slug] = city_date
+        if city_date != et_date:
+            log.info("gamma: %s local_date=%s differs from et=%s (tz=%s)",
+                     city.city_slug, city_date, et_date, getattr(city, "tz", "?"))
 
     results = await asyncio.gather(
-        *[_fetch_city_event(city, today_et, today_str) for city in cities],
+        *[_fetch_city_event(city, city_dates[city.city_slug]) for city in cities],
         return_exceptions=True,
     )
 
@@ -144,8 +152,10 @@ async def fetch_gamma_all() -> None:
         await update_heartbeat(sess, "fetch_gamma", success=True)
 
 
-async def _fetch_city_event(city, today_et: date, today_str: str) -> None:
-    slugs = _build_slugs(city.city_slug, today_et)
+async def _fetch_city_event(city, date_str: str) -> None:
+    from datetime import date as date_type
+    target_date = date_type.fromisoformat(date_str)
+    slugs = _build_slugs(city.city_slug, target_date)
     
     event_data = None
     final_slug = slugs[0]
@@ -174,14 +184,14 @@ async def _fetch_city_event(city, today_et: date, today_str: str) -> None:
             await upsert_event(
                 sess,
                 city_id=city.id,
-                date_et=today_str,
+                date_et=date_str,
                 gamma_slug=slugs[0],
                 status="no_event",
                 trading_enabled=False,
             )
         return
 
-    await _process_event_data(city, today_str, final_slug, event_data)
+    await _process_event_data(city, date_str, final_slug, event_data)
 
 
 async def _process_event_data(city, date_et: str, slug: str, event_data: dict) -> None:

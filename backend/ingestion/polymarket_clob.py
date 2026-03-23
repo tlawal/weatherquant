@@ -14,6 +14,7 @@ from typing import Optional
 import aiohttp
 
 from backend.config import Config
+from backend.tz_utils import city_local_date
 from backend.storage.db import get_session
 from backend.storage.repos import (
     get_all_cities,
@@ -206,16 +207,15 @@ class CLOBClient:
             return None
 
 
-async def fetch_clob_orderbooks(clob: CLOBClient, date_et: str) -> None:
+async def fetch_clob_orderbooks(clob: CLOBClient) -> None:
     """Fetch order books for all watched buckets and persist snapshots."""
-    from datetime import date as date_type
-
     async with get_session() as sess:
         cities = await get_all_cities(sess, enabled_only=True)
 
     for city in cities:
+        today_local = city_local_date(city)
         async with get_session() as sess:
-            event = await get_event(sess, city.id, date_et)
+            event = await get_event(sess, city.id, today_local)
             if not event or event.status != "ok":
                 continue
             buckets = await get_buckets_for_event(sess, event.id)

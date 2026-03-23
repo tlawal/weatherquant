@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from backend.api.deps import require_admin
+from backend.tz_utils import city_local_date, et_today
 from backend.config import Config
 from backend.execution import arming as arming_mod
 from backend.storage.db import get_session
@@ -265,15 +266,15 @@ async def list_cities():
         heartbeats = await get_all_heartbeats(sess)
 
     hb_map = {hb.job_name: hb for hb in heartbeats}
-    today_et = date.today().isoformat()
 
     result = []
     for city in cities:
+        today_city = city_local_date(city)
         async with get_session() as sess:
             metar = await get_latest_metar(sess, city.id)
-            nws = await get_latest_forecast(sess, city.id, "nws", today_et)
-            wu_d = await get_latest_forecast(sess, city.id, "wu_daily", today_et)
-            event = await get_event(sess, city.id, today_et)
+            nws = await get_latest_forecast(sess, city.id, "nws", today_city)
+            wu_d = await get_latest_forecast(sess, city.id, "wu_daily", today_city)
+            event = await get_event(sess, city.id, today_city)
 
         result.append({
             "city_slug": city.city_slug,
@@ -300,16 +301,15 @@ async def list_cities():
 
 @router.get("/state/{city_slug}")
 async def get_city_state(city_slug: str):
-    today_et = date.today().isoformat()
-
     async with get_session() as sess:
         city = await _get_city_or_404(sess, city_slug)
+        today_city = city_local_date(city)
         metar = await get_latest_metar(sess, city.id)
-        nws = await get_latest_forecast(sess, city.id, "nws", today_et)
-        wu_d = await get_latest_forecast(sess, city.id, "wu_daily", today_et)
-        wu_h = await get_latest_forecast(sess, city.id, "wu_hourly", today_et)
-        wu_hist = await get_latest_forecast(sess, city.id, "wu_history", today_et)
-        event = await get_event(sess, city.id, today_et)
+        nws = await get_latest_forecast(sess, city.id, "nws", today_city)
+        wu_d = await get_latest_forecast(sess, city.id, "wu_daily", today_city)
+        wu_h = await get_latest_forecast(sess, city.id, "wu_hourly", today_city)
+        wu_hist = await get_latest_forecast(sess, city.id, "wu_history", today_city)
+        event = await get_event(sess, city.id, today_city)
         model = None if not event else await get_latest_model_snapshot(sess, event.id)
 
     def _age_s(dt_):
@@ -365,10 +365,10 @@ async def get_city_state(city_slug: str):
 
 @router.get("/markets/{city_slug}")
 async def get_markets(city_slug: str):
-    today_et = date.today().isoformat()
     async with get_session() as sess:
         city = await _get_city_or_404(sess, city_slug)
-        event = await get_event(sess, city.id, today_et)
+        today_city = city_local_date(city)
+        event = await get_event(sess, city.id, today_city)
         if not event:
             return {"event": None, "buckets": []}
 
@@ -450,10 +450,10 @@ async def get_all_signals():
 
 @router.get("/signals/{city_slug}")
 async def get_city_signals(city_slug: str):
-    today_et = date.today().isoformat()
     async with get_session() as sess:
         city = await _get_city_or_404(sess, city_slug)
-        event = await get_event(sess, city.id, today_et)
+        today_city = city_local_date(city)
+        event = await get_event(sess, city.id, today_city)
         if not event:
             return []
         buckets = await get_buckets_for_event(sess, event.id)
@@ -486,10 +486,10 @@ async def get_city_signals(city_slug: str):
 
 @router.get("/positions")
 async def get_positions():
-    today_et = date.today().isoformat()
+    today = et_today()
     async with get_session() as sess:
         positions = await get_all_positions(sess)
-        daily_pnl = await get_daily_realized_pnl(sess, today_et)
+        daily_pnl = await get_daily_realized_pnl(sess, today)
 
     result = []
     for p in positions:
@@ -661,11 +661,10 @@ async def manual_trade(
     from backend.execution.trader import execute_signal
     from backend.ingestion.polymarket_clob import get_clob
 
-    today_et = date.today().isoformat()
-
     async with get_session() as sess:
         city = await _get_city_or_404(sess, body.city_slug)
-        event = await get_event(sess, city.id, today_et)
+        today_city = city_local_date(city)
+        event = await get_event(sess, city.id, today_city)
         if not event:
             raise HTTPException(status_code=404, detail="No event today for this city")
 

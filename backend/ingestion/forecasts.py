@@ -16,7 +16,7 @@ import hashlib
 import json
 import logging
 import re
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -24,6 +24,7 @@ import aiohttp
 from bs4 import BeautifulSoup
 
 from backend.config import Config
+from backend.tz_utils import city_local_date
 from backend.storage.db import get_session
 from backend.storage.models import City
 from backend.storage.repos import (
@@ -66,13 +67,13 @@ async def fetch_nws_all() -> None:
     async with get_session() as sess:
         cities = await get_all_cities(sess, enabled_only=True)
 
-    today_et = date.today().isoformat()
-
     for city in cities:
         if not city.is_us:
             continue
         if not (city.nws_office and city.nws_grid_x and city.nws_grid_y):
             continue
+
+        today_et = city_local_date(city)
 
         try:
             high_f = await _fetch_nws_high(city)
@@ -103,25 +104,36 @@ async def fetch_open_meteo_all() -> None:
     async with get_session() as sess:
         cities = await get_all_cities(sess, enabled_only=True)
 
-    today_et = date.today().isoformat()
-
     for city in cities:
         if city.is_us:
             continue
-        
+
+        city_date = city_local_date(city)
+        actual_source = "open_meteo"
+
         try:
             high_f = await _fetch_open_meteo_high(city)
         except Exception as e:
             log.error("open-meteo: %s failed: %s", city.city_slug, e)
             high_f = None
 
+        # Fallback to OpenWeatherMap if Open-Meteo fails
+        if high_f is None:
+            try:
+                high_f = await _fetch_owm_forecast_high(city)
+                if high_f is not None:
+                    actual_source = "owm_fallback"
+                    log.info("owm_fallback: %s high_f=%s", city.city_slug, high_f)
+            except Exception as e:
+                log.error("owm_fallback: %s failed: %s", city.city_slug, e)
+
         async with get_session() as sess:
-            raw = json.dumps({"source": "open_meteo", "high_f": high_f})
+            raw = json.dumps({"source": actual_source, "high_f": high_f})
             await insert_forecast_obs(
                 sess,
                 city_id=city.id,
-                source="open_meteo",
-                date_et=today_et,
+                source="open_meteo",  # always "open_meteo" so web route query works
+                date_et=city_date,
                 high_f=high_f,
                 raw_payload_hash=hashlib.md5(raw.encode()).hexdigest(),
                 raw_json=raw,
@@ -130,7 +142,7 @@ async def fetch_open_meteo_all() -> None:
             await update_heartbeat(
                 sess, "fetch_open_meteo", success=(high_f is not None)
             )
-        log.info("open-meteo: %s high_f=%s", city.city_slug, high_f)
+        log.info("open-meteo: %s high_f=%s (source=%s, date=%s)", city.city_slug, high_f, actual_source, city_date)
 
 
 async def _fetch_open_meteo_high(city: City) -> Optional[float]:
@@ -175,6 +187,36 @@ async def _fetch_open_meteo_high(city: City) -> Optional[float]:
         return None
 
 
+async def _fetch_owm_forecast_high(city: City) -> Optional[float]:
+    """Fallback: OpenWeatherMap current temp_max for international cities."""
+    if city.lat is None or city.lon is None:
+        return None
+
+    url = (
+        f"https://api.openweathermap.org/data/2.5/weather"
+        f"?lat={city.lat}&lon={city.lon}"
+        f"&appid=de79374f3007b36700415b6679d810b1&units=metric"
+    )
+    try:
+        async with aiohttp.ClientSession(timeout=_TIMEOUT) as http:
+            async with http.get(url) as resp:
+                if resp.status != 200:
+                    log.warning("owm: HTTP %d for %s", resp.status, city.city_slug)
+                    return None
+                data = await resp.json()
+
+        temp_max_c = data.get("main", {}).get("temp_max")
+        if temp_max_c is None:
+            return None
+
+        if city.unit == "F":
+            return round(float(temp_max_c) * 9 / 5 + 32, 1)
+        return round(float(temp_max_c), 1)
+    except Exception as e:
+        log.exception("owm: failed for %s", city.city_slug)
+        return None
+
+
 async def _fetch_nws_high(city: City) -> Optional[float]:
     """Fetch NWS gridpoint forecast and return today's daytime high (°F)."""
     if not city.is_us or not city.nws_office:
@@ -203,7 +245,7 @@ async def _fetch_nws_high(city: City) -> Optional[float]:
 
             periods = (data.get("properties") or {}).get("periods") or []
             # Find today's daytime period
-            today_et_str = date.today().isoformat()
+            today_et_str = city_local_date(city)
             for period in periods:
                 if not period.get("isDaytime", True):
                     continue
@@ -263,12 +305,12 @@ async def fetch_wu_all() -> None:
     async with get_session() as sess:
         cities = await get_all_cities(sess, enabled_only=True)
 
-    today_et = date.today().isoformat()
-
     for city in cities:
         if not (city.wu_state and city.wu_city and city.metar_station):
             log.debug("wu: city %s missing WU config, skipping", city.city_slug)
             continue
+
+        today_et = city_local_date(city)
 
         # Rate limit: check last WU scrape time
         async with get_session() as sess:
@@ -441,7 +483,7 @@ async def _fetch_wu_hourly_api(city: City) -> tuple[Optional[float], Optional[st
         f"?apiKey=e1f10a1e78da46f5b10a1e78da96f525&units={units}"
     )
 
-    today_et = date.today().isoformat()  # YYYY-MM-DD
+    today_et = city_local_date(city)  # YYYY-MM-DD
 
     for attempt in range(3):
         try:

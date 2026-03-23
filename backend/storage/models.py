@@ -45,6 +45,8 @@ class City(Base):
     is_us: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     # "F" or "C"
     unit: Mapped[str] = mapped_column(String(1), default="F", nullable=False)
+    # IANA timezone (e.g., "America/New_York", "Asia/Tokyo")
+    tz: Mapped[str] = mapped_column(String(64), default="America/New_York", nullable=False)
     first_seen_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow
     )

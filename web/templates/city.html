@@ -31,7 +31,11 @@
         {% for d in available_dates %}
         <option value="{{ d }}" {% if d == today_et %}selected{% endif %} style="background:var(--bg-card)">{{ d }}</option>
         {% endfor %}
+        {% if city_tomorrow and city_tomorrow not in available_dates %}
+        <option value="{{ city_tomorrow }}" style="background:var(--bg-card)">{{ city_tomorrow }} (Tomorrow)</option>
+        {% endif %}
       </select>
+      <span class="text-[9px] mono opacity-40">{{ city_tz }}</span>
     </div>
     {% if event and event.gamma_slug %}
     <a href="https://polymarket.com/event/{{ event.gamma_slug }}" target="_blank"
@@ -364,11 +368,21 @@
 
     <!-- Buckets & Edges Table -->
     <div class="card overflow-hidden">
-      <div class="px-4 py-3 border-b flex items-center justify-between" style="border-color:var(--border)">
+      <div class="px-4 py-3 border-b flex items-center justify-between gap-2" style="border-color:var(--border)">
         <h2 class="font-semibold text-sm">Buckets & Edges</h2>
-        {% if city.is_us and city.nws_office %}
-        <span class="text-[10px] mono px-2 py-0.5 rounded" style="background:var(--bg-panel); color:var(--text-muted)">NWS {{ city.nws_office }}</span>
-        {% endif %}
+        <div class="flex items-center gap-2">
+          {% if event and event.gamma_slug %}
+          <a href="https://polymarket.com/event/{{ event.gamma_slug }}" target="_blank"
+             class="text-[10px] px-2 py-0.5 rounded hover:underline transition-colors"
+             style="background:rgba(234,179,8,0.1); color:#FBBF24"
+             title="{{ event.gamma_slug }}">
+            Polymarket ↗
+          </a>
+          {% endif %}
+          {% if city.is_us and city.nws_office %}
+          <span class="text-[10px] mono px-2 py-0.5 rounded" style="background:var(--bg-panel); color:var(--text-muted)">NWS {{ city.nws_office }}</span>
+          {% endif %}
+        </div>
       </div>
       <table class="w-full text-xs">
         <thead>

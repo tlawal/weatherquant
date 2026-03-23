@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 import aiohttp
 
 from backend.config import Config
+from backend.tz_utils import city_local_date
 from backend.storage.db import get_session
 from backend.storage.repos import (
     get_all_cities,
@@ -119,23 +120,24 @@ async def _fetch_us_metars(cities: list[City]) -> None:
     if not isinstance(data, list):
         return
 
-    today_et = date.today().isoformat()
     for obs in data:
         station_id = (obs.get("stationId") or obs.get("station") or "").upper()
         city = station_map.get(station_id)
         if not city:
             continue
 
+        today_local = city_local_date(city)
+
         temp = _parse_temp(obs)
         if temp is None:
             continue
         temp_c, temp_f = temp
-        
+
         obs_time = _parse_obs_time(obs)
         raw_str = json.dumps(obs, default=str)
 
         async with get_session() as sess:
-            prev_high = await get_daily_high_metar(sess, city.id, today_et)
+            prev_high = await get_daily_high_metar(sess, city.id, today_local)
             daily_high = max(
                 (v for v in [temp_f, prev_high] if v is not None), default=temp_f
             )
@@ -182,11 +184,11 @@ async def _fetch_intl_open_meteo(cities: list[City]) -> None:
     if not isinstance(data, list):
         data = [data]
 
-    today_et = date.today().isoformat()
     for i, obs_data in enumerate(data):
         if i >= len(cities):
             break
         city = cities[i]
+        today_local = city_local_date(city)
         curr = obs_data.get("current_weather")
         if not curr:
             continue
@@ -194,7 +196,7 @@ async def _fetch_intl_open_meteo(cities: list[City]) -> None:
         temp_c = curr.get("temperature")
         if temp_c is None:
             continue
-        
+
         # User said for intl cities use C but my internal daily_high_f column handles whatever is passed.
         # Actually for intl cities I should store C in the F column as well if that's what's used.
         temp_internal = float(temp_c)
@@ -210,7 +212,7 @@ async def _fetch_intl_open_meteo(cities: list[City]) -> None:
         raw_str = json.dumps(obs_data)
 
         async with get_session() as sess:
-            prev_high = await get_daily_high_metar(sess, city.id, today_et)
+            prev_high = await get_daily_high_metar(sess, city.id, today_local)
             daily_high = max(
                 (v for v in [temp_internal, prev_high] if v is not None), default=temp_internal
             )

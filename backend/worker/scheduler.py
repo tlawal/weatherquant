@@ -68,8 +68,7 @@ async def job_fetch_clob():
     clob = get_clob()
     if not clob:
         return
-    date_et = date.today().isoformat()
-    await fetch_clob_orderbooks(clob, date_et)
+    await fetch_clob_orderbooks(clob)
 
 
 async def job_run_model():

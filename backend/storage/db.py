@@ -91,6 +91,7 @@ async def init_db() -> None:
     await _run_ddl("ALTER TABLE cities ADD COLUMN unit VARCHAR(1) NOT NULL DEFAULT 'F'")
     await _run_ddl("ALTER TABLE cities ADD COLUMN lat FLOAT")
     await _run_ddl("ALTER TABLE cities ADD COLUMN lon FLOAT")
+    await _run_ddl("ALTER TABLE cities ADD COLUMN tz VARCHAR(64) NOT NULL DEFAULT 'America/New_York'")
 
     # metar_obs
     await _run_ddl("ALTER TABLE metar_obs ADD COLUMN report_at TIMESTAMP WITH TIME ZONE")

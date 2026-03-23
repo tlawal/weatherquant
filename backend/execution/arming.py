@@ -228,11 +228,11 @@ async def auto_check_disarm() -> None:
     Called by scheduler — auto-disarms on time or loss conditions.
     """
     from zoneinfo import ZoneInfo
-    from datetime import date
+    from backend.tz_utils import et_today
 
     ET = ZoneInfo("America/New_York")
     now_et = datetime.now(ET)
-    today_et = date.today().isoformat()
+    today_et = et_today()
 
     if not await is_armed():
         return

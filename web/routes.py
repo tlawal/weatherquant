@@ -15,6 +15,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
 from backend.config import Config
+from backend.tz_utils import city_local_date, city_local_now, city_local_tomorrow, et_today
 from backend.strategy.kelly import calculate_expected_value, calculate_kelly_fraction
 from backend.modeling.calibration_engine import get_reliability_metrics
 
@@ -40,7 +41,7 @@ async def dashboard(request: Request):
     )
     from backend.storage.models import Bucket, Event, City
 
-    today_et = date.today().isoformat()
+    today_et = et_today()
 
     async with get_session() as sess:
         cities = await get_all_cities(sess, enabled_only=True)
@@ -127,19 +128,18 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
         get_daily_high_metar,
     )
 
-    # Determine "today" in ET
-    now_utc = datetime.now(timezone.utc)
-    # The app follows America/New_York (ET)
-    et_tz = ZoneInfo("America/New_York")
-    now_et = now_utc.astimezone(et_tz)
-    real_today_et = now_et.strftime("%Y-%m-%d")
-
-    target_date_et = date if date else real_today_et
-
     async with get_session() as sess:
         city = await get_city_by_slug(sess, city_slug)
         if not city:
             return HTMLResponse("<h1>City not found</h1>", status_code=404)
+
+    # Determine "today" in the city's local timezone
+    now_local = city_local_now(city)
+    now_et = datetime.now(ZoneInfo("America/New_York"))
+    et_tz = ZoneInfo("America/New_York")
+    real_today_et = city_local_date(city)
+
+    target_date_et = date if date else real_today_et
 
         # Fetch available event dates for this city
         from sqlalchemy import select, distinct
@@ -263,7 +263,7 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                 "wu_hourly": {
                     "high_f": wu_h.high_f if wu_h else None,
                     "age_s": _age(wu_h.fetched_at if wu_h else None),
-                    "url": f"https://www.wunderground.com/hourly/{city.metar_station}" if city.metar_station else None,
+                    "url": f"https://www.wunderground.com/hourly/{city.metar_station}/date/{target_date_et}" if city.metar_station else None,
                     "peak_hour": wu_hourly_raw.get("peak_hour"),
                     "collected_at": _fmt_time_et(wu_h.fetched_at if wu_h else None),
                 },
@@ -282,7 +282,9 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                 "probs_json": probs_json,
                 "inputs": model_inputs,
             } if model else None,
-            "now_hour_et": now_et.hour,
+            "now_hour_et": now_local.hour,
+            "city_tomorrow": city_local_tomorrow(city),
+            "city_tz": getattr(city, "tz", "America/New_York"),
             "buckets": buckets_with_signals,
             "reliability_json": json.dumps([
                 {"expected": b.expected_prob, "observed": b.observed_prob, "count": b.count}
@@ -320,7 +322,7 @@ async def htmx_signals_table(request: Request):
     from backend.storage.repos import get_latest_signals
     from backend.storage.models import Bucket, Event, City
 
-    today_et = date.today().isoformat()
+    today_et = et_today()
     async with get_session() as sess:
         raw_signals = await get_latest_signals(sess, limit=200)
 

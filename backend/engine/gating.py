@@ -13,9 +13,10 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 from backend.config import Config
+from backend.tz_utils import city_local_date, et_today
 from backend.engine.signal_engine import BucketSignal
 from backend.storage.db import get_session
-from backend.storage.models import Event
+from backend.storage.models import City, Event
 from backend.storage.repos import (
     get_all_positions,
     get_arming_state,
@@ -51,7 +52,7 @@ async def run_all_gates(
     All failures are logged for audit trail.
     """
     failures: list[str] = []
-    today_et = date.today().isoformat()
+    today_et = et_today()
     now_et = datetime.now(ET)
 
     # ── Gate: Armed ──────────────────────────────────────────────────────────
@@ -160,6 +161,19 @@ async def run_all_gates(
             failures.append(
                 f"GATE_BRACKET_SURPASSED: observed high {obs_high:.1f} "
                 f"already exceeds bucket ceiling {signal.high_f:.1f}"
+            )
+
+    # ── Gate: Date alignment ──────────────────────────────────────────────────
+    # Verify event's date_et matches the city's current local date.
+    # Prevents trading stale events when the date rolls over.
+    async with get_session() as sess:
+        city_obj = await sess.get(City, city_id)
+    if city_obj:
+        expected_date = city_local_date(city_obj)
+        if event and event.date_et != expected_date:
+            failures.append(
+                f"GATE_DATE_ALIGNMENT: event.date_et={event.date_et} != "
+                f"city_local_date={expected_date} (tz={getattr(city_obj, 'tz', 'unknown')})"
             )
 
     if failures:

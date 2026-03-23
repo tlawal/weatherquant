@@ -22,6 +22,7 @@ from datetime import date, datetime, timezone
 from typing import Optional
 
 from backend.config import Config
+from backend.tz_utils import city_local_date
 from backend.engine.gating import run_all_gates
 from backend.engine.signal_engine import BucketSignal
 from backend.execution.arming import is_armed
@@ -52,7 +53,6 @@ async def execute_signal(
 
     Returns status dict with outcome and audit payload.
     """
-    today_et = date.today().isoformat()
     result = {
         "city": signal.city_slug,
         "bucket_idx": signal.bucket_idx,
@@ -75,7 +75,8 @@ async def execute_signal(
             result["error"] = f"city not found: {signal.city_slug}"
             return result
 
-        event = await get_event(sess, city.id, today_et)
+        today_local = city_local_date(city)
+        event = await get_event(sess, city.id, today_local)
         if not event:
             result["status"] = "no_event"
             return result

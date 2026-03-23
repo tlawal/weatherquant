@@ -17,6 +17,7 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 from backend.config import Config
+from backend.tz_utils import city_local_date
 from backend.modeling.distribution import edge as compute_edge
 from backend.modeling.temperature_model import compute_model, ModelResult
 from backend.modeling.calibration import get_calibration_async
@@ -92,14 +93,14 @@ async def run_signal_engine() -> list[BucketSignal]:
 
     Returns list of BucketSignal ordered by true_edge descending.
     """
-    today_et = date.today().isoformat()
     signals: list[BucketSignal] = []
 
     async with get_session() as sess:
         cities = await get_all_cities(sess, enabled_only=True)
 
     for city in cities:
-        city_signals = await _compute_city_signals(city, today_et)
+        today_local = city_local_date(city)
+        city_signals = await _compute_city_signals(city, today_local)
         signals.extend(city_signals)
 
     # Sort by true_edge descending
@@ -167,6 +168,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         buckets=bucket_ranges,
         forecast_quality=event.forecast_quality or "ok",
         unit=getattr(city, "unit", "F"),
+        city_tz=getattr(city, "tz", "America/New_York"),
     )
 
     if model is None:

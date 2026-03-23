@@ -29,7 +29,7 @@ ET = ZoneInfo("America/New_York")
 # These represent expected *remaining* rise in temperature from current reading.
 # Based on typical daily temperature curves for southeastern US cities.
 _REMAINING_RISE_TABLE = [
-    # (start_hour_et, end_hour_et, expected_remaining_rise_f)
+    # (start_hour_local, end_hour_local, expected_remaining_rise_f)
     (0,  6,  14.0),   # overnight → large morning rise ahead
     (6,  9,  11.0),   # early morning → significant rise
     (9,  11,  8.0),   # mid-morning
@@ -73,12 +73,12 @@ def _interpolate_table(table: list, hour: int) -> float:
     return table[-1][2]
 
 
-def _expected_remaining_rise(hour_et: int) -> float:
-    return _interpolate_table(_REMAINING_RISE_TABLE, hour_et)
+def _expected_remaining_rise(hour_local: int) -> float:
+    return _interpolate_table(_REMAINING_RISE_TABLE, hour_local)
 
 
-def _metar_weight(hour_et: int) -> float:
-    return _interpolate_table(_METAR_WEIGHT_TABLE, hour_et)
+def _metar_weight(hour_local: int) -> float:
+    return _interpolate_table(_METAR_WEIGHT_TABLE, hour_local)
 
 
 def compute_model(
@@ -91,6 +91,7 @@ def compute_model(
     buckets: list[tuple[Optional[float], Optional[float]]],
     forecast_quality: str = "ok",
     unit: str = "F",
+    city_tz: str = "America/New_York",
 ) -> Optional[ModelResult]:
     """
     Fuse all forecast sources and compute temperature distribution + bucket probabilities.
@@ -119,11 +120,12 @@ def compute_model(
     w_wud = cal.get("weight_wu_daily", 1/3)
     w_wuh = cal.get("weight_wu_hourly", 1/3)
     # WU Nighttime Rollover Protection
-    # If it's past 18:00 ET and the WU daily forecast deviates wildly from the actual METAR high so far,
+    # If it's past 18:00 local and the WU daily forecast deviates wildly from the actual METAR high so far,
     # it's highly likely WU has rolled over its "Today" block to display tomorrow's high. We discard it.
-    now_et = datetime.now(ET)
-    hour_et = now_et.hour
-    if hour_et >= 18 and wu_daily_high is not None and daily_high_metar is not None:
+    local_tz = ZoneInfo(city_tz)
+    now_local = datetime.now(local_tz)
+    hour_local = now_local.hour
+    if hour_local >= 18 and wu_daily_high is not None and daily_high_metar is not None:
         unit_dev = 6.0 if unit == "C" else 10.0
         if abs(wu_daily_high - daily_high_metar) > unit_dev:
             log.warning("model: dropping wu_daily_high (%.1f) due to likely nighttime rollover (metar=%.1f)", wu_daily_high, daily_high_metar)
@@ -158,8 +160,8 @@ def compute_model(
         sigma_raw = 2.5 * unit_mult
 
     # ── METAR intraday adjustment ──────────────────────────────────────────────
-    w_metar = _metar_weight(hour_et)
-    remaining_rise = _expected_remaining_rise(hour_et) * unit_mult
+    w_metar = _metar_weight(hour_local)
+    remaining_rise = _expected_remaining_rise(hour_local) * unit_mult
 
     # Projected high = max(daily high so far, current + expected rise)
     projected_high = mu_forecast  # default to forecast if no METAR
@@ -176,7 +178,7 @@ def compute_model(
 
     # After 5 PM ET with declining temps, cap projected_high —
     # no meaningful temperature rises expected after sunset.
-    if hour_et >= 17 and daily_high_metar is not None:
+    if hour_local >= 17 and daily_high_metar is not None:
         projected_ceiling = max(
             daily_high_metar,
             (current_temp_f or daily_high_metar) + 1.0,
@@ -208,7 +210,7 @@ def compute_model(
         "projected_high": float(projected_high),
         "w_metar": float(w_metar),
         "remaining_rise": remaining_rise,
-        "hour_et": hour_et,
+        "hour_local": hour_local,
         "spread": float(max(vals) - min(vals)) if len(vals) >= 2 else 0.0,
         "sigma_raw": float(sigma_raw),
         "sources_used": list(calibrated.keys()),
