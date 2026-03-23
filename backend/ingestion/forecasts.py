@@ -249,7 +249,7 @@ def _wu_hourly_url(city: City) -> str:
     return f"{WU_BASE}/hourly/{city.metar_station}"
 
 
-def _wu_history_url(city: City, date_et: str) -> str:
+def wu_history_url(city: City, date_et: str) -> str:
     dt_str = date_et.replace("-", "")
     units = "m" if getattr(city, "unit", "F") == "C" else "e"
     
@@ -570,7 +570,7 @@ async def _fetch_wu_history_api(
     If valid_minutes is provided, only observations at those station minutes
     (±1 tolerance) are considered for the daily high.
     """
-    url = _wu_history_url(city, date_et)
+    url = wu_history_url(city, date_et)
     for attempt in range(3):
         try:
             async with aiohttp.ClientSession(timeout=_TIMEOUT, headers=_WU_HEADERS) as http:

@@ -20,25 +20,37 @@ from backend.storage.repos import (
     get_station_profile,
     upsert_station_profile,
 )
+from backend.storage.models import City
+from backend.ingestion.forecasts import wu_history_url
+from backend.tz_utils import city_local_date
+import aiohttp
 
 log = logging.getLogger(__name__)
 
 
-async def detect_observation_pattern(metar_station: str) -> Optional[dict]:
-    """Analyze recent MetarObs to detect the station's reporting cadence.
+async def detect_observation_pattern(city: City) -> Optional[dict]:
+    """Analyze recent observations to detect the station's reporting cadence.
+    
+    If the city is US or uses Wunderground, we fetch from WU History.
+    Otherwise, we analyze recent MetarObs.
 
     Algorithm:
-    1. Query last 24 hours of MetarObs for station
-    2. Extract minute component of each observed_at
-    3. Build histogram of minutes (0-59)
-    4. Find peaks: minutes appearing in >50% of hours with data
-    5. Apply ±1 min tolerance (merge adjacent peaks)
-    6. Classify: 1 peak → hourly, 2 peaks ~30 apart → half_hourly, else irregular
-    7. Compute confidence = peak_occurrences / expected_occurrences
+    1. Check if WU API should be used.
+    2. If so, fetch the history for the last 2 days to get observation minutes.
+    3. Find peaks, merge, and classify frequency.
+    4. Compute confidence.
 
     Returns: {"minutes": [52], "frequency": "hourly", "samples": 23, "confidence": 0.94}
-             or None if insufficient data (<12 observations)
+             or None if insufficient data
     """
+    
+    # Use WU if US city or uses WU as resolution source
+    if city.is_us or (city.wu_state and city.wu_city):
+        return await _detect_wu_pattern(city)
+
+    metar_station = city.metar_station
+    if not metar_station:
+        return None
     since = datetime.now(timezone.utc) - timedelta(hours=24)
 
     async with get_session() as sess:
@@ -110,6 +122,110 @@ async def detect_observation_pattern(metar_station: str) -> Optional[dict]:
     return result
 
 
+async def _detect_wu_pattern(city: City) -> Optional[dict]:
+    """Detect observation pattern by querying the WU historical JSON directly.
+    Retrieves yesterday and today's local dates so we have ~48h of samples.
+    """
+    import asyncio
+    from collections import Counter
+    
+    today_et = city_local_date(city)
+    dt_today = datetime.fromisoformat(today_et)
+    yesterday_et = (dt_today - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    urls = [
+        wu_history_url(city, yesterday_et),
+        wu_history_url(city, today_et)
+    ]
+
+    all_minutes = []
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        )
+    }
+
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10), headers=headers) as http:
+            for url in urls:
+                async with http.get(url) as resp:
+                    if resp.status == 200:
+                        data = await resp.json(content_type=None)
+                        obs = data.get("observations", [])
+                        for o in obs:
+                            gmt = o.get("valid_time_gmt")
+                            if gmt:
+                                dt = datetime.fromtimestamp(int(gmt), tz=timezone.utc)
+                                all_minutes.append(dt.minute)
+    except Exception as e:
+        log.warning("station_pattern_wu: failed to fetch for %s: %s", city.city_slug, e)
+        return None
+
+    if len(all_minutes) < 3:
+        log.debug("station_pattern_wu: %s — only %d obs (<3), skipping", city.city_slug, len(all_minutes))
+        return None
+
+    minute_counts = Counter(all_minutes)
+    
+    # We expect roughly 48 samples if hourly
+    # Just take the most common minute if it has strong presence
+    best_minute, count = minute_counts.most_common(1)[0]
+    
+    samples = len(all_minutes)
+    confidence = round(count / samples, 3)
+
+    # Some stations are half-hourly (e.g. they report at :15 and :45)
+    # Check if a second peak has substantial representation
+    merged = _merge_adjacent_peaks(list(minute_counts.keys()), minute_counts)
+    
+    if len(merged) == 1:
+        frequency = "hourly"
+    elif len(merged) == 2:
+        gap = abs(merged[0] - merged[1])
+        gap = min(gap, 60 - gap)
+        frequency = "half_hourly" if 25 <= gap <= 35 else "irregular"
+    else:
+        frequency = "irregular"
+
+    # Merge again if there are multiple peaks, but use the same logic as the metar_obs one
+    # Count distinct hours with data? We don't have hour tracking easily without parsing again,
+    # but since this is WU, it's very reliable. If we get a single strong peak, it's hourly.
+    
+    # For WU, it's usually very clean. Let's just use the merged peaks that have at least 20% of samples.
+    threshold = samples * 0.2
+    raw_peaks = [m for m, count in minute_counts.items() if count >= threshold]
+    if not raw_peaks:
+        return None
+        
+    merged = _merge_adjacent_peaks(raw_peaks, minute_counts)
+    
+    if len(merged) == 1:
+        frequency = "hourly"
+    elif len(merged) == 2:
+        gap = abs(merged[0] - merged[1])
+        gap = min(gap, 60 - gap)
+        frequency = "half_hourly" if 25 <= gap <= 35 else "irregular"
+    else:
+        frequency = "irregular"
+
+    total_peak_hits = sum(
+        1 for m in all_minutes
+        if any(abs((m - peak) % 60) <= 1 or abs((peak - m) % 60) <= 1 for peak in merged)
+    )
+    confidence = round(total_peak_hits / samples, 3) if samples else 0.0
+
+    result = {
+        "minutes": sorted(merged),
+        "frequency": frequency,
+        "samples": samples,
+        "confidence": confidence,
+    }
+    log.info("station_pattern_wu: %s → %s", city.city_slug, result)
+    return result
+
+
 def _merge_adjacent_peaks(peaks: list[int], counts: Counter) -> list[int]:
     """Merge peaks within ±1 of each other, keeping the highest-count minute."""
     if not peaks:
@@ -149,7 +265,7 @@ async def refresh_all_station_profiles() -> None:
         if not city.metar_station:
             continue
 
-        result = await detect_observation_pattern(city.metar_station)
+        result = await detect_observation_pattern(city)
         if result is None:
             log.debug("station_pattern: %s — no pattern detected", city.metar_station)
             continue
@@ -183,7 +299,7 @@ async def refresh_missing_station_profiles() -> None:
         if existing is not None:
             continue
 
-        result = await detect_observation_pattern(city.metar_station)
+        result = await detect_observation_pattern(city)
         if result is None:
             continue
 
