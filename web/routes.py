@@ -246,6 +246,8 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
     wu_history_raw = json.loads(wu_history.raw_json) if (wu_history and wu_history.raw_json) else {}
     wu_hourly_raw = json.loads(wu_h.raw_json) if (wu_h and wu_h.raw_json) else {}
 
+    reliability_bins = await get_reliability_metrics(city.id)
+
     return templates.TemplateResponse(
         "city.html",
         {
@@ -317,7 +319,7 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
             "buckets": buckets_with_signals,
             "reliability_json": json.dumps([
                 {"expected": b.expected_prob, "observed": b.observed_prob, "count": b.count}
-                for b in (reliability_bins := await get_reliability_metrics(city.id))
+                for b in reliability_bins
             ]),
             "reliability_total_samples": sum(b.count for b in reliability_bins),
         },
