@@ -90,7 +90,10 @@ async def fetch_metar_all() -> None:
         return
 
     us_cities = [c for c in cities if c.is_us and c.metar_station]
-    intl_cities = [c for c in cities if not c.is_us and c.lat and c.lon]
+    # International cities with ICAO metar_station also use the global aviationweather.gov feed
+    intl_metar_cities = [c for c in cities if not c.is_us and c.metar_station]
+    # International cities without a station code use Open-Meteo
+    intl_openmeteo_cities = [c for c in cities if not c.is_us and not c.metar_station and c.lat and c.lon]
 
     if us_cities:
         await _fetch_us_metars(us_cities)
@@ -100,8 +103,12 @@ async def fetch_metar_all() -> None:
         except Exception as e:
             log.warning("nws_obs: supplementary fetch failed: %s", e)
 
-    if intl_cities:
-        await _fetch_intl_open_meteo(intl_cities)
+    if intl_metar_cities:
+        # ICAO stations are global — aviationweather.gov covers all of them
+        await _fetch_us_metars(intl_metar_cities)
+
+    if intl_openmeteo_cities:
+        await _fetch_intl_open_meteo(intl_openmeteo_cities)
 
 
 async def _fetch_us_metars(cities: list[City]) -> None:
@@ -304,27 +311,28 @@ async def fetch_metar_smart() -> None:
     async with get_session() as sess:
         cities = await get_all_cities(sess, enabled_only=True)
 
-    us_in_window = []
-    for city in [c for c in cities if c.is_us and c.metar_station]:
+    # All cities with METAR station (US and intl ICAO) use smart polling
+    metar_cities = [c for c in cities if c.metar_station]
+    in_window = []
+    for city in metar_cities:
         async with get_session() as sess:
             profile = await get_station_profile(sess, city.metar_station)
         if not profile or not profile.observation_minutes or (profile.confidence or 0) < 0.7:
-            us_in_window.append(city)  # no confident profile → always poll
+            in_window.append(city)  # no confident profile → always poll
             continue
         valid_minutes = json.loads(profile.observation_minutes)
         if should_poll_station(valid_minutes, now_minute, window=3):
-            us_in_window.append(city)
+            in_window.append(city)
 
-    if us_in_window:
-        await _fetch_us_metars(us_in_window)
-        total_us = len([c for c in cities if c.is_us and c.metar_station])
-        log.info("smart_poll: fetched %d/%d US stations at minute :%02d",
-                 len(us_in_window), total_us, now_minute)
+    if in_window:
+        await _fetch_us_metars(in_window)
+        log.info("smart_poll: fetched %d/%d METAR stations at minute :%02d",
+                 len(in_window), len(metar_cities), now_minute)
 
-    # International cities always get polled (Open-Meteo is bulk/cheap)
-    intl_cities = [c for c in cities if not c.is_us and c.lat and c.lon]
-    if intl_cities:
-        await _fetch_intl_open_meteo(intl_cities)
+    # International cities without METAR station use Open-Meteo (always polled)
+    intl_openmeteo_cities = [c for c in cities if not c.is_us and not c.metar_station and c.lat and c.lon]
+    if intl_openmeteo_cities:
+        await _fetch_intl_open_meteo(intl_openmeteo_cities)
 
 
 async def _mark_heartbeat_success() -> None:

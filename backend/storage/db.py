@@ -106,6 +106,8 @@ async def init_db() -> None:
     # events
     await _run_ddl("ALTER TABLE events ADD COLUMN forecast_quality VARCHAR(16) NOT NULL DEFAULT 'ok'")
     await _run_ddl("ALTER TABLE events ADD COLUMN wu_scrape_error TEXT")
+    await _run_ddl("ALTER TABLE events ADD COLUMN resolution_source_url TEXT")
+    await _run_ddl("ALTER TABLE events ADD COLUMN resolution_station_id VARCHAR(16)")
 
     # forecast_obs
     await _run_ddl("ALTER TABLE forecast_obs ADD COLUMN raw_json TEXT")

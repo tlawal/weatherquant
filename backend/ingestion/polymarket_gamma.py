@@ -41,6 +41,10 @@ _WU_SOURCE_PATTERNS = [
     re.compile(r"wunder\.com", re.I),
 ]
 
+# Regex to extract resolution URL and station ID
+_URL_PATTERN = re.compile(r'https?://[^\s<>"\']+')
+_NWS_SITE_PATTERN = re.compile(r'[?&]site=([A-Z0-9]{3,8})', re.I)
+
 # Regex to parse bucket temperature ranges from market labels
 _RANGE_PATTERNS = [
     re.compile(r"(\d+\.?\d*)\s*[-–—]\s*(\d+\.?\d*)\s*°?\s*[FCfc]?"),
@@ -64,6 +68,32 @@ def _build_slugs(city_slug: str, target_date: date) -> list[str]:
         slugs.append(f"highest-temperature-in-nyc-on-{month}-{day}-{year}")
     
     return slugs
+
+
+def _extract_resolution_url(event_data: dict) -> tuple[str | None, str | None]:
+    """Extract (resolution_source_url, resolution_station_id) from Gamma event data."""
+    # Fields to search for URLs (in priority order)
+    fields_to_check = [
+        event_data.get("resolutionSource") or "",
+        event_data.get("resolvedBy") or "",
+        event_data.get("description") or "",
+        event_data.get("overview") or "",
+        event_data.get("question") or "",
+    ]
+    for text in fields_to_check:
+        urls = _URL_PATTERN.findall(str(text))
+        for url in urls:
+            # Prefer NWS timeseries or similar station-based URLs
+            m = _NWS_SITE_PATTERN.search(url)
+            if m:
+                return url, m.group(1).upper()
+            # Also catch weather.gov station observation URLs
+            station_m = re.search(r'weather\.gov/stations/([A-Z0-9]{3,8})', url, re.I)
+            if station_m:
+                return url, station_m.group(1).upper()
+    # No structured URL found — return the plain text resolutionSource as URL if present
+    plain = event_data.get("resolutionSource") or event_data.get("resolvedBy") or ""
+    return (plain[:500] if plain else None), None
 
 
 def _is_wu_source(source_text: str) -> bool:
@@ -213,6 +243,7 @@ async def _process_event_data(city, date_et: str, slug: str, event_data: dict) -
             break
 
     wu_verified = _is_wu_source(settlement_source)
+    resolution_source_url, resolution_station_id = _extract_resolution_url(event_data)
 
     markets = event_data.get("markets") or []
     log.info(
@@ -313,6 +344,8 @@ async def _process_event_data(city, date_et: str, slug: str, event_data: dict) -
             gamma_slug=slug,
             settlement_source=settlement_source[:256] if settlement_source else None,
             settlement_source_verified=wu_verified,
+            resolution_source_url=resolution_source_url,
+            resolution_station_id=resolution_station_id,
             status=status,
             trading_enabled=trading_enabled,
         )

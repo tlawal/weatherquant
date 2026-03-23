@@ -313,6 +313,63 @@
   </div>
 </div>
 
+<!-- ── RESOLUTION TRACKING ────────────────────────────────────────────────── -->
+{% if event %}
+<div class="card p-4 mb-6">
+  <div class="flex items-center justify-between mb-3">
+    <span class="text-[10px] uppercase tracking-widest font-bold" style="color:var(--text-muted)">Resolution Tracking</span>
+    {% if settlement_source_verified %}
+      <span class="text-[10px] px-2 py-0.5 rounded-full font-bold" style="background:rgba(34,197,94,0.15);color:#86efac">WU Verified</span>
+    {% elif resolution_station_id %}
+      <span class="text-[10px] px-2 py-0.5 rounded-full font-bold" style="background:rgba(96,165,250,0.15);color:#60a5fa">NWS Timeseries</span>
+    {% else %}
+      <span class="text-[10px] px-2 py-0.5 rounded-full font-bold" style="background:rgba(239,68,68,0.15);color:#fca5a5">Unverified</span>
+    {% endif %}
+  </div>
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-[11px]">
+    <div>
+      <div style="color:var(--text-muted)" class="mb-1">Settlement Source</div>
+      {% if settlement_source_verified %}
+        <div class="mono font-medium">Weather Underground</div>
+      {% elif resolution_station_id %}
+        <div class="mono font-medium">NWS Observations</div>
+      {% else %}
+        <div class="mono" style="color:var(--text-muted)">Unknown</div>
+      {% endif %}
+    </div>
+    <div>
+      <div style="color:var(--text-muted)" class="mb-1">Resolution Station</div>
+      <div class="mono font-medium">{{ resolution_station_id or city.metar_station or '—' }}</div>
+    </div>
+    <div>
+      <div style="color:var(--text-muted)" class="mb-1">Obs Pattern</div>
+      {% if observation_minutes %}
+        <div class="mono font-medium">:{{ observation_minutes|join(', :') }}
+          {% if station_frequency %}<span class="opacity-50 ml-1">({{ station_frequency }})</span>{% endif %}
+        </div>
+      {% else %}
+        <div class="mono" style="color:var(--text-muted)">Not detected</div>
+      {% endif %}
+    </div>
+    <div>
+      <div style="color:var(--text-muted)" class="mb-1">Pattern Confidence</div>
+      {% if station_confidence is not none %}
+        <div class="mono font-medium">{{ "%.0f"|format(station_confidence * 100) }}%</div>
+      {% else %}
+        <div class="mono" style="color:var(--text-muted)">—</div>
+      {% endif %}
+    </div>
+  </div>
+  {% if resolution_source_url %}
+  <div class="mt-3 pt-3 border-t text-[10px]" style="border-color:var(--border)">
+    <span style="color:var(--text-muted)">Source URL: </span>
+    <a href="{{ resolution_source_url }}" target="_blank" rel="noopener"
+       class="mono hover:underline break-all" style="color:var(--cyan)">{{ resolution_source_url }}</a>
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+
 <!-- ── MAIN CONTENT GRID ───────────────────────────────────────────────────── -->
 <div class="grid grid-cols-1 lg:grid-cols-3 gap-5">
 

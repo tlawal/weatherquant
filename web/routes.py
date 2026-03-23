@@ -258,6 +258,9 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
             "observation_minutes": obs_minutes_list,
             "station_confidence": station_profile.confidence if station_profile else None,
             "station_frequency": station_profile.observation_frequency if station_profile else None,
+            "resolution_source_url": event.resolution_source_url if event else None,
+            "resolution_station_id": event.resolution_station_id if event else None,
+            "settlement_source_verified": event.settlement_source_verified if event else None,
             "metar": {
                 "temp_f": metar.temp_f if (metar and target_date_et == real_today_et) else None,
                 "daily_high_f": obs_high_f,
@@ -268,7 +271,7 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                 "age_s": _age(metar.observed_at if (metar and target_date_et == real_today_et) else None),
                 "source_url": (
                     f"https://aviationweather.gov/api/data/metar?ids={city.metar_station}&format=json&latest=1"
-                    if city.is_us
+                    if city.metar_station
                     else f"https://api.open-meteo.com/v1/forecast?latitude={city.lat}&longitude={city.lon}&current_weather=true"
                 ) if city else None,
             },

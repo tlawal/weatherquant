@@ -78,6 +78,8 @@ class Event(Base):
     gamma_slug: Mapped[Optional[str]] = mapped_column(String(256))
     settlement_source: Mapped[Optional[str]] = mapped_column(String(256))
     settlement_source_verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    resolution_source_url: Mapped[Optional[str]] = mapped_column(Text)
+    resolution_station_id: Mapped[Optional[str]] = mapped_column(String(16))
     # ok | degraded | no_event | bad_buckets
     status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False)
     forecast_quality: Mapped[str] = mapped_column(String(16), default="ok", nullable=False)
