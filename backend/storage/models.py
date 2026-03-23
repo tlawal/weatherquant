@@ -146,6 +146,25 @@ class MetarObs(Base):
     city_ref: Mapped[City] = relationship("City", back_populates="metar_obs")
 
 
+class StationProfile(Base):
+    """Detected observation pattern for a METAR station."""
+    __tablename__ = "station_profiles"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    metar_station: Mapped[str] = mapped_column(String(8), unique=True, nullable=False)
+    # JSON array e.g. "[52]" or "[0,30]"
+    observation_minutes: Mapped[Optional[str]] = mapped_column(Text)
+    # "hourly" | "half_hourly" | "irregular"
+    observation_frequency: Mapped[Optional[str]] = mapped_column(String(16))
+    samples_analyzed: Mapped[int] = mapped_column(Integer, default=0)
+    confidence: Mapped[Optional[float]] = mapped_column(Float)
+    last_analyzed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+
 class ForecastObs(Base):
     """Single forecast reading from one source (nws / wu_daily / wu_hourly)."""
     __tablename__ = "forecast_obs"

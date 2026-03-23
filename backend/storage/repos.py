@@ -29,6 +29,7 @@ from backend.storage.models import (
     Order,
     Position,
     Signal,
+    StationProfile,
     WorkerHeartbeat,
 )
 
@@ -173,6 +174,91 @@ async def get_daily_high_metar(
         )
     )
     return result.scalar_one_or_none()
+
+
+# ─── Station Profiles ────────────────────────────────────────────────────
+
+async def get_station_profile(
+    session: AsyncSession, metar_station: str
+) -> Optional[StationProfile]:
+    result = await session.execute(
+        select(StationProfile).where(StationProfile.metar_station == metar_station)
+    )
+    return result.scalar_one_or_none()
+
+
+async def upsert_station_profile(
+    session: AsyncSession,
+    metar_station: str,
+    observation_minutes: str,
+    observation_frequency: str,
+    samples_analyzed: int,
+    confidence: float,
+) -> StationProfile:
+    profile = await get_station_profile(session, metar_station)
+    now = datetime.now(timezone.utc)
+    if profile is None:
+        profile = StationProfile(
+            metar_station=metar_station,
+            observation_minutes=observation_minutes,
+            observation_frequency=observation_frequency,
+            samples_analyzed=samples_analyzed,
+            confidence=confidence,
+            last_analyzed_at=now,
+        )
+        session.add(profile)
+    else:
+        profile.observation_minutes = observation_minutes
+        profile.observation_frequency = observation_frequency
+        profile.samples_analyzed = samples_analyzed
+        profile.confidence = confidence
+        profile.last_analyzed_at = now
+    await session.commit()
+    await session.refresh(profile)
+    return profile
+
+
+async def get_resolution_high_metar(
+    session: AsyncSession,
+    city_id: int,
+    date_et: str,
+    valid_minutes: list[int],
+    tolerance: int = 1,
+) -> Optional[float]:
+    """Max temp_f only at valid observation timestamps (±tolerance minutes)."""
+    # Expand valid minutes with tolerance
+    expanded = set()
+    for m in valid_minutes:
+        for offset in range(-tolerance, tolerance + 1):
+            expanded.add((m + offset) % 60)
+
+    from sqlalchemy import extract
+    result = await session.execute(
+        select(func.max(MetarObs.temp_f))
+        .where(
+            MetarObs.city_id == city_id,
+            func.date(MetarObs.observed_at) == date_et,
+            extract("minute", MetarObs.observed_at).in_(list(expanded)),
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_metar_obs_for_station(
+    session: AsyncSession,
+    metar_station: str,
+    since: datetime,
+) -> list[MetarObs]:
+    """Get METAR observations for a station since a given datetime."""
+    result = await session.execute(
+        select(MetarObs)
+        .where(
+            MetarObs.metar_station == metar_station,
+            MetarObs.observed_at >= since,
+        )
+        .order_by(MetarObs.observed_at)
+    )
+    return list(result.scalars().all())
 
 
 # ─── Forecasts ────────────────────────────────────────────────────────────────

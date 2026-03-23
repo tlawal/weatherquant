@@ -330,9 +330,18 @@ async def fetch_wu_all() -> None:
 
 
 async def _scrape_wu_city(city: City, date_et: str) -> None:
+    # Fetch station profile for resolution-aware filtering
+    from backend.storage.repos import get_station_profile
+    valid_minutes = None
+    if city.metar_station:
+        async with get_session() as sess:
+            profile = await get_station_profile(sess, city.metar_station)
+        if profile and profile.observation_minutes:
+            valid_minutes = json.loads(profile.observation_minutes)
+
     daily_high = await _scrape_wu_daily(city)
     hourly_peak, peak_hour = await _fetch_wu_hourly_api(city)
-    history_high, obs_time = await _fetch_wu_history_api(city, date_et)
+    history_high, obs_time = await _fetch_wu_history_api(city, date_et, valid_minutes=valid_minutes)
 
     wu_ok = daily_high is not None or hourly_peak is not None or history_high is not None
     parse_err = None if wu_ok else "all_wu_sources_failed"
@@ -570,11 +579,29 @@ async def _fetch_html(url: str, retries: int = 3) -> Optional[str]:
     return None
 
 
-async def _fetch_wu_history_api(city: City, date_et: str) -> tuple[Optional[float], Optional[str]]:
+def _at_valid_minute(obs: dict, valid_minutes: list[int], tolerance: int = 1) -> bool:
+    """Check if an observation's timestamp falls on a valid station minute."""
+    gmt = obs.get("valid_time_gmt")
+    if not gmt:
+        return True  # Can't filter, include it
+    dt = datetime.fromtimestamp(int(gmt), tz=timezone.utc)
+    minute = dt.minute
+    return any(
+        min(abs(minute - m) % 60, abs(m - minute) % 60) <= tolerance
+        for m in valid_minutes
+    )
+
+
+async def _fetch_wu_history_api(
+    city: City, date_et: str, valid_minutes: list[int] | None = None,
+) -> tuple[Optional[float], Optional[str]]:
     """Fetch WU actual historical observations, returning (max_temp_f, obs_time_et_str).
 
     obs_time_et_str is the ET local time when the max temperature was observed,
     e.g. "1:52 PM ET", derived from valid_time_gmt on the peak observation.
+
+    If valid_minutes is provided, only observations at those station minutes
+    (±1 tolerance) are considered for the daily high.
     """
     url = _wu_history_url(city, date_et)
     for attempt in range(3):
@@ -586,6 +613,11 @@ async def _fetch_wu_history_api(city: City, date_et: str) -> tuple[Optional[floa
                         obs = data.get("observations", [])
                         valid_obs = [o for o in obs if o.get("temp") is not None]
                         if valid_obs:
+                            # Filter to valid station minutes if profile exists
+                            if valid_minutes:
+                                filtered = [o for o in valid_obs if _at_valid_minute(o, valid_minutes)]
+                                if filtered:
+                                    valid_obs = filtered
                             best = max(valid_obs, key=lambda o: o["temp"])
                             high_f = float(best["temp"])
                             obs_time_str = None

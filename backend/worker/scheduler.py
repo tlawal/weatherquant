@@ -142,6 +142,11 @@ async def job_discover_cities():
     await discover_cities()
 
 
+async def job_refresh_station_profiles():
+    from backend.ingestion.station_pattern import refresh_all_station_profiles
+    await refresh_all_station_profiles()
+
+
 async def job_heartbeat():
     """Write a heartbeat so API server can detect worker liveness."""
     from backend.storage.db import get_session
@@ -176,6 +181,7 @@ def create_scheduler() -> AsyncIOScheduler:
     add(job_reconcile_orders,    seconds=30,   name="reconcile_orders")
     add(job_auto_check_disarm,   seconds=60,   name="auto_check_disarm")
     add(job_discover_cities,     seconds=86400, name="discover_cities")  # 24h
+    add(job_refresh_station_profiles, seconds=86400, name="refresh_station_profiles")  # 24h
 
     return scheduler
 
@@ -193,6 +199,7 @@ async def start_scheduler() -> AsyncIOScheduler:
         (job_fetch_metar, "fetch_metar"),
         (job_fetch_nws, "fetch_nws"),
         (job_fetch_open_meteo, "fetch_open_meteo"),
+        (job_refresh_station_profiles, "refresh_station_profiles"),
     ]:
         try:
             await _run_with_heartbeat(name, coro_fn)

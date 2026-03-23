@@ -34,6 +34,8 @@ from backend.storage.repos import (
     get_latest_market_snapshot,
     get_latest_metar,
     get_latest_model_snapshot,
+    get_resolution_high_metar,
+    get_station_profile,
     insert_model_snapshot,
     insert_signal,
     update_heartbeat,
@@ -149,6 +151,15 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         # NEW: Reliability metrics for probability remapping
         reliability_bins = await get_reliability_metrics(city.id)
 
+        # Station profile for resolution-aware high
+        profile = await get_station_profile(sess, city.metar_station) if city.metar_station else None
+        if profile and profile.observation_minutes:
+            valid_minutes = json.loads(profile.observation_minutes)
+            resolution_high = await get_resolution_high_metar(sess, city.id, today_et, valid_minutes)
+        else:
+            valid_minutes = None
+            resolution_high = None
+
     if not buckets:
         log.debug("signal: %s — no buckets", city.city_slug)
         return []
@@ -156,8 +167,14 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
     # Build bucket boundary list
     bucket_ranges = [(b.low_f, b.high_f) for b in buckets]
 
-    # Resolve ground truth: prefer WU history since that is Polymarket's settlement source
-    ground_truth_high = wu_history_obs.high_f if (wu_history_obs and wu_history_obs.high_f is not None) else daily_high
+    # Resolve ground truth: prefer WU history (settlement source),
+    # then resolution-filtered METAR, then raw METAR
+    if wu_history_obs and wu_history_obs.high_f is not None:
+        ground_truth_high = wu_history_obs.high_f
+    elif resolution_high is not None:
+        ground_truth_high = resolution_high
+    else:
+        ground_truth_high = daily_high  # raw MAX fallback
 
     # Build calibration dict
     cal_dict = None
@@ -280,6 +297,9 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
             "spread": spread,
             "ask_depth": ask_depth,
             "city_state": city_state,
+            "resolution_high": resolution_high,
+            "raw_high": daily_high,
+            "observation_minutes": valid_minutes,
         }
 
         actionable = (
