@@ -15,6 +15,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
 from backend.config import Config
+from backend.city_registry import get_city_priority, CITY_REGISTRY_BY_SLUG
 from backend.tz_utils import city_local_date, city_local_now, city_local_tomorrow, et_today
 from backend.strategy.kelly import calculate_expected_value, calculate_kelly_fraction
 from backend.modeling.calibration_engine import get_reliability_metrics
@@ -68,9 +69,11 @@ async def dashboard(request: Request):
         reason = json.loads(sig.reason_json) if sig.reason_json else {}
         gate_failures = json.loads(sig.gate_failures_json) if sig.gate_failures_json else []
 
+        slug = city_row.city_slug if city_row else ""
         signal_rows.append({
-            "city_slug": city_row.city_slug if city_row else "",
+            "city_slug": slug,
             "city_display": city_row.display_name if city_row else "",
+            "unit": city_row.unit if city_row else "F",
             "bucket_idx": bucket_row.bucket_idx if bucket_row else 0,
             "label": bucket_row.label or f"Bucket {bucket_row.bucket_idx}",
             "low_f": bucket_row.low_f,
@@ -83,6 +86,8 @@ async def dashboard(request: Request):
             "ask_depth": reason.get("ask_depth"),
             "actionable": sig.true_edge >= 0.10 and not gate_failures,
             "gate_failures": gate_failures,
+            "prob_new_high": reason.get("prob_new_high", 1.0),
+            "city_state": reason.get("city_state", "early"),
         })
 
     # Deduplicate — keep latest signal per (city, bucket_idx)
@@ -94,7 +99,8 @@ async def dashboard(request: Request):
             seen[key] = True
             deduped.append(row)
 
-    deduped.sort(key=lambda r: r["true_edge"], reverse=True)
+    # Sort: timezone (east → west) then edge descending within each city
+    deduped.sort(key=lambda r: (get_city_priority(r["city_slug"]), -r["true_edge"]))
 
     total_exposure = sum((p.net_qty * p.avg_cost) for p in positions if p.net_qty > 0)
 
@@ -347,9 +353,11 @@ async def htmx_signals_table(request: Request):
         reason = json.loads(sig.reason_json) if sig.reason_json else {}
         gate_failures = json.loads(sig.gate_failures_json) if sig.gate_failures_json else []
 
+        slug = c.city_slug if c else ""
         rows.append({
-            "city_slug": c.city_slug if c else "",
+            "city_slug": slug,
             "city_display": c.display_name if c else "",
+            "unit": c.unit if c else "F",
             "bucket_idx": b.bucket_idx,
             "label": b.label or f"Bucket {b.bucket_idx}",
             "model_prob": sig.model_prob,
@@ -359,7 +367,9 @@ async def htmx_signals_table(request: Request):
             "ask_depth": reason.get("ask_depth"),
             "actionable": sig.true_edge >= 0.10 and not gate_failures,
             "gate_failures": gate_failures,
+            "prob_new_high": reason.get("prob_new_high", 1.0),
+            "city_state": reason.get("city_state", "early"),
         })
 
-    rows.sort(key=lambda r: r["true_edge"], reverse=True)
+    rows.sort(key=lambda r: (get_city_priority(r["city_slug"]), -r["true_edge"]))
     return templates.TemplateResponse("partials/signals_table.html", {"request": request, "signal_rows": rows})

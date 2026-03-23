@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from backend.api.deps import require_admin
+from backend.city_registry import CITY_REGISTRY_BY_SLUG
 from backend.tz_utils import city_local_date, et_today
 from backend.config import Config
 from backend.execution import arming as arming_mod
@@ -320,6 +321,9 @@ async def get_city_state(city_slug: str):
     # Use WU History as ground truth if available; fallback to METAR daily high
     daily_high = wu_hist.high_f if wu_hist and wu_hist.high_f is not None else (metar.daily_high_f if metar else None)
 
+    model_inputs = json.loads(model.inputs_json) if model and model.inputs_json else {}
+    reg = CITY_REGISTRY_BY_SLUG.get(city_slug, {})
+
     return {
         "city_slug": city_slug,
         "display_name": city.display_name,
@@ -347,11 +351,14 @@ async def get_city_state(city_slug: str):
         },
         "forecast_quality": event.forecast_quality if event else None,
         "wu_scrape_error": event.wu_scrape_error if event else None,
+        "prob_new_high": model_inputs.get("prob_new_high"),
+        "city_state": model_inputs.get("city_state"),
+        "utc_offset": reg.get("utc_offset"),
         "model": {
             "mu": model.mu if model else None,
             "sigma": model.sigma if model else None,
             "probs": json.loads(model.probs_json) if model and model.probs_json else None,
-            "inputs": json.loads(model.inputs_json) if model and model.inputs_json else None,
+            "inputs": model_inputs or None,
             "computed_at": model.computed_at.isoformat() if model else None,
         } if model else None,
         "event_status": event.status if event else "no_event",
@@ -426,9 +433,12 @@ async def get_all_signals():
             event_row = await sess.get(Event, bucket_row.event_id)
             city_row = await sess.get(City, event_row.city_id) if event_row else None
 
+        reason = json.loads(sig.reason_json) if sig.reason_json else {}
+        slug = city_row.city_slug if city_row else None
+        reg = CITY_REGISTRY_BY_SLUG.get(slug or "", {})
         out.append({
             "signal_id": sig.id,
-            "city_slug": city_row.city_slug if city_row else None,
+            "city_slug": slug,
             "city_display": city_row.display_name if city_row else None,
             "bucket_id": sig.bucket_id,
             "bucket_idx": bucket_row.bucket_idx if bucket_row else None,
@@ -440,7 +450,10 @@ async def get_all_signals():
             "raw_edge": sig.raw_edge,
             "exec_cost": sig.exec_cost,
             "true_edge": sig.true_edge,
-            "reason": json.loads(sig.reason_json) if sig.reason_json else {},
+            "prob_new_high": reason.get("prob_new_high"),
+            "city_state": reason.get("city_state"),
+            "utc_offset": reg.get("utc_offset"),
+            "reason": reason,
             "computed_at": sig.computed_at.isoformat(),
         })
 
@@ -464,6 +477,7 @@ async def get_city_signals(city_slug: str):
             from backend.storage.repos import get_latest_signal_for_bucket
             sig = await get_latest_signal_for_bucket(sess, b.id)
         if sig:
+            reason = json.loads(sig.reason_json) if sig.reason_json else {}
             result.append({
                 "bucket_idx": b.bucket_idx,
                 "label": b.label,
@@ -473,8 +487,10 @@ async def get_city_signals(city_slug: str):
                 "mkt_prob": sig.mkt_prob,
                 "true_edge": sig.true_edge,
                 "exec_cost": sig.exec_cost,
+                "prob_new_high": reason.get("prob_new_high"),
+                "city_state": reason.get("city_state"),
                 "gate_failures": json.loads(sig.gate_failures_json) if sig.gate_failures_json else [],
-                "reason": json.loads(sig.reason_json) if sig.reason_json else {},
+                "reason": reason,
                 "computed_at": sig.computed_at.isoformat(),
             })
 

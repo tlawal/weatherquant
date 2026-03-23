@@ -20,6 +20,8 @@ from datetime import datetime, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
 
+from scipy.stats import norm as _norm
+
 from backend.modeling.distribution import bucket_probabilities
 
 log = logging.getLogger(__name__)
@@ -63,6 +65,7 @@ class ModelResult:
     w_metar: float
     remaining_rise: float
     forecast_quality: str
+    prob_new_high: float = 1.0
     inputs: dict = field(default_factory=dict)
 
 
@@ -200,6 +203,13 @@ def compute_model(
     else:
         probs = bucket_probabilities(mu_final, sigma_final, buckets)
 
+    # ── Prob new high ────────────────────────────────────────────────────────────
+    # P(final daily high > current observed max) using the model distribution.
+    if daily_high_metar is not None and sigma_final > 0:
+        prob_new_high = float(1.0 - _norm.cdf(daily_high_metar, mu_final, sigma_final))
+    else:
+        prob_new_high = 1.0  # no observation yet — high hasn't been established
+
     inputs = {
         "nws_high": nws_high,
         "wu_daily_high": wu_daily_high,
@@ -215,6 +225,7 @@ def compute_model(
         "sigma_raw": float(sigma_raw),
         "sources_used": list(calibrated.keys()),
         "forecast_quality": forecast_quality,
+        "prob_new_high": round(prob_new_high, 4),
     }
 
     return ModelResult(
@@ -226,5 +237,6 @@ def compute_model(
         w_metar=float(w_metar),
         remaining_rise=remaining_rise,
         forecast_quality=forecast_quality,
+        prob_new_high=prob_new_high,
         inputs=inputs,
     )

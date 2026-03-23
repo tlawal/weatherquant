@@ -1,11 +1,13 @@
 {% for row in signal_rows %}
-<tr class="border-b transition-colors hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer
-  {% if row.true_edge >= 0.15 %}edge-hot{% elif row.true_edge >= 0.10 %}edge-warm{% else %}edge-cold{% endif %}"
-  style="border-color:var(--border)"
+{% set diff = (row.model_prob - row.mkt_prob) if row.mkt_prob else 0 %}
+{% set is_hot = row.city_state == "volatile" and row.true_edge >= 0.10 %}
+<tr class="border-b transition-colors cursor-pointer
+  {% if is_hot %}bg-orange-950/30 hover:bg-orange-950/50{% else %}hover:bg-black/5 dark:hover:bg-white/5 opacity-70{% endif %}"
+  style="border-color:var(--border);{% if is_hot %}border-left:3px solid #F97316{% endif %}"
   onclick="quickTrade('{{ row.city_slug }}', {{ row.bucket_idx }})">
 
   <!-- City -->
-  <td class="px-4 py-3">
+  <td class="px-3 py-3">
     <a href="/city/{{ row.city_slug }}" onclick="event.stopPropagation()"
        class="font-medium text-sm hover:underline" style="color:var(--cyan)">
       {{ row.city_display }}
@@ -13,7 +15,7 @@
   </td>
 
   <!-- Bucket range -->
-  <td class="px-4 py-3">
+  <td class="px-3 py-3">
     <span class="font-mono text-sm tracking-tighter">
       {% if row.low_f is not none and row.high_f is not none %}
         {{ row.low_f|int }}–{{ row.high_f|int }}°{{ row.unit }}
@@ -27,41 +29,73 @@
     </span>
   </td>
 
-  <!-- Market prob -->
-  <td class="px-4 py-3 text-right mono text-sm" style="color:var(--text-muted)">
-    {% if row.mkt_prob %}{{ "%.1f"|format(row.mkt_prob * 100) }}%{% else %}—{% endif %}
+  <!-- Model Prob (PRIMARY) -->
+  <td class="px-3 py-3 text-right">
+    <span class="mono text-base font-bold" style="color:var(--cyan)">
+      {% if row.model_prob is not none %}{{ "%.1f"|format(row.model_prob * 100) }}%{% else %}—{% endif %}
+    </span>
   </td>
 
-  <!-- Model prob -->
-  <td class="px-4 py-3 text-right mono text-sm font-medium">
-    {% if row.model_prob %}{{ "%.1f"|format(row.model_prob * 100) }}%{% else %}—{% endif %}
+  <!-- Market Prob (PRIMARY) -->
+  <td class="px-3 py-3 text-right">
+    <span class="mono text-base font-bold" style="color:var(--yellow)">
+      {% if row.mkt_prob %}{{ "%.1f"|format(row.mkt_prob * 100) }}%{% else %}—{% endif %}
+    </span>
   </td>
 
-  <!-- True edge — the KEY column -->
-  <td class="px-4 py-3 text-right font-bold mono">
-    {% if row.true_edge >= 0.15 %}
-      <span class="text-green-400">+{{ "%.2f"|format(row.true_edge * 100) }}%</span>
-    {% elif row.true_edge >= 0.10 %}
-      <span class="text-yellow-400">+{{ "%.2f"|format(row.true_edge * 100) }}%</span>
-    {% elif row.true_edge > 0 %}
-      <span style="color:var(--text-muted)">+{{ "%.2f"|format(row.true_edge * 100) }}%</span>
+  <!-- Diff (Model - Market) -->
+  <td class="px-3 py-3 text-right mono text-sm font-semibold">
+    {% if row.mkt_prob %}
+      {% if diff > 0 %}
+        <span class="text-green-400">+{{ "%.1f"|format(diff * 100) }}%</span>
+      {% elif diff < 0 %}
+        <span class="text-red-400">{{ "%.1f"|format(diff * 100) }}%</span>
+      {% else %}
+        <span style="color:var(--text-muted)">0.0%</span>
+      {% endif %}
     {% else %}
-      <span class="text-red-400/60">{{ "%.2f"|format(row.true_edge * 100) }}%</span>
+      <span style="color:var(--text-muted)">—</span>
     {% endif %}
   </td>
 
-  <!-- Spread -->
-  <td class="px-4 py-3 text-right mono text-xs" style="color:var(--text-muted)">
-    {% if row.spread %}{{ "%.3f"|format(row.spread) }}{% else %}—{% endif %}
+  <!-- True Edge (secondary) -->
+  <td class="px-3 py-3 text-right mono text-xs" style="color:var(--text-muted)">
+    {% if row.true_edge >= 0.10 %}
+      <span class="text-green-400">+{{ "%.1f"|format(row.true_edge * 100) }}%</span>
+    {% elif row.true_edge > 0 %}
+      +{{ "%.1f"|format(row.true_edge * 100) }}%
+    {% else %}
+      {{ "%.1f"|format(row.true_edge * 100) }}%
+    {% endif %}
   </td>
 
-  <!-- Liquidity -->
-  <td class="px-4 py-3 text-right mono text-xs" style="color:var(--text-muted)">
-    {% if row.ask_depth %}{{ "%.0f"|format(row.ask_depth) }}{% else %}—{% endif %}
+  <!-- City State badge -->
+  <td class="px-3 py-3 text-center">
+    {% if row.city_state == "early" %}
+      <span class="text-[10px] px-2 py-0.5 rounded-full font-bold" style="background:#1E3A5F;color:#60A5FA">EARLY</span>
+    {% elif row.city_state == "approaching" %}
+      <span class="text-[10px] px-2 py-0.5 rounded-full font-bold" style="background:#713F12;color:#FBBF24">APPR</span>
+    {% elif row.city_state == "volatile" %}
+      <span class="text-[10px] px-2 py-0.5 rounded-full font-bold" style="background:#7C2D12;color:#FB923C">VOL</span>
+    {% else %}
+      <span class="text-[10px] px-2 py-0.5 rounded-full font-bold" style="background:#1C1917;color:#78716C">DONE</span>
+    {% endif %}
+  </td>
+
+  <!-- Prob New High -->
+  <td class="px-3 py-3 text-right mono text-xs">
+    {% set pnh = row.prob_new_high * 100 %}
+    {% if pnh > 30 %}
+      <span class="text-green-400">{{ "%.0f"|format(pnh) }}%</span>
+    {% elif pnh > 10 %}
+      <span class="text-yellow-400">{{ "%.0f"|format(pnh) }}%</span>
+    {% else %}
+      <span class="text-red-400">{{ "%.0f"|format(pnh) }}%</span>
+    {% endif %}
   </td>
 
   <!-- Action -->
-  <td class="px-4 py-3 text-center">
+  <td class="px-3 py-3 text-center">
     {% if row.actionable %}
       <button onclick="event.stopPropagation();quickTrade('{{ row.city_slug }}',{{ row.bucket_idx }})"
         class="text-xs px-3 py-1 rounded font-semibold transition-all hover:opacity-80"
@@ -79,8 +113,8 @@
 </tr>
 {% else %}
 <tr>
-  <td colspan="8" class="px-4 py-8 text-center" style="color:var(--text-muted)">
-    No signals yet — ingestion may still be initializing.
+  <td colspan="9" class="px-4 py-8 text-center" style="color:var(--text-muted)">
+    No active signals — all cities may be resolved or ingestion still initializing.
   </td>
 </tr>
 {% endfor %}

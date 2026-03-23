@@ -67,6 +67,20 @@ class BucketSignal:
     reason: dict = field(default_factory=dict)
     gate_failures: list[str] = field(default_factory=list)
     actionable: bool = False
+    prob_new_high: float = 1.0
+    city_state: str = "early"
+
+
+def classify_city_state(prob_new_high: float) -> str:
+    """Classify city trading state based on probability of a new daily high."""
+    if prob_new_high > 0.40:
+        return "early"
+    elif prob_new_high > 0.15:
+        return "approaching"
+    elif prob_new_high > 0.05:
+        return "volatile"
+    else:
+        return "resolved"
 
 
 def _execution_cost(spread: Optional[float], ask_depth: float) -> float:
@@ -175,6 +189,13 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         log.warning("signal: %s — model returned None (insufficient data)", city.city_slug)
         return []
 
+    prob_new_high = model.prob_new_high
+    city_state = classify_city_state(prob_new_high)
+
+    if city_state == "resolved":
+        log.info("signal: %s — resolved (prob_new_high=%.3f), skipping", city.city_slug, prob_new_high)
+        return []
+
     # Persist model snapshot
     async with get_session() as sess:
         await insert_model_snapshot(
@@ -228,6 +249,8 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
                 spread=None,
                 yes_ask_depth=0.0,
                 gate_failures=["no_market_data"],
+                prob_new_high=prob_new_high,
+                city_state=city_state,
             )
             signals.append(sig)
             continue
@@ -256,6 +279,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
             "true_edge": float(round(true_edge, 4)),
             "spread": spread,
             "ask_depth": ask_depth,
+            "city_state": city_state,
         }
 
         actionable = (
@@ -287,6 +311,8 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
             yes_ask_depth=ask_depth,
             reason=reason,
             actionable=actionable,
+            prob_new_high=prob_new_high,
+            city_state=city_state,
         )
         signals.append(sig)
 
