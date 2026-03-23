@@ -87,6 +87,19 @@
               </a>
             </div>
           </template>
+          {% if station_confidence is not none %}
+          <div class="mt-2 pt-2 border-t" style="border-color:var(--border)">
+            <div class="flex justify-between"><span style="color:var(--text-muted)">Obs Minutes</span>
+              <span class="mono">:{{ observation_minutes|join(', :') if observation_minutes else '—' }}</span>
+            </div>
+            <div class="flex justify-between"><span style="color:var(--text-muted)">Frequency</span>
+              <span class="mono">{{ station_frequency or '—' }}</span>
+            </div>
+            <div class="flex justify-between"><span style="color:var(--text-muted)">Confidence</span>
+              <span class="mono">{{ "%.0f"|format(station_confidence * 100) }}%</span>
+            </div>
+          </div>
+          {% endif %}
         </div>
       </template>
       <template x-if="!data && !error">
@@ -208,8 +221,14 @@
       {% if model and model.mu is not none %}{{ "%.1f"|format(model.mu) }}°{{ city.unit|default('F') }}{% else %}—{% endif %}
     </div>
     <div class="text-xs mt-2" style="color:var(--text-muted)">
-      {% if obs_high_f is not none %}
-      <span style="color:var(--cyan)">Obs. High: {{ "%.1f"|format(obs_high_f) }}°</span>
+      {% if resolution_high_f is not none and obs_high_f is not none and resolution_high_f != obs_high_f %}
+        <span style="color:var(--cyan)">Res. High: {{ "%.1f"|format(resolution_high_f) }}°</span>
+        <span class="opacity-50 ml-1">(raw: {{ "%.1f"|format(obs_high_f) }}°)</span>
+        {% if observation_minutes %}
+        <span class="opacity-40 ml-1">@:{{ observation_minutes|join(', :') }}</span>
+        {% endif %}
+      {% elif obs_high_f is not none %}
+        <span style="color:var(--cyan)">Obs. High: {{ "%.1f"|format(obs_high_f) }}°</span>
       {% else %}No observed high yet{% endif %}
     </div>
   </div>

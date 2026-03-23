@@ -88,6 +88,9 @@ async def dashboard(request: Request):
             "gate_failures": gate_failures,
             "prob_new_high": reason.get("prob_new_high", 1.0),
             "city_state": reason.get("city_state", "early"),
+            "resolution_high": reason.get("resolution_high"),
+            "raw_high": reason.get("raw_high"),
+            "observation_minutes": reason.get("observation_minutes"),
         })
 
     # Deduplicate — keep latest signal per (city, bucket_idx)
@@ -132,6 +135,8 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
         get_latest_signal_for_bucket,
         get_latest_market_snapshot,
         get_daily_high_metar,
+        get_station_profile,
+        get_resolution_high_metar,
     )
 
     async with get_session() as sess:
@@ -157,6 +162,14 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
         metar = await get_latest_metar(sess, city.id)
         # For the selected date, we also want the official high observed by METAR
         obs_high_f = await get_daily_high_metar(sess, city.id, target_date_et)
+
+        # Station profile for resolution-aware display
+        station_profile = await get_station_profile(sess, city.metar_station) if city.metar_station else None
+        resolution_high_f = None
+        obs_minutes_list = None
+        if station_profile and station_profile.observation_minutes:
+            obs_minutes_list = json.loads(station_profile.observation_minutes)
+            resolution_high_f = await get_resolution_high_metar(sess, city.id, target_date_et, obs_minutes_list)
 
         wu_d = await get_latest_forecast(sess, city.id, "wu_daily", target_date_et)
         wu_h = await get_latest_forecast(sess, city.id, "wu_hourly", target_date_et)
@@ -241,6 +254,10 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
             "real_today_et": real_today_et,
             "available_dates": available_dates,
             "obs_high_f": obs_high_f,
+            "resolution_high_f": resolution_high_f,
+            "observation_minutes": obs_minutes_list,
+            "station_confidence": station_profile.confidence if station_profile else None,
+            "station_frequency": station_profile.observation_frequency if station_profile else None,
             "metar": {
                 "temp_f": metar.temp_f if (metar and target_date_et == real_today_et) else None,
                 "daily_high_f": obs_high_f,
@@ -369,6 +386,9 @@ async def htmx_signals_table(request: Request):
             "gate_failures": gate_failures,
             "prob_new_high": reason.get("prob_new_high", 1.0),
             "city_state": reason.get("city_state", "early"),
+            "resolution_high": reason.get("resolution_high"),
+            "raw_high": reason.get("raw_high"),
+            "observation_minutes": reason.get("observation_minutes"),
         })
 
     rows.sort(key=lambda r: (get_city_priority(r["city_slug"]), -r["true_edge"]))

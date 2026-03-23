@@ -70,7 +70,8 @@
   </td>
 
   <!-- City State badge -->
-  <td class="px-3 py-3 text-center">
+  <td class="px-3 py-3 text-center"
+      title="{% if row.resolution_high is not none %}Res: {{ row.resolution_high }}° | Raw: {{ row.raw_high }}°{% if row.observation_minutes %} | @:{{ row.observation_minutes|join(',:') }}{% endif %}{% else %}No station profile{% endif %}">
     {% if row.city_state == "early" %}
       <span class="text-[10px] px-2 py-0.5 rounded-full font-bold" style="background:#1E3A5F;color:#60A5FA">EARLY</span>
     {% elif row.city_state == "approaching" %}

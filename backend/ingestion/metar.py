@@ -94,7 +94,12 @@ async def fetch_metar_all() -> None:
 
     if us_cities:
         await _fetch_us_metars(us_cities)
-    
+        # Supplementary: weather.gov observations as fallback/cross-validation
+        try:
+            await _fetch_nws_observations(us_cities)
+        except Exception as e:
+            log.warning("nws_obs: supplementary fetch failed: %s", e)
+
     if intl_cities:
         await _fetch_intl_open_meteo(intl_cities)
 
@@ -160,6 +165,55 @@ async def _fetch_us_metars(cities: list[City]) -> None:
             )
 
     await _mark_heartbeat_success()
+
+
+async def _fetch_nws_observations(cities: list[City]) -> None:
+    """Supplementary: fetch latest observation from weather.gov for US cities."""
+    headers = {"User-Agent": _USER_AGENT, "Accept": "application/geo+json"}
+    async with aiohttp.ClientSession(timeout=_TIMEOUT, headers=headers) as http:
+        for city in cities:
+            try:
+                url = f"https://api.weather.gov/stations/{city.metar_station}/observations/latest"
+                async with http.get(url) as resp:
+                    if resp.status != 200:
+                        log.debug("nws_obs: HTTP %d for %s", resp.status, city.metar_station)
+                        continue
+                    data = await resp.json(content_type=None)
+
+                props = data.get("properties", {})
+                temp_c_val = (props.get("temperature") or {}).get("value")
+                if temp_c_val is None:
+                    continue
+                temp_c = float(temp_c_val)
+                temp_f = _c_to_f(temp_c)
+
+                ts_str = props.get("timestamp")
+                obs_time = (
+                    datetime.fromisoformat(ts_str.rstrip("Z")).replace(tzinfo=timezone.utc)
+                    if ts_str else datetime.now(timezone.utc)
+                )
+
+                today_local = city_local_date(city)
+                async with get_session() as sess:
+                    prev_high = await get_daily_high_metar(sess, city.id, today_local)
+                    daily_high = max(
+                        (v for v in [temp_f, prev_high] if v is not None), default=temp_f
+                    )
+                    await insert_metar_obs(
+                        sess,
+                        city_id=city.id,
+                        metar_station=city.metar_station,
+                        observed_at=obs_time,
+                        report_at=obs_time,
+                        temp_c=temp_c,
+                        temp_f=temp_f,
+                        daily_high_f=daily_high,
+                        raw_text=props.get("rawMessage"),
+                        raw_json=json.dumps({"source": "nws_obs", **props}, default=str),
+                    )
+                await asyncio.sleep(0.3)  # rate limit courtesy
+            except Exception as e:
+                log.error("nws_obs: %s failed: %s", city.metar_station, e)
 
 
 async def _fetch_intl_open_meteo(cities: list[City]) -> None:
@@ -229,6 +283,48 @@ async def _fetch_intl_open_meteo(cities: list[City]) -> None:
                 raw_text=None,
                 raw_json=raw_str,
             )
+
+
+def should_poll_station(observation_minutes: list[int], now_minute: int, window: int = 3) -> bool:
+    """Return True if now_minute is within ±window of any observation minute."""
+    for m in observation_minutes:
+        diff = min(abs(now_minute - m), 60 - abs(now_minute - m))
+        if diff <= window:
+            return True
+    return False
+
+
+async def fetch_metar_smart() -> None:
+    """Fetch METAR only for stations near their observation window."""
+    from backend.storage.repos import get_station_profile
+
+    now = datetime.now(timezone.utc)
+    now_minute = now.minute
+
+    async with get_session() as sess:
+        cities = await get_all_cities(sess, enabled_only=True)
+
+    us_in_window = []
+    for city in [c for c in cities if c.is_us and c.metar_station]:
+        async with get_session() as sess:
+            profile = await get_station_profile(sess, city.metar_station)
+        if not profile or not profile.observation_minutes or (profile.confidence or 0) < 0.7:
+            us_in_window.append(city)  # no confident profile → always poll
+            continue
+        valid_minutes = json.loads(profile.observation_minutes)
+        if should_poll_station(valid_minutes, now_minute, window=3):
+            us_in_window.append(city)
+
+    if us_in_window:
+        await _fetch_us_metars(us_in_window)
+        total_us = len([c for c in cities if c.is_us and c.metar_station])
+        log.info("smart_poll: fetched %d/%d US stations at minute :%02d",
+                 len(us_in_window), total_us, now_minute)
+
+    # International cities always get polled (Open-Meteo is bulk/cheap)
+    intl_cities = [c for c in cities if not c.is_us and c.lat and c.lon]
+    if intl_cities:
+        await _fetch_intl_open_meteo(intl_cities)
 
 
 async def _mark_heartbeat_success() -> None:
