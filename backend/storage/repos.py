@@ -226,6 +226,70 @@ async def get_avg_peak_timing(
     return dummy_dt.strftime("%-I:%M %p ET")
 
 
+async def get_temp_slope(
+    session: AsyncSession, city_id: int, hours_back: int = 3
+) -> float:
+    """Calculate the temperature change (°F) over the last N hours from METAR observations."""
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(hours=hours_back)
+    
+    result = await session.execute(
+        select(MetarObs.temp_f, MetarObs.observed_at)
+        .where(
+            MetarObs.city_id == city_id,
+            MetarObs.temp_f.isnot(None),
+            MetarObs.observed_at >= since
+        )
+        .order_by(MetarObs.observed_at)
+    )
+    rows = result.all()
+    if len(rows) < 2:
+        return 0.0
+    
+    oldest_temp = rows[0][0]
+    newest_temp = rows[-1][0]
+    return float(newest_temp - oldest_temp)
+
+
+async def get_avg_peak_timing_mins(
+    session: AsyncSession, city_id: int, days_back: int = 3, tz: ZoneInfo = ZoneInfo("America/New_York")
+) -> float:
+    """Return the average minutes-since-midnight that the daily peak was reached over the last N days."""
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(days=days_back + 1)
+    
+    result = await session.execute(
+        select(MetarObs)
+        .where(
+            MetarObs.city_id == city_id,
+            MetarObs.temp_f.isnot(None),
+            MetarObs.observed_at >= since
+        )
+    )
+    obs_list = list(result.scalars().all())
+    if not obs_list:
+        return 960.0  # default 4 PM
+    
+    from collections import defaultdict
+    daily_obs = defaultdict(list)
+    for obs in obs_list:
+        dt_local = obs.observed_at.astimezone(tz)
+        daily_obs[dt_local.date()].append(obs)
+    
+    today_date = datetime.now(tz).date()
+    peak_minutes = []
+    for d, obs_for_day in daily_obs.items():
+        if d == today_date:
+            continue
+        best = max(obs_for_day, key=lambda o: o.temp_f)
+        best_local = best.observed_at.astimezone(tz)
+        peak_minutes.append(best_local.hour * 60 + best_local.minute)
+    
+    if not peak_minutes:
+        return 960.0
+    return sum(peak_minutes) / len(peak_minutes)
+
+
 # ─── Station Profiles ────────────────────────────────────────────────────
 
 async def get_station_profile(

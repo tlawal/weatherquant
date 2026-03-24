@@ -36,6 +36,8 @@ from backend.storage.repos import (
     get_latest_model_snapshot,
     get_resolution_high_metar,
     get_station_profile,
+    get_temp_slope,
+    get_avg_peak_timing_mins,
     insert_model_snapshot,
     insert_signal,
     update_heartbeat,
@@ -161,6 +163,12 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
             valid_minutes = None
             resolution_high = None
 
+        # ML features for the residual tracker
+        temp_slope_3h = await get_temp_slope(sess, city.id, hours_back=3)
+        avg_peak_mins = await get_avg_peak_timing_mins(
+            sess, city.id, days_back=3, tz=ZoneInfo(getattr(city, "tz", "America/New_York"))
+        )
+
     if not buckets:
         log.debug("signal: %s — no buckets", city.city_slug)
         return []
@@ -216,6 +224,11 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         unit=getattr(city, "unit", "F"),
         city_tz=getattr(city, "tz", "America/New_York"),
         observed_high=observed_high_floor,
+        ml_features={
+            "temp_slope_3h": temp_slope_3h,
+            "avg_peak_timing_mins": avg_peak_mins,
+            "day_of_year": datetime.now(timezone.utc).timetuple().tm_yday,
+        },
     )
 
     if model is None:

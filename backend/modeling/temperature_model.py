@@ -23,6 +23,7 @@ from zoneinfo import ZoneInfo
 from scipy.stats import norm as _norm
 
 from backend.modeling.distribution import bucket_probabilities, conditional_bucket_probabilities
+from backend.modeling.residual_tracker import predict_remaining_rise, is_ml_model_loaded
 
 log = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")
@@ -96,6 +97,7 @@ def compute_model(
     unit: str = "F",
     city_tz: str = "America/New_York",
     observed_high: Optional[float] = None,
+    ml_features: Optional[dict] = None,
 ) -> Optional[ModelResult]:
     """
     Fuse all forecast sources and compute temperature distribution + bucket probabilities.
@@ -165,7 +167,17 @@ def compute_model(
 
     # ── METAR intraday adjustment ──────────────────────────────────────────────
     w_metar = _metar_weight(hour_local)
-    remaining_rise = _expected_remaining_rise(hour_local) * unit_mult
+
+    # Use ML-based remaining rise prediction if features are available
+    _ml = ml_features or {}
+    remaining_rise = predict_remaining_rise(
+        hour_local=hour_local,
+        current_temp_f=current_temp_f or 70.0,
+        temp_slope_3h=_ml.get("temp_slope_3h", 0.0),
+        avg_peak_timing_mins=_ml.get("avg_peak_timing_mins", 960.0),
+        day_of_year=_ml.get("day_of_year", now_local.timetuple().tm_yday),
+        unit_mult=unit_mult,
+    )
 
     # Projected high = max(daily high so far, current + expected rise)
     projected_high = mu_forecast  # default to forecast if no METAR
