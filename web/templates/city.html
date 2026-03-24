@@ -439,11 +439,12 @@
     <div class="card p-5">
       <div class="flex items-center justify-between mb-4" x-data="{ showTip: false }">
         <div class="flex items-center gap-1.5 relative">
-          <h2 class="font-semibold text-sm cursor-help" @click="showTip = !showTip" @click.outside="showTip = false">Probability Calibration</h2>
-          <button class="hover:text-cyan-400 opacity-30 transition-all text-xs" @click="showTip = !showTip">ⓘ</button>
+          <h2 class="font-semibold text-sm cursor-help" @click.stop="showTip = !showTip">Probability Calibration</h2>
+          <button class="hover:text-cyan-400 opacity-30 transition-all text-xs" @click.stop="showTip = !showTip">ⓘ</button>
           
           <!-- Popover -->
           <div x-show="showTip" x-cloak
+               @click.outside="showTip = false"
                x-transition:enter="transition ease-out duration-100" 
                class="absolute left-0 top-7 w-72 p-4 rounded-xl shadow-2xl z-50 border text-[11px] leading-relaxed normal-case"
                style="background:var(--bg-panel); border-color:var(--border);">
