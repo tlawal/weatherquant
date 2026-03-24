@@ -78,3 +78,24 @@ The `Model Forecast μ` represents the system's "best guess" for the true projec
 1. **Base Forecast Fusion (`mu_forecast`)**: The model takes the NWS Daily High, the Weather Underground (WU) Daily High, and the WU Hourly Peak. It applies historically calibrated biases and weights to each source (derived via the Brier Score calibration engine) to compute a weighted, bias-corrected baseline prediction.
 2. **Static Diurnal "Remaining Rise" Table**: Based entirely on the current local hour, the model looks up an expected `remaining_rise` table (e.g., at 6 AM it expects +11°F remaining, at 1 PM it expects +2°F). 
 3. **Live METAR Observation Blending**: As the day progresses, the model calculates a `projected_high` which equals the `max(daily_high_observed, current_temp + remaining_rise)`. Finally, it utilizes a time-of-day weighting factor (`w_metar`) to dynamically mix the Base Forecast and the Projected High. At midnight, `w_metar` is 0.0 (100% forecasting). By 8 PM local, it reaches 0.99 (99% reliant on live observation trends).
+
+### ML Residual Tracker (Dynamic Remaining Rise)
+
+The static "Remaining Rise" table (step 2) is being replaced by a `GradientBoostingRegressor` trained on historical METAR observations. It uses the following features:
+
+| Feature | Description |
+|---|---|
+| `hour_local` | Current local hour of day |
+| `temp_f` | Current observed temperature |
+| `temp_slope_3h` | Temperature change over the past 3 hours (real-time momentum) |
+| `avg_peak_timing_mins` | Rolling 3-day average of when the daily high was reached (minutes since midnight) |
+| `day_of_year` | Seasonal solar angle proxy |
+
+> [!IMPORTANT]
+> **Zero-risk deployment**: Until the model is trained, the system falls back automatically to the old static table — no regression risk.
+>
+> To activate ML predictions after deploying to Railway:
+> ```bash
+> python -m backend.modeling.ml_trainer
+> ```
+> This trains on live `metar_obs` data, prints MAE improvement vs. the static baseline, and saves `backend/modeling/residual_model.pkl`. The signal engine loads it automatically on next restart.
