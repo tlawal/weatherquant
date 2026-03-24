@@ -212,8 +212,9 @@
         <span>Distribution Model Mean</span>
       </div>
       <div class="space-y-1.5 opacity-90">
-        <p class="py-1 italic mb-2">Projected true daily high, dynamically fusing NWS, WU Daily, and WU Hourly forecasts. Weighted recursively by past prediction accuracy.</p>
+        <p class="py-1 italic mb-2">Projected true daily high, dynamically fusing NWS, WU Daily, and WU Hourly forecasts. Note: Timing and magnitude of the peak heavily depend on afternoon cloud cover/humidity regulating solar insolation.</p>
         <div class="flex justify-between"><span style="color:var(--text-muted)">Sigma Spread</span><span class="mono">{% if model and model.sigma %}{{ "%.2f"|format(model.sigma) }}{% else %}—{% endif %}</span></div>
+        <div class="flex justify-between"><span style="color:var(--text-muted)">Avg Peak Timing (3d)</span><span class="mono">{% if avg_peak_timing %}{{ avg_peak_timing }}{% else %}—{% endif %}</span></div>
         <div class="flex justify-between"><span style="color:var(--text-muted)">Latest Computation</span><span class="mono">{% if event and event.status == 'open' %}Real-time{% else %}Finalized{% endif %}</span></div>
       </div>
     </div>

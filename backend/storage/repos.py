@@ -10,6 +10,7 @@ import json
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import desc, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -174,6 +175,55 @@ async def get_daily_high_metar(
         )
     )
     return result.scalar_one_or_none()
+
+
+async def get_avg_peak_timing(
+    session: AsyncSession, city_id: int, days_back: int = 3, et_tz: ZoneInfo = ZoneInfo("America/New_York")
+) -> Optional[str]:
+    """Calculate the average time of day the maximum temperature was reached over the last N days."""
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(days=days_back + 1)
+    
+    result = await session.execute(
+        select(MetarObs)
+        .where(
+            MetarObs.city_id == city_id,
+            MetarObs.temp_f.isnot(None),
+            MetarObs.observed_at >= since
+        )
+    )
+    obs_list = list(result.scalars().all())
+    if not obs_list:
+        return None
+        
+    from collections import defaultdict
+    daily_obs = defaultdict(list)
+    for obs in obs_list:
+        dt_local = obs.observed_at.astimezone(et_tz)
+        daily_obs[dt_local.date()].append(obs)
+        
+    today_date = datetime.now(et_tz).date()
+    peak_minutes = []
+    
+    for d, obs_for_day in daily_obs.items():
+        if d == today_date and now.hour < 20:
+            continue  # don't include today if it's not late enough
+            
+        best_obs = max(obs_for_day, key=lambda o: o.temp_f)
+        best_dt = best_obs.observed_at.astimezone(et_tz)
+        minutes_since_midnight = best_dt.hour * 60 + best_dt.minute
+        peak_minutes.append(minutes_since_midnight)
+        
+    if not peak_minutes:
+        return None
+        
+    avg_mins = sum(peak_minutes) / len(peak_minutes)
+    avg_hour = int(avg_mins // 60)
+    avg_min = int(avg_mins % 60)
+    
+    # Format to "X:XX PM ET"
+    dummy_dt = datetime.now(et_tz).replace(hour=avg_hour, minute=avg_min)
+    return dummy_dt.strftime("%-I:%M %p ET")
 
 
 # ─── Station Profiles ────────────────────────────────────────────────────

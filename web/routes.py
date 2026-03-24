@@ -138,6 +138,7 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
         get_daily_high_metar,
         get_station_profile,
         get_resolution_high_metar,
+        get_avg_peak_timing,
     )
 
     async with get_session() as sess:
@@ -168,6 +169,7 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
         metar = await get_latest_metar(sess, city.id)
         # For the selected date, we also want the official high observed by METAR
         obs_high_f = await get_daily_high_metar(sess, city.id, target_date_et)
+        avg_peak_timing = await get_avg_peak_timing(sess, city.id, days_back=3, et_tz=et_tz)
 
         # Station profile for resolution-aware display
         station_profile = await get_station_profile(sess, city.metar_station) if city.metar_station else None
@@ -262,6 +264,7 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
             "real_today_et": real_today_et,
             "available_dates": available_dates,
             "obs_high_f": obs_high_f,
+            "avg_peak_timing": avg_peak_timing,
             "resolution_high_f": resolution_high_f,
             "resolution_mismatch": round(obs_high_f - resolution_high_f, 1) if (obs_high_f is not None and resolution_high_f is not None and obs_high_f - resolution_high_f >= 1.0) else None,
             "observation_minutes": obs_minutes_list,

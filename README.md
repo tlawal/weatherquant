@@ -58,7 +58,7 @@ Official settlement resolution source. We scrape:
 ### National Weather Service (NWS) & METAR
 - **Live Ground Truth**: We poll `api.weather.gov/stations/{METAR}/observations/latest` as the primary real-time temperature source for **all** US and International cities possessing a valid ICAO METAR station code.
 - **METAR Fallback**: `https://aviationweather.gov/api/data/metar?ids={METAR}&format=json&latest=1` serves as a highly reliable secondary fallback for US and global aviation stations.
-- **NWS Forecasts**: Baseline gridpoint forecasts from `api.weather.gov`.
+- **NWS Forecasts**: Baseline gridpoint forecasts from `api.weather.gov`. The dynamic continuous fusion of these forecasts tracks intraday cloud cover and humidity trends, which meteorological research indicates are primary regulators of diurnal temperature peak timing and magnitude (as solar insolation is directly impeded by cloud masking).
 
 ### Polymarket Gamma API Routing & Web UI
 - Custom slug routing gracefully maps UI abbreviations (e.g., `la`, `sf`) to full, hypenated names (`los-angeles`, `san-francisco`) for accurate Polymarket Gamma API event matching. 
