@@ -62,7 +62,7 @@ Official settlement resolution source. We scrape:
 
 ### Polymarket Gamma API Routing & Web UI
 - Custom slug routing gracefully maps UI abbreviations (e.g., `la`, `sf`) to full, hypenated names (`los-angeles`, `san-francisco`) for accurate Polymarket Gamma API event matching. 
-- Timezone-aware date rollovers automatically transition city dashboard links to the next day's active market after the 4:00 PM ET daily market close cutoff, effectively preventing dead links to resolved events.
+- Timezone-aware date rollovers automatically transition city dashboard links to the next day's active market after the 8:00 PM local time daily market close cutoff, effectively preventing dead links to resolved events.
 
 ### Open-Meteo & OpenWeatherMap (International Fallbacks)
 Provides global current weather and forecast models used strictly for non-US markets without explicit ICAO METAR assignments.

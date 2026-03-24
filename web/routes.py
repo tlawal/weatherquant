@@ -151,9 +151,9 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
     et_tz = ZoneInfo("America/New_York")
     real_today_et = city_local_date(city)
 
-    # Roll over to tomorrow's market if it's past market close (4 PM ET)
+    # Roll over to tomorrow's market if it's past 8 PM local time
     active_date_et = real_today_et
-    if now_et.hour >= 16:
+    if now_local.hour >= 20:
         active_date_et = city_local_tomorrow(city)
 
     target_date_et = date if date else active_date_et
