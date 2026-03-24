@@ -51,7 +51,7 @@ _METAR_WEIGHT_TABLE = [
     (14, 16, 0.40),
     (16, 18, 0.55),
     (18, 20, 0.70),   # late afternoon/evening — METAR is the dominant signal
-    (20, 24, 0.80),
+    (20, 24, 0.99),
 ]
 
 
