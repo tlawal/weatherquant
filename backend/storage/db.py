@@ -52,11 +52,33 @@ def _build_engine() -> AsyncEngine:
             }
         )
     else:
-        # SQLite — single connection, no pooling
-        kwargs["connect_args"] = {"check_same_thread": False}
+        # SQLite — use NullPool to avoid connection sharing issues,
+        # and set a generous busy timeout so concurrent writers wait
+        # instead of immediately raising "database is locked".
+        from sqlalchemy.pool import NullPool
+        kwargs["poolclass"] = NullPool
+        kwargs["connect_args"] = {
+            "check_same_thread": False,
+            "timeout": 30,  # seconds to wait for lock (default is 5)
+        }
 
     log.info("db: connecting url_prefix=%s", url[:40])
-    return create_async_engine(url, **kwargs)
+    engine = create_async_engine(url, **kwargs)
+
+    if is_sqlite:
+        # Enable WAL mode — allows concurrent readers during writes.
+        # Also set synchronous=NORMAL (safe with WAL, much faster).
+        import sqlalchemy
+
+        @sqlalchemy.event.listens_for(engine.sync_engine, "connect")
+        def _set_sqlite_pragmas(dbapi_conn, connection_record):
+            cursor = dbapi_conn.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.execute("PRAGMA busy_timeout=30000")
+            cursor.close()
+
+    return engine
 
 
 async def _run_ddl(ddl: str) -> None:

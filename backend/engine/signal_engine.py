@@ -242,8 +242,10 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         log.info("signal: %s — resolved (prob_new_high=%.3f), skipping", city.city_slug, prob_new_high)
         return []
 
-    # Persist model snapshot
+    # Use a single session for all DB writes (model snapshot + per-bucket reads/inserts)
+    signals: list[BucketSignal] = []
     async with get_session() as sess:
+        # Persist model snapshot
         await insert_model_snapshot(
             sess,
             event_id=event.id,
@@ -254,26 +256,90 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
             forecast_quality=model.forecast_quality,
         )
 
-    # Compute signal per bucket
-    signals: list[BucketSignal] = []
-    for i, bucket in enumerate(buckets):
-        if i >= len(model.probs):
-            continue
+        # Compute signal per bucket
+        for i, bucket in enumerate(buckets):
+            if i >= len(model.probs):
+                continue
 
-        model_prob = model.probs[i]
+            model_prob = model.probs[i]
 
-        # If METAR high already exceeds this bucket's ceiling, probability is 0
-        # (the final daily high can only go up, never down)
-        if ground_truth_high is not None and bucket.high_f is not None:
-            if ground_truth_high >= bucket.high_f:
-                model_prob = 0.0
+            # If METAR high already exceeds this bucket's ceiling, probability is 0
+            # (the final daily high can only go up, never down)
+            if ground_truth_high is not None and bucket.high_f is not None:
+                if ground_truth_high >= bucket.high_f:
+                    model_prob = 0.0
 
-        # Get latest market snapshot
-        async with get_session() as sess:
+            # Get latest market snapshot (reuse session)
             mkt_snap = await get_latest_market_snapshot(sess, bucket.id)
 
-        if not mkt_snap or mkt_snap.yes_mid is None:
-            # No market data — count as signal with no actionable edge
+            if not mkt_snap or mkt_snap.yes_mid is None:
+                # No market data — count as signal with no actionable edge
+                sig = BucketSignal(
+                    city_slug=city.city_slug,
+                    city_display=city.display_name,
+                    unit=getattr(city, "unit", "F"),
+                    event_id=event.id,
+                    bucket_id=bucket.id,
+                    bucket_idx=i,
+                    label=bucket.label or f"Bucket {i}",
+                    low_f=bucket.low_f,
+                    high_f=bucket.high_f,
+                    model_prob=float(round(model_prob, 4)),
+                    mkt_prob=0.0,
+                    raw_edge=0.0,
+                    exec_cost=0.0,
+                    true_edge=0.0,
+                    yes_bid=None,
+                    yes_ask=None,
+                    yes_mid=None,
+                    spread=None,
+                    yes_ask_depth=0.0,
+                    gate_failures=["no_market_data"],
+                    prob_new_high=prob_new_high,
+                    city_state=city_state,
+                    resolution_mismatch=resolution_mismatch,
+                )
+                signals.append(sig)
+                continue
+
+            mkt_prob = mkt_snap.yes_mid
+            ask_depth = mkt_snap.yes_ask_depth or 0.0
+            spread = mkt_snap.spread
+            exec_cost = _execution_cost(spread, ask_depth)
+
+            # Apply probability calibration (remap based on historical reliability)
+            calibrated_prob = remap_probability(model_prob, reliability_bins)
+
+            # Edge calculation based on calibrated probability
+            raw_edge_buy = calibrated_prob - mkt_prob
+            true_edge = raw_edge_buy - exec_cost
+
+            reason = {
+                **model.inputs,
+                "bucket_idx": i,
+                "label": bucket.label,
+                "model_prob_raw": float(round(model_prob, 4)),
+                "model_prob_cal": float(round(calibrated_prob, 4)),
+                "mkt_prob": float(round(mkt_prob, 4)),
+                "raw_edge": float(round(raw_edge_buy, 4)),
+                "exec_cost": float(round(exec_cost, 4)),
+                "true_edge": float(round(true_edge, 4)),
+                "spread": spread,
+                "ask_depth": ask_depth,
+                "city_state": city_state,
+                "resolution_high": resolution_high,
+                "raw_high": daily_high,
+                "observation_minutes": valid_minutes,
+                "resolution_mismatch": resolution_mismatch,
+            }
+
+            actionable = (
+                true_edge >= Config.MIN_TRUE_EDGE
+                and 0.02 <= mkt_prob <= 0.98  # avoid extreme markets
+                and ask_depth >= Config.MIN_LIQUIDITY_SHARES
+                and event.forecast_quality == "ok"
+            )
+
             sig = BucketSignal(
                 city_slug=city.city_slug,
                 city_display=city.display_name,
@@ -285,91 +351,24 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
                 low_f=bucket.low_f,
                 high_f=bucket.high_f,
                 model_prob=float(round(model_prob, 4)),
-                mkt_prob=0.0,
-                raw_edge=0.0,
-                exec_cost=0.0,
-                true_edge=0.0,
-                yes_bid=None,
-                yes_ask=None,
-                yes_mid=None,
-                spread=None,
-                yes_ask_depth=0.0,
-                gate_failures=["no_market_data"],
+                mkt_prob=float(round(mkt_prob, 4)),
+                raw_edge=round(raw_edge_buy, 4),
+                exec_cost=round(exec_cost, 4),
+                true_edge=round(true_edge, 4),
+                yes_bid=mkt_snap.yes_bid,
+                yes_ask=mkt_snap.yes_ask,
+                yes_mid=float(round(mkt_prob, 4)),
+                spread=spread,
+                yes_ask_depth=ask_depth,
+                reason=reason,
+                actionable=actionable,
                 prob_new_high=prob_new_high,
                 city_state=city_state,
                 resolution_mismatch=resolution_mismatch,
             )
             signals.append(sig)
-            continue
 
-        mkt_prob = mkt_snap.yes_mid
-        ask_depth = mkt_snap.yes_ask_depth or 0.0
-        spread = mkt_snap.spread
-        exec_cost = _execution_cost(spread, ask_depth)
-
-        # Apply probability calibration (remap based on historical reliability)
-        calibrated_prob = remap_probability(model_prob, reliability_bins)
-
-        # Edge calculation based on calibrated probability
-        raw_edge_buy = calibrated_prob - mkt_prob
-        true_edge = raw_edge_buy - exec_cost
-
-        reason = {
-            **model.inputs,
-            "bucket_idx": i,
-            "label": bucket.label,
-            "model_prob_raw": float(round(model_prob, 4)),
-            "model_prob_cal": float(round(calibrated_prob, 4)),
-            "mkt_prob": float(round(mkt_prob, 4)),
-            "raw_edge": float(round(raw_edge_buy, 4)),
-            "exec_cost": float(round(exec_cost, 4)),
-            "true_edge": float(round(true_edge, 4)),
-            "spread": spread,
-            "ask_depth": ask_depth,
-            "city_state": city_state,
-            "resolution_high": resolution_high,
-            "raw_high": daily_high,
-            "observation_minutes": valid_minutes,
-            "resolution_mismatch": resolution_mismatch,
-        }
-
-        actionable = (
-            true_edge >= Config.MIN_TRUE_EDGE
-            and 0.02 <= mkt_prob <= 0.98  # avoid extreme markets
-            and ask_depth >= Config.MIN_LIQUIDITY_SHARES
-            and event.forecast_quality == "ok"
-        )
-
-        sig = BucketSignal(
-            city_slug=city.city_slug,
-            city_display=city.display_name,
-            unit=getattr(city, "unit", "F"),
-            event_id=event.id,
-            bucket_id=bucket.id,
-            bucket_idx=i,
-            label=bucket.label or f"Bucket {i}",
-            low_f=bucket.low_f,
-            high_f=bucket.high_f,
-            model_prob=float(round(model_prob, 4)),
-            mkt_prob=float(round(mkt_prob, 4)),
-            raw_edge=round(raw_edge_buy, 4),
-            exec_cost=round(exec_cost, 4),
-            true_edge=round(true_edge, 4),
-            yes_bid=mkt_snap.yes_bid,
-            yes_ask=mkt_snap.yes_ask,
-            yes_mid=float(round(mkt_prob, 4)),
-            spread=spread,
-            yes_ask_depth=ask_depth,
-            reason=reason,
-            actionable=actionable,
-            prob_new_high=prob_new_high,
-            city_state=city_state,
-            resolution_mismatch=resolution_mismatch,
-        )
-        signals.append(sig)
-
-        # Persist signal to DB
-        async with get_session() as sess:
+            # Persist signal to DB (reuse session)
             await insert_signal(
                 sess,
                 bucket_id=bucket.id,
@@ -383,3 +382,4 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
             )
 
     return signals
+

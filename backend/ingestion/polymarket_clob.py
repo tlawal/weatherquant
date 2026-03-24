@@ -212,6 +212,8 @@ async def fetch_clob_orderbooks(clob: CLOBClient) -> None:
     async with get_session() as sess:
         cities = await get_all_cities(sess, enabled_only=True)
 
+    # Collect all orderbook data first (HTTP calls, no DB)
+    snapshots_to_insert = []
     for city in cities:
         today_local = city_local_date(city)
         async with get_session() as sess:
@@ -226,22 +228,22 @@ async def fetch_clob_orderbooks(clob: CLOBClient) -> None:
             ob = await clob.get_bucket_orderbook(bucket.id, bucket.yes_token_id)
             if not ob.fetched_ok:
                 continue
-
-            async with get_session() as sess:
-                await insert_market_snapshot(
-                    sess,
-                    bucket_id=bucket.id,
-                    yes_bid=ob.yes_bid,
-                    yes_ask=ob.yes_ask,
-                    yes_mid=ob.yes_mid,
-                    yes_bid_depth=ob.yes_bid_depth,
-                    yes_ask_depth=ob.yes_ask_depth,
-                    spread=ob.spread,
-                )
+            snapshots_to_insert.append({
+                "bucket_id": bucket.id,
+                "yes_bid": ob.yes_bid,
+                "yes_ask": ob.yes_ask,
+                "yes_mid": ob.yes_mid,
+                "yes_bid_depth": ob.yes_bid_depth,
+                "yes_ask_depth": ob.yes_ask_depth,
+                "spread": ob.spread,
+            })
             # Brief pause between token fetches
             await asyncio.sleep(0.3)
 
+    # Batch-insert all snapshots in a single session/transaction
     async with get_session() as sess:
+        for snap_data in snapshots_to_insert:
+            await insert_market_snapshot(sess, **snap_data)
         await update_heartbeat(sess, "fetch_clob", success=True)
 
 

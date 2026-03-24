@@ -199,39 +199,38 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
             buckets = await get_buckets_for_event(sess, event.id)
             model = await get_latest_model_snapshot(sess, event.id)
 
-        for bucket in buckets:
-            async with get_session() as sess:
+            for bucket in buckets:
                 sig = await get_latest_signal_for_bucket(sess, bucket.id)
                 mkt = await get_latest_market_snapshot(sess, bucket.id)
 
-            probs = json.loads(model.probs_json) if model and model.probs_json else []
-            model_prob = probs[bucket.bucket_idx] if bucket.bucket_idx < len(probs) else None
+                probs = json.loads(model.probs_json) if model and model.probs_json else []
+                model_prob = probs[bucket.bucket_idx] if bucket.bucket_idx < len(probs) else None
 
-            yes_price = mkt.yes_ask if mkt else None
-            ev = calculate_expected_value(model_prob, yes_price) if model_prob is not None and yes_price else None
-            kelly_f = calculate_kelly_fraction(
-                model_prob, 
-                yes_price, 
-                fractional_kelly=Config.KELLY_FRACTION,
-                max_position_size=Config.MAX_POSITION_PCT
-            ) if model_prob is not None and yes_price else None
+                yes_price = mkt.yes_ask if mkt else None
+                ev = calculate_expected_value(model_prob, yes_price) if model_prob is not None and yes_price else None
+                kelly_f = calculate_kelly_fraction(
+                    model_prob, 
+                    yes_price, 
+                    fractional_kelly=Config.KELLY_FRACTION,
+                    max_position_size=Config.MAX_POSITION_PCT
+                ) if model_prob is not None and yes_price else None
 
-            buckets_with_signals.append({
-                "bucket_idx": bucket.bucket_idx,
-                "label": bucket.label or f"Bucket {bucket.bucket_idx}",
-                "low_f": bucket.low_f,
-                "high_f": bucket.high_f,
-                "model_prob": round(model_prob, 4) if model_prob is not None else None,
-                "mkt_prob": mkt.yes_mid if mkt else None,
-                "yes_bid": mkt.yes_bid if mkt else None,
-                "yes_ask": mkt.yes_ask if mkt else None,
-                "spread": mkt.spread if mkt else None,
-                "true_edge": sig.true_edge if sig else None,
-                "ev": ev,
-                "kelly_f": kelly_f,
-                "exec_cost": sig.exec_cost if sig else None,
-                "actionable": (sig.true_edge >= 0.10) if sig else False,
-            })
+                buckets_with_signals.append({
+                    "bucket_idx": bucket.bucket_idx,
+                    "label": bucket.label or f"Bucket {bucket.bucket_idx}",
+                    "low_f": bucket.low_f,
+                    "high_f": bucket.high_f,
+                    "model_prob": round(model_prob, 4) if model_prob is not None else None,
+                    "mkt_prob": mkt.yes_mid if mkt else None,
+                    "yes_bid": mkt.yes_bid if mkt else None,
+                    "yes_ask": mkt.yes_ask if mkt else None,
+                    "spread": mkt.spread if mkt else None,
+                    "true_edge": sig.true_edge if sig else None,
+                    "ev": ev,
+                    "kelly_f": kelly_f,
+                    "exec_cost": sig.exec_cost if sig else None,
+                    "actionable": (sig.true_edge >= 0.10) if sig else False,
+                })
 
     model_inputs = json.loads(model.inputs_json) if model and model.inputs_json else {}
     probs_json = json.dumps(json.loads(model.probs_json) if model and model.probs_json else [])
