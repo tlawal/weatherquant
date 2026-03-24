@@ -47,22 +47,24 @@ The dashboard includes a **Reliability Diagram** (Calibration Curve).
 
 ---
 
-## External Data Sources
+## 📡 Data Ingestion & Observation Routing
 
 ### Weather Underground (WU)
 Official settlement resolution source. We scrape:
 - **Daily Summary**: `https://www.wunderground.com/weather/{METAR}`
 - **Hourly Projections**: `https://www.wunderground.com/hourly/{METAR}`
+- **Historical Observations**: We parse daily high temperatures directly from the station's raw historical JSON payload, systematically capturing off-pattern, mid-hour observations to strictly align with Polymarket's granular resolution rules.
 
-### METAR (Aviation Weather)
-Official real-time temperature observations (ground truth).
-- `https://aviationweather.gov/api/data/metar?ids={METAR}&format=json&latest=1`
+### National Weather Service (NWS) & METAR
+- **Live Ground Truth**: We poll `api.weather.gov/stations/{METAR}/observations/latest` as the primary real-time temperature source for **all** US and International cities possessing a valid ICAO METAR station code.
+- **METAR Fallback**: `https://aviationweather.gov/api/data/metar?ids={METAR}&format=json&latest=1` serves as a highly reliable secondary fallback for US and global aviation stations.
+- **NWS Forecasts**: Baseline gridpoint forecasts from `api.weather.gov`.
 
-### National Weather Service (NWS)
-Baseline gridpoint forecasts from `api.weather.gov`.
+### Polymarket Gamma API Routing & Web UI
+- Custom slug routing gracefully maps UI abbreviations (e.g., `la`, `sf`) to full, hypenated names (`los-angeles`, `san-francisco`) for accurate Polymarket Gamma API event matching. 
+- Timezone-aware date rollovers automatically transition city dashboard links to the next day's active market after the 4:00 PM ET daily market close cutoff, effectively preventing dead links to resolved events.
 
 ### Open-Meteo & OpenWeatherMap (International Fallbacks)
-Provides global current weather and forecast models used entirely for non-US markets.
-- **Open-Meteo Documentation:** [https://open-meteo.com/en/docs](https://open-meteo.com/en/docs?daily=temperature_2m_max&latitude=33.641&longitude=-84.4227&timezone=America%2FNew_York&forecast_days=1&temperature_unit=fahrenheit)
- *(Helpful to pull `temperature_2m_max` from `daily` parameter endpoints)*
+Provides global current weather and forecast models used strictly for non-US markets without explicit ICAO METAR assignments.
+- **Open-Meteo Documentation:** [https://open-meteo.com/en/docs](https://open-meteo.com/en/docs)
 - **OpenWeatherMap Backup**: Used dynamically when the primary Open-Meteo endpoint enforces rate limits on Railway's shared IPs.
