@@ -298,7 +298,7 @@ async def fetch_wu_all() -> None:
 
 async def _scrape_wu_city(city: City, date_et: str) -> None:
     # Fetch station profile for resolution-aware filtering
-    from backend.storage.repos import get_station_profile
+    from backend.storage.repos import get_station_profile, get_latest_forecast
     valid_minutes = None
     if city.metar_station:
         async with get_session() as sess:
@@ -308,7 +308,45 @@ async def _scrape_wu_city(city: City, date_et: str) -> None:
 
     daily_high = await _scrape_wu_daily(city)
     hourly_peak, peak_hour = await _fetch_wu_hourly_api(city)
-    history_high, obs_time = await _fetch_wu_history_api(city, date_et, valid_minutes=valid_minutes)
+    
+    # Smart scheduling for WU History (~35 mins after station observation)
+    now_utc = datetime.now(timezone.utc)
+    fetch_history = True
+    history_high, obs_time = None, None
+    
+    async with get_session() as sess:
+        last_hist = await get_latest_forecast(sess, city.id, "wu_history", date_et)
+        
+    if last_hist and last_hist.fetched_at:
+        age_hist = (now_utc - last_hist.fetched_at).total_seconds()
+        
+        if age_hist < 3600:
+            fetch_history = False  # Default to waiting an hour if we already fetched recently
+            
+            # Override: If we haven't fetched since the optimal data-drop minute, allow it
+            if valid_minutes and len(valid_minutes) > 0:
+                target_min = (valid_minutes[-1] + 35) % 60
+                last_m = last_hist.fetched_at.minute
+                now_m = now_utc.minute
+                
+                # Check if we crossed the target minute since the last fetch
+                # Requires age > 900 (15m) to avoid rapid spam if target minute just hit
+                if age_hist > 900:
+                    if last_hist.fetched_at.hour != now_utc.hour:
+                        if now_m >= target_min:
+                            fetch_history = True
+                    elif last_m < target_min <= now_m:
+                        fetch_history = True
+
+    if fetch_history:
+        history_high, obs_time = await _fetch_wu_history_api(city, date_et, valid_minutes=valid_minutes)
+    elif last_hist:
+        history_high = last_hist.high_f
+        try:
+            raw_data = json.loads(last_hist.raw_json)
+            obs_time = raw_data.get("obs_time")
+        except Exception:
+            obs_time = None
 
     wu_ok = daily_high is not None or hourly_peak is not None or history_high is not None
     parse_err = None if wu_ok else "all_wu_sources_failed"

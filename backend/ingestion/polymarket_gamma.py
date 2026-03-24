@@ -159,7 +159,7 @@ def _validate_buckets(buckets: list[dict]) -> list[str]:
 
 async def fetch_gamma_all() -> None:
     """Discover/refresh today's events for all enabled cities."""
-    from backend.tz_utils import city_local_date, et_today
+    from backend.tz_utils import city_local_date, et_today, city_local_now
 
     async with get_session() as sess:
         cities = await get_all_cities(sess, enabled_only=True)
@@ -167,10 +167,16 @@ async def fetch_gamma_all() -> None:
     et_date = et_today()
     city_dates = {}
     for city in cities:
-        city_date = city_local_date(city)
+        now_local = city_local_now(city)
+        if now_local.hour >= 20:
+            from backend.tz_utils import city_local_tomorrow
+            city_date = city_local_tomorrow(city)
+        else:
+            city_date = city_local_date(city)
+            
         city_dates[city.city_slug] = city_date
         if city_date != et_date:
-            log.info("gamma: %s local_date=%s differs from et=%s (tz=%s)",
+            log.info("gamma: %s fetch_date=%s differs from et=%s (tz=%s)",
                      city.city_slug, city_date, et_date, getattr(city, "tz", "?"))
 
     results = await asyncio.gather(

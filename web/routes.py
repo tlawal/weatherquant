@@ -261,6 +261,7 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
             "city": city,
             "today_et": target_date_et,
             "real_today_et": real_today_et,
+            "city_tomorrow": city_local_tomorrow(city) if city_local_now(city).hour >= 20 else None,
             "available_dates": available_dates,
             "obs_high_f": obs_high_f,
             "avg_peak_timing": avg_peak_timing,

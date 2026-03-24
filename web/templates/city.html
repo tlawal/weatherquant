@@ -160,7 +160,7 @@
         <span>Weather Underground History</span>
       </div>
       <div class="space-y-1.5">
-        <div class="opacity-80 py-1 italic mb-2">Official Polymarket settlement ground truth. Scraped daily after the event concludes.</div>
+        <div class="opacity-80 py-1 italic mb-2">Official Polymarket settlement ground truth. Running high updated hourly after station observations.</div>
         <div class="flex justify-between"><span style="color:var(--text-muted)">Station</span><span class="mono">{{ city.metar_station }}</span></div>
         <div class="flex justify-between"><span style="color:var(--text-muted)">Status</span>
           {% if forecasts.wu_history.high_f is not none %}
