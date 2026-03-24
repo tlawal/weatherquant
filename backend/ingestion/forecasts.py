@@ -276,8 +276,7 @@ async def fetch_wu_all() -> None:
         async with get_session() as sess:
             event = await get_event(sess, city.id, today_et)
         if event and not event.settlement_source_verified:
-            log.debug("wu: %s settlement_source_verified=False, skipping WU scrape", city.city_slug)
-            continue
+            log.debug("wu: %s settlement_source_verified=False (temporarily unverified on Polymarket), fetching forecast anyway", city.city_slug)
 
         # Rate limit: check last WU scrape time
         async with get_session() as sess:
@@ -291,7 +290,11 @@ async def fetch_wu_all() -> None:
                 log.debug("wu: %s rate limited (age=%.0fs < %ds)", city.city_slug, age, Config.WU_MIN_SCRAPE_INTERVAL_SECONDS)
                 continue
 
-        await _scrape_wu_city(city, today_et)
+        try:
+            await _scrape_wu_city(city, today_et)
+        except Exception as e:
+            log.exception("wu: Unhandled exception scraping %s: %s", city.city_slug, e)
+            
         # Stagger per city to be polite to WU
         await asyncio.sleep(5)
 
