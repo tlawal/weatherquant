@@ -437,8 +437,26 @@
 
     <!-- Reliability Diagram (Calibration) -->
     <div class="card p-5">
-      <div class="flex items-center justify-between mb-4">
-        <h2 class="font-semibold text-sm">Probability Calibration</h2>
+      <div class="flex items-center justify-between mb-4" x-data="{ showTip: false }">
+        <div class="flex items-center gap-1.5 relative">
+          <h2 class="font-semibold text-sm cursor-help" @click="showTip = !showTip" @click.outside="showTip = false">Probability Calibration</h2>
+          <button class="hover:text-cyan-400 opacity-30 transition-all text-xs" @click="showTip = !showTip">ⓘ</button>
+          
+          <!-- Popover -->
+          <div x-show="showTip" x-cloak
+               x-transition:enter="transition ease-out duration-100" 
+               class="absolute left-0 top-7 w-72 p-4 rounded-xl shadow-2xl z-50 border text-[11px] leading-relaxed normal-case"
+               style="background:var(--bg-panel); border-color:var(--border);">
+            <div class="font-bold mb-2 pb-1 border-b" style="color:var(--cyan); border-color:var(--border)">Model Truth Meter</div>
+            <p class="opacity-90 mb-2">Measures if the model's predicted probabilities match historical reality.</p>
+            <ul class="space-y-1.5 opacity-80">
+              <li>• <strong style="color:white">Diagonal Line:</strong> Perfect calibration.</li>
+              <li>• <strong style="color:white">Above Line:</strong> Underconfident (model is too shy).</li>
+              <li>• <strong style="color:white">Below Line:</strong> Overconfident (model is hallucinating edge).</li>
+            </ul>
+            <p class="mt-3 pt-2 border-t opacity-60 italic" style="border-color:var(--border)">Requires 50 settled events to populate.</p>
+          </div>
+        </div>
         <span class="text-[10px] uppercase tracking-widest px-2 py-0.5 rounded" style="color:var(--cyan); background:rgba(34,211,238,0.1)">Reliability</span>
       </div>
       {% if reliability_total_samples is defined and reliability_total_samples < 50 %}
