@@ -167,11 +167,18 @@ async def get_daily_high_metar(
     session: AsyncSession, city_id: int, date_et: str
 ) -> Optional[float]:
     """Max temp_f observed for a city on the given ET date."""
+    from backend.tz_utils import ET
+    
+    # Parse date_et to a timezone-aware start and end datetime
+    start_dt = datetime.strptime(date_et, "%Y-%m-%d").replace(tzinfo=ET)
+    end_dt = start_dt + timedelta(days=1)
+    
     result = await session.execute(
         select(func.max(MetarObs.temp_f))
         .where(
             MetarObs.city_id == city_id,
-            func.date(MetarObs.observed_at) == date_et,
+            MetarObs.observed_at >= start_dt,
+            MetarObs.observed_at < end_dt,
         )
     )
     return result.scalar_one_or_none()
@@ -206,7 +213,7 @@ async def get_avg_peak_timing(
     peak_minutes = []
     
     for d, obs_for_day in daily_obs.items():
-        if d == today_date and now.hour < 20:
+        if d == today_date and datetime.now(et_tz).hour < 20:
             continue  # don't include today if it's not late enough
             
         best_obs = max(obs_for_day, key=lambda o: o.temp_f)
