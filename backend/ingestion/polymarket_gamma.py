@@ -66,6 +66,10 @@ def _build_slugs(city_slug: str, target_date: date) -> list[str]:
     if city_slug == "new-york-city":
         slugs.append(f"highest-temperature-in-new-york-on-{month}-{day}-{year}")
         slugs.append(f"highest-temperature-in-nyc-on-{month}-{day}-{year}")
+    elif city_slug == "la":
+        slugs.insert(0, f"highest-temperature-in-los-angeles-on-{month}-{day}-{year}")
+    elif city_slug == "sf":
+        slugs.insert(0, f"highest-temperature-in-san-francisco-on-{month}-{day}-{year}")
     
     return slugs
 

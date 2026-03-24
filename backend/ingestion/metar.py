@@ -97,15 +97,18 @@ async def fetch_metar_all() -> None:
 
     if us_cities:
         await _fetch_us_metars(us_cities)
-        # Supplementary: weather.gov observations as fallback/cross-validation
-        try:
-            await _fetch_nws_observations(us_cities)
-        except Exception as e:
-            log.warning("nws_obs: supplementary fetch failed: %s", e)
 
     if intl_metar_cities:
         # ICAO stations are global — aviationweather.gov covers all of them
         await _fetch_us_metars(intl_metar_cities)
+
+    # Supplementary: weather.gov observations as fallback/cross-validation
+    nws_obs_cities = us_cities + intl_metar_cities
+    if nws_obs_cities:
+        try:
+            await _fetch_nws_observations(nws_obs_cities)
+        except Exception as e:
+            log.warning("nws_obs: supplementary fetch failed: %s", e)
 
     if intl_openmeteo_cities:
         await _fetch_intl_open_meteo(intl_openmeteo_cities)

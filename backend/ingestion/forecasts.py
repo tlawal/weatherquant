@@ -580,11 +580,6 @@ async def _fetch_wu_history_api(
                         obs = data.get("observations", [])
                         valid_obs = [o for o in obs if o.get("temp") is not None]
                         if valid_obs:
-                            # Filter to valid station minutes if profile exists
-                            if valid_minutes:
-                                filtered = [o for o in valid_obs if _at_valid_minute(o, valid_minutes)]
-                                if filtered:
-                                    valid_obs = filtered
                             best = max(valid_obs, key=lambda o: o["temp"])
                             high_f = float(best["temp"])
                             obs_time_str = None

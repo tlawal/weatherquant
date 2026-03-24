@@ -151,7 +151,12 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
     et_tz = ZoneInfo("America/New_York")
     real_today_et = city_local_date(city)
 
-    target_date_et = date if date else real_today_et
+    # Roll over to tomorrow's market if it's past market close (4 PM ET)
+    active_date_et = real_today_et
+    if now_et.hour >= 16:
+        active_date_et = city_local_tomorrow(city)
+
+    target_date_et = date if date else active_date_et
 
     async with get_session() as sess:
         # Fetch available event dates for this city

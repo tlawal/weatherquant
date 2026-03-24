@@ -114,6 +114,43 @@ async def get_current_temp(city_slug: str):
     headers = {"User-Agent": "WeatherQuant/1.0"}
 
     try:
+        # 1. Primary Attempt for all metar cities: api.weather.gov
+        if city.metar_station:
+            try:
+                nws_url = f"https://api.weather.gov/stations/{city.metar_station}/observations/latest"
+                async with aiohttp.ClientSession(timeout=timeout, headers={"User-Agent": "WeatherQuant/1.0", "Accept": "application/geo+json"}) as http:
+                    async with http.get(nws_url) as resp:
+                        if resp.status == 200:
+                            data = await resp.json(content_type=None)
+                            props = data.get("properties", {})
+                            temp_c_val = (props.get("temperature") or {}).get("value")
+                            if temp_c_val is not None:
+                                temp_c = float(temp_c_val)
+                                temp_f = temp_c if (city.unit or "C") == "C" else round(temp_c * 9 / 5 + 32, 1)
+                                if city.unit != "C": temp_f = round(temp_c * 9 / 5 + 32, 1)
+
+                                ts_str = props.get("timestamp")
+                                if ts_str:
+                                    from zoneinfo import ZoneInfo
+                                    dt_et = datetime.fromisoformat(ts_str.rstrip("Z")).replace(tzinfo=timezone.utc).astimezone(ZoneInfo("America/New_York"))
+                                    obs_time = dt_et.strftime("%-I:%M %p ET")
+                                else:
+                                    obs_time = ""
+                                return {
+                                    "temp_f": temp_f,
+                                    "temp_c": round(temp_c, 1),
+                                    "observed_at": obs_time,
+                                    "report_at": obs_time,
+                                    "station": city.metar_station,
+                                    "raw_text": props.get("rawMessage"),
+                                    "source": "api.weather.gov",
+                                    "source_url": nws_url,
+                                    "unit": city.unit or ("F" if city.is_us else "C"),
+                                }
+            except Exception as nws_err:
+                log.info("NWS latest obs failed for %s, falling back: %s", city_slug, nws_err)
+
+        # 2. Secondary Attempt: aviationweather (US) or Open-Meteo (Intl)
         if city.is_us and city.metar_station:
             try:
                 url = f"https://aviationweather.gov/api/data/metar?ids={city.metar_station}&format=json&latest=1"
