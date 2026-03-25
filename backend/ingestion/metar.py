@@ -22,6 +22,7 @@ from backend.storage.repos import (
     get_all_cities,
     get_daily_high_metar,
     insert_metar_obs,
+    insert_metar_obs_extended,
     update_heartbeat,
 )
 
@@ -78,6 +79,138 @@ def _parse_obs_time(obs: dict) -> Optional[datetime]:
         except Exception:
             pass
     return datetime.now(timezone.utc)
+
+
+def _humidity_from_magnus(temp_c: float, dewp_c: float) -> float:
+    """Compute relative humidity (%) via the Magnus formula."""
+    import math
+    a, b = 17.625, 243.04
+    rh = 100.0 * math.exp((a * dewp_c) / (b + dewp_c)) / math.exp((a * temp_c) / (b + temp_c))
+    return round(max(0.0, min(100.0, rh)), 1)
+
+
+# Map wx_string + cloud cover to human-readable condition
+_WX_CONDITION_MAP = [
+    ("TS", "Thunderstorm"),
+    ("GR", "Hail"),
+    ("SN", "Snow"),
+    ("FZRA", "Freezing Rain"),
+    ("RA", "Rain"),
+    ("DZ", "Drizzle"),
+    ("SH", "Showers"),
+    ("FG", "Fog"),
+    ("HZ", "Haze"),
+    ("BR", "Mist"),
+]
+
+_COVER_CONDITION = {
+    "CLR": "Fair", "SKC": "Fair", "FEW": "Fair",
+    "SCT": "Partly Cloudy", "BKN": "Mostly Cloudy", "OVC": "Cloudy",
+}
+
+
+def _derive_condition(wx_string: Optional[str], cloud_cover: Optional[str]) -> str:
+    """Derive a human-readable condition string from wx_string and cloud cover."""
+    if wx_string:
+        wx_upper = wx_string.upper()
+        for token, label in _WX_CONDITION_MAP:
+            if token in wx_upper:
+                return label
+    if cloud_cover:
+        return _COVER_CONDITION.get(cloud_cover.upper(), "Fair")
+    return "Fair"
+
+
+def _parse_extended(obs: dict, temp_c: Optional[float] = None) -> dict:
+    """Parse extended METAR fields from aviationweather.gov JSON response.
+
+    Returns a dict suitable for insert_metar_obs_extended().
+    """
+    ext: dict = {}
+
+    # Dewpoint
+    dewp_c = obs.get("dewp")
+    if dewp_c is not None:
+        try:
+            dc = float(dewp_c)
+            ext["dewpoint_c"] = round(dc, 1)
+            ext["dewpoint_f"] = round(dc * 9 / 5 + 32, 1)
+            if temp_c is not None:
+                ext["humidity_pct"] = _humidity_from_magnus(float(temp_c), dc)
+        except (ValueError, TypeError):
+            pass
+
+    # Wind
+    wdir = obs.get("wdir")
+    if wdir is not None:
+        try:
+            ext["wind_dir_deg"] = int(wdir)
+        except (ValueError, TypeError):
+            pass
+
+    wspd = obs.get("wspd")
+    if wspd is not None:
+        try:
+            ext["wind_speed_kt"] = float(wspd)
+        except (ValueError, TypeError):
+            pass
+
+    wgst = obs.get("wgst")
+    if wgst is not None:
+        try:
+            ext["wind_gust_kt"] = float(wgst)
+        except (ValueError, TypeError):
+            pass
+
+    # Pressure
+    altim = obs.get("altim")
+    if altim is not None:
+        try:
+            ext["altimeter_inhg"] = round(float(altim), 2)
+        except (ValueError, TypeError):
+            pass
+
+    slp = obs.get("slp")
+    if slp is not None:
+        try:
+            ext["sea_level_pressure_mb"] = round(float(slp), 1)
+        except (ValueError, TypeError):
+            pass
+
+    # Visibility
+    visib = obs.get("visib")
+    if visib is not None:
+        try:
+            ext["visibility_sm"] = round(float(visib), 1)
+        except (ValueError, TypeError):
+            pass
+
+    # Cloud cover — use the dominant (highest) cover level
+    clouds = obs.get("clouds")
+    cover = obs.get("cover")
+    if isinstance(clouds, list) and clouds:
+        # clouds is array of {cover: "BKN", base: 5000}
+        # Use the first layer's cover as the dominant one
+        first = clouds[0]
+        ext["cloud_cover"] = first.get("cover")
+        base = first.get("base")
+        if base is not None:
+            try:
+                ext["cloud_base_ft"] = int(base)
+            except (ValueError, TypeError):
+                pass
+    elif cover:
+        ext["cloud_cover"] = str(cover)
+
+    # Weather string (present weather)
+    wx = obs.get("wxString")
+    if wx:
+        ext["wx_string"] = str(wx)[:64]
+
+    # Derive human-readable condition
+    ext["condition"] = _derive_condition(ext.get("wx_string"), ext.get("cloud_cover"))
+
+    return ext
 
 
 async def fetch_metar_all() -> None:
@@ -152,7 +285,7 @@ async def _fetch_us_metars(cities: list[City]) -> None:
         raw_str = json.dumps(obs, default=str)
 
         async with get_session() as sess:
-            prev_high = await get_daily_high_metar(sess, city.id, today_local)
+            prev_high = await get_daily_high_metar(sess, city.id, today_local, city_tz=getattr(city, "tz", "America/New_York"))
             daily_high = max(
                 (v for v in [temp_f, prev_high] if v is not None), default=temp_f
             )
@@ -161,7 +294,7 @@ async def _fetch_us_metars(cities: list[City]) -> None:
             report_at = _parse_obs_time({"obsTime": obs.get("reportTime")}) if obs.get("reportTime") else obs_time
             raw_text = obs.get("rawOb")
 
-            await insert_metar_obs(
+            metar_row = await insert_metar_obs(
                 sess,
                 city_id=city.id,
                 metar_station=station_id,
@@ -173,6 +306,14 @@ async def _fetch_us_metars(cities: list[City]) -> None:
                 raw_text=raw_text,
                 raw_json=raw_str,
             )
+
+            # Parse and store extended fields (dewpoint, wind, pressure, etc.)
+            ext_data = _parse_extended(obs, temp_c=temp_c)
+            if ext_data:
+                try:
+                    await insert_metar_obs_extended(sess, metar_obs_id=metar_row.id, **ext_data)
+                except Exception as e:
+                    log.debug("metar_ext: failed for %s: %s", station_id, e)
 
     await _mark_heartbeat_success()
 
@@ -205,7 +346,7 @@ async def _fetch_nws_observations(cities: list[City]) -> None:
 
                 today_local = city_local_date(city)
                 async with get_session() as sess:
-                    prev_high = await get_daily_high_metar(sess, city.id, today_local)
+                    prev_high = await get_daily_high_metar(sess, city.id, today_local, city_tz=getattr(city, "tz", "America/New_York"))
                     daily_high = max(
                         (v for v in [temp_f, prev_high] if v is not None), default=temp_f
                     )
@@ -276,7 +417,7 @@ async def _fetch_intl_open_meteo(cities: list[City]) -> None:
         raw_str = json.dumps(obs_data)
 
         async with get_session() as sess:
-            prev_high = await get_daily_high_metar(sess, city.id, today_local)
+            prev_high = await get_daily_high_metar(sess, city.id, today_local, city_tz=getattr(city, "tz", "America/New_York"))
             daily_high = max(
                 (v for v in [temp_internal, prev_high] if v is not None), default=temp_internal
             )
@@ -295,11 +436,20 @@ async def _fetch_intl_open_meteo(cities: list[City]) -> None:
             )
 
 
-def should_poll_station(observation_minutes: list[int], now_minute: int, window: int = 3) -> bool:
-    """Return True if now_minute is within ±window of any observation minute."""
+def should_poll_station(
+    observation_minutes: list[int], now_minute: int,
+    pre_window: int = 2, post_window: int = 10,
+    window: int | None = None,
+) -> bool:
+    """Return True if now_minute is within [-pre_window, +post_window] of any observation minute.
+
+    Asymmetric window: poll from 2 min before to 10 min after each observation
+    minute, covering delayed appearances on aviationweather.gov.
+    Legacy `window` param is accepted but ignored.
+    """
     for m in observation_minutes:
-        diff = min(abs(now_minute - m), 60 - abs(now_minute - m))
-        if diff <= window:
+        diff = (now_minute - m) % 60
+        if diff <= post_window or diff >= (60 - pre_window):
             return True
     return False
 
@@ -324,7 +474,7 @@ async def fetch_metar_smart() -> None:
             in_window.append(city)  # no confident profile → always poll
             continue
         valid_minutes = json.loads(profile.observation_minutes)
-        if should_poll_station(valid_minutes, now_minute, window=3):
+        if should_poll_station(valid_minutes, now_minute):
             in_window.append(city)
 
     if in_window:

@@ -139,6 +139,7 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
         get_station_profile,
         get_resolution_high_metar,
         get_avg_peak_timing,
+        get_todays_extended_obs,
     )
 
     async with get_session() as sess:
@@ -168,7 +169,7 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
 
         metar = await get_latest_metar(sess, city.id)
         # For the selected date, we also want the official high observed by METAR
-        obs_high_f = await get_daily_high_metar(sess, city.id, target_date_et)
+        obs_high_f = await get_daily_high_metar(sess, city.id, target_date_et, city_tz=getattr(city, "tz", "America/New_York"))
         avg_peak_timing = await get_avg_peak_timing(sess, city.id, days_back=3, et_tz=et_tz)
 
         # Station profile for resolution-aware display
@@ -177,7 +178,7 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
         obs_minutes_list = None
         if station_profile and station_profile.observation_minutes:
             obs_minutes_list = json.loads(station_profile.observation_minutes)
-            resolution_high_f = await get_resolution_high_metar(sess, city.id, target_date_et, obs_minutes_list)
+            resolution_high_f = await get_resolution_high_metar(sess, city.id, target_date_et, obs_minutes_list, city_tz=getattr(city, "tz", "America/New_York"))
 
         wu_d = await get_latest_forecast(sess, city.id, "wu_daily", target_date_et)
         wu_h = await get_latest_forecast(sess, city.id, "wu_hourly", target_date_et)
@@ -253,6 +254,116 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
     wu_hourly_raw = json.loads(wu_h.raw_json) if (wu_h and wu_h.raw_json) else {}
 
     reliability_bins = await get_reliability_metrics(city.id)
+
+    # ── Adaptive predictions (obs table + station-time predictions) ─────────
+    import math
+    from backend.modeling.adaptive import run_adaptive
+
+    city_tz_str = getattr(city, "tz", "America/New_York")
+    obs_table = []
+    station_predictions = []
+    adaptive_info = None
+
+    if target_date_et == real_today_et:
+        async with get_session() as sess:
+            ext_obs_rows = await get_todays_extended_obs(
+                sess, city.id, target_date_et, city_tz=city_tz_str
+            )
+
+        city_tz_obj = ZoneInfo(city_tz_str)
+
+        # Build obs_table for template (full day, newest first)
+        for row in reversed(ext_obs_rows):
+            dt_local = row.observed_at.astimezone(city_tz_obj) if row.observed_at.tzinfo else row.observed_at
+            ext = row.extended
+            is_station_min = False
+            if obs_minutes_list:
+                is_station_min = any(
+                    abs(dt_local.minute - m) <= 1 or abs(dt_local.minute - m) >= 59
+                    for m in obs_minutes_list
+                )
+            obs_table.append({
+                "time": dt_local.strftime("%-I:%M %p"),
+                "time_sort": dt_local.isoformat(),
+                "temp_f": row.temp_f,
+                "dewpoint_f": ext.dewpoint_f if ext else None,
+                "humidity_pct": round(ext.humidity_pct) if ext and ext.humidity_pct else None,
+                "wind_dir": ext.wind_dir_deg if ext else None,
+                "wind_speed_kt": ext.wind_speed_kt if ext else None,
+                "wind_gust_kt": ext.wind_gust_kt if ext else None,
+                "altimeter_inhg": ext.altimeter_inhg if ext else None,
+                "precip_in": ext.precip_in if ext else None,
+                "condition": ext.condition if ext else None,
+                "is_station_min": is_station_min,
+                "is_daily_high": row.temp_f == obs_high_f if obs_high_f is not None else False,
+            })
+
+        # Run adaptive engine for station-time predictions
+        if obs_minutes_list and ext_obs_rows and len(ext_obs_rows) >= 3:
+            obs_dicts = []
+            for row in ext_obs_rows:
+                d = {"observed_at": row.observed_at, "temp_f": row.temp_f}
+                ext = row.extended
+                if ext:
+                    d["wind_speed_kt"] = ext.wind_speed_kt
+                    d["humidity_pct"] = ext.humidity_pct
+                    d["cloud_cover"] = ext.cloud_cover
+                    cloud_map = {"CLR": 0, "SKC": 0, "FEW": 1, "SCT": 2, "BKN": 3, "OVC": 4}
+                    d["cloud_cover_val"] = cloud_map.get((ext.cloud_cover or "").upper(), None)
+                    d["wx_string"] = ext.wx_string
+                    d["altimeter_inhg"] = ext.altimeter_inhg
+                    d["precip_flag"] = bool(ext.wx_string and any(
+                        tok in (ext.wx_string or "").upper() for tok in ("RA", "TS", "SH", "SN", "DZ")
+                    ))
+                obs_dicts.append(d)
+
+            wu_peak_time = wu_hourly_raw.get("peak_hour")
+            try:
+                adaptive = run_adaptive(
+                    todays_obs=obs_dicts,
+                    observation_minutes=obs_minutes_list,
+                    now_local=now_local,
+                    city_tz=city_tz_str,
+                    wu_hourly_peak_time=wu_peak_time,
+                    historical_peak_mins=None,
+                )
+                if adaptive:
+                    for sp in adaptive.station_predictions:
+                        dt_local = sp.obs_time.astimezone(city_tz_obj) if sp.obs_time.tzinfo else sp.obs_time
+                        trend_arrow = ""
+                        if sp.trend_per_hour is not None:
+                            if sp.trend_per_hour > 0.5: trend_arrow = "^"
+                            elif sp.trend_per_hour > 0.1: trend_arrow = "7"
+                            elif sp.trend_per_hour > -0.1: trend_arrow = ">"
+                            elif sp.trend_per_hour > -0.5: trend_arrow = "\\"
+                            else: trend_arrow = "v"
+                        station_predictions.append({
+                            "time": dt_local.strftime("%-I:%M %p"),
+                            "actual_temp": sp.actual_temp,
+                            "predicted_temp": sp.predicted_temp,
+                            "uncertainty": sp.uncertainty,
+                            "is_past": sp.is_past,
+                            "trend_per_hour": sp.trend_per_hour,
+                            "trend_arrow": trend_arrow,
+                            "is_predicted_high": (sp.predicted_temp == adaptive.predicted_daily_high),
+                        })
+                    adaptive_info = {
+                        "kalman_temp": round(adaptive.kalman.smoothed_temp, 1),
+                        "kalman_trend_per_hr": round(adaptive.kalman.temp_trend_per_min * 60, 2),
+                        "kalman_n_obs": adaptive.kalman.n_observations,
+                        "kalman_uncertainty": round(adaptive.kalman.uncertainty, 2),
+                        "regression_slope_per_hr": round(adaptive.regression_slope * 60, 2),
+                        "regression_r2": round(adaptive.regression_r2, 3),
+                        "regression_features": adaptive.regression_features_used,
+                        "predicted_daily_high": round(adaptive.predicted_daily_high, 1),
+                        "predicted_high_time": adaptive.predicted_high_time.astimezone(city_tz_obj).strftime("%-I:%M %p") if adaptive.predicted_high_time else None,
+                        "sigma_adjustment": round(adaptive.sigma_adjustment, 3),
+                        "peak_already_passed": adaptive.peak_already_passed,
+                        "composite_peak_timing": adaptive.composite_peak_timing,
+                        "peak_timing_source": adaptive.peak_timing_source,
+                    }
+            except Exception as e:
+                log.warning("city_detail: adaptive engine failed for %s: %s", city_slug, e)
 
     return templates.TemplateResponse(
         "city.html",
@@ -330,6 +441,11 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                 for b in reliability_bins
             ]),
             "reliability_total_samples": sum(b.count for b in reliability_bins),
+            "obs_table": obs_table,
+            "obs_table_json": json.dumps(obs_table),
+            "station_predictions": station_predictions,
+            "station_predictions_json": json.dumps(station_predictions),
+            "adaptive_info": adaptive_info,
         },
     )
 

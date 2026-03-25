@@ -31,6 +31,7 @@ from backend.storage.repos import (
     get_all_cities,
     get_daily_high_metar,
     get_latest_forecast,
+    get_latest_successful_forecast,
     insert_forecast_obs,
     update_heartbeat,
     upsert_event,
@@ -278,9 +279,11 @@ async def fetch_wu_all() -> None:
         if event and not event.settlement_source_verified:
             log.debug("wu: %s settlement_source_verified=False (temporarily unverified on Polymarket), fetching forecast anyway", city.city_slug)
 
-        # Rate limit: check last WU scrape time
+        # Rate limit: check last *successful* WU scrape time (high_f IS NOT NULL).
+        # Failed scrapes (high_f=None) must not reset the rate-limit clock,
+        # otherwise a parse failure blocks re-scraping for another interval.
         async with get_session() as sess:
-            last_daily = await get_latest_forecast(sess, city.id, "wu_daily", today_et)
+            last_daily = await get_latest_successful_forecast(sess, city.id, "wu_daily", today_et)
 
         if last_daily and last_daily.fetched_at:
             age = (
@@ -361,7 +364,7 @@ async def _scrape_wu_city(city: City, date_et: str) -> None:
         # Use history_high + hourly_peak (already fetched above) as primary floors
         # since they come from APIs rather than HTML scraping. METAR provides
         # an additional floor if available.
-        metar_high = await get_daily_high_metar(sess, city.id, date_et)
+        metar_high = await get_daily_high_metar(sess, city.id, date_et, city_tz=getattr(city, "tz", "America/New_York"))
         floor = max(
             (v for v in [metar_high, history_high, hourly_peak] if v is not None),
             default=None,

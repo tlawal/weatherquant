@@ -98,6 +98,7 @@ def compute_model(
     city_tz: str = "America/New_York",
     observed_high: Optional[float] = None,
     ml_features: Optional[dict] = None,
+    adaptive=None,
 ) -> Optional[ModelResult]:
     """
     Fuse all forecast sources and compute temperature distribution + bucket probabilities.
@@ -201,12 +202,32 @@ def compute_model(
         )
         projected_high = min(projected_high, projected_ceiling)
 
+    # ── Adaptive prediction integration ──────────────────────────────────────
+    # Use Kalman + regression predicted high as an additional projected_high
+    # candidate, weighted by the adaptive engine's confidence.
+    adaptive_high = None
+    if adaptive is not None:
+        adaptive_high = adaptive.predicted_daily_high
+        if adaptive_high is not None and daily_high_metar is not None:
+            # Adaptive high can't be below already-observed high
+            adaptive_high = max(adaptive_high, daily_high_metar)
+        if adaptive_high is not None:
+            # Blend adaptive into projected_high: weight increases with data
+            n_obs = adaptive.kalman.n_observations if adaptive.kalman else 0
+            adaptive_w = min(0.4, n_obs * 0.02)  # caps at 0.4 with 20+ obs
+            projected_high = (1.0 - adaptive_w) * projected_high + adaptive_w * adaptive_high
+
     # Weighted combination
     mu_final = (1.0 - w_metar) * mu_forecast + w_metar * projected_high
 
     # When heavily relying on METAR, widen sigma slightly to reflect
     # that a single ground observation is noisy
     sigma_final = sigma_raw * (1.0 + 0.2 * w_metar)
+
+    # Apply adaptive sigma adjustment (tightens when trend data is rich)
+    if adaptive is not None:
+        sigma_final *= adaptive.sigma_adjustment
+
     sigma_final = max(1.0 * unit_mult, sigma_final)
 
     # ── Compute bucket probabilities ───────────────────────────────────────────
@@ -246,6 +267,22 @@ def compute_model(
         "prob_new_high": round(prob_new_high, 4),
         "observed_high": observed_high,
     }
+
+    # Adaptive engine audit data
+    if adaptive is not None:
+        inputs["adaptive"] = {
+            "kalman_temp": round(adaptive.kalman.smoothed_temp, 1),
+            "kalman_trend_per_hr": round(adaptive.kalman.temp_trend_per_min * 60, 2),
+            "kalman_n_obs": adaptive.kalman.n_observations,
+            "regression_slope_per_hr": round(adaptive.regression_slope * 60, 2),
+            "regression_r2": round(adaptive.regression_r2, 3),
+            "regression_features": adaptive.regression_features_used,
+            "predicted_daily_high": round(adaptive.predicted_daily_high, 1),
+            "sigma_adjustment": round(adaptive.sigma_adjustment, 3),
+            "peak_already_passed": adaptive.peak_already_passed,
+            "composite_peak_timing": adaptive.composite_peak_timing,
+            "peak_timing_source": adaptive.peak_timing_source,
+        }
 
     return ModelResult(
         mu=float(mu_final),

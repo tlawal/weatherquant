@@ -17,11 +17,12 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 from backend.config import Config
-from backend.tz_utils import city_local_date
+from backend.tz_utils import city_local_date, city_local_now
 from backend.modeling.distribution import edge as compute_edge
 from backend.modeling.temperature_model import compute_model, ModelResult
 from backend.modeling.calibration import get_calibration_async
 from backend.modeling.calibration_engine import get_reliability_metrics, remap_probability
+from backend.modeling.adaptive import run_adaptive
 from backend.storage.db import get_session
 from backend.storage.models import Bucket, Event, City
 from backend.storage.repos import (
@@ -38,6 +39,7 @@ from backend.storage.repos import (
     get_station_profile,
     get_temp_slope,
     get_avg_peak_timing_mins,
+    get_todays_metar_obs,
     insert_model_snapshot,
     insert_signal,
     update_heartbeat,
@@ -143,7 +145,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
 
         buckets = await get_buckets_for_event(sess, event.id)
         metar = await get_latest_metar(sess, city.id)
-        daily_high = await get_daily_high_metar(sess, city.id, today_et)
+        daily_high = await get_daily_high_metar(sess, city.id, today_et, city_tz=getattr(city, "tz", "America/New_York"))
 
         nws_obs = await get_latest_forecast(sess, city.id, "nws", today_et)
         wu_daily_obs = await get_latest_forecast(sess, city.id, "wu_daily", today_et)
@@ -158,7 +160,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         profile = await get_station_profile(sess, city.metar_station) if city.metar_station else None
         if profile and profile.observation_minutes:
             valid_minutes = json.loads(profile.observation_minutes)
-            resolution_high = await get_resolution_high_metar(sess, city.id, today_et, valid_minutes)
+            resolution_high = await get_resolution_high_metar(sess, city.id, today_et, valid_minutes, city_tz=getattr(city, "tz", "America/New_York"))
         else:
             valid_minutes = None
             resolution_high = None
@@ -167,6 +169,11 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         temp_slope_3h = await get_temp_slope(sess, city.id, hours_back=3)
         avg_peak_mins = await get_avg_peak_timing_mins(
             sess, city.id, days_back=3, tz=ZoneInfo(getattr(city, "tz", "America/New_York"))
+        )
+
+        # Fetch ALL of today's 5-minute observations for adaptive engine
+        todays_obs_rows = await get_todays_metar_obs(
+            sess, city.id, today_et, city_tz=getattr(city, "tz", "America/New_York")
         )
 
     if not buckets:
@@ -211,6 +218,67 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
             "weight_wu_hourly": cal.weight_wu_hourly,
         }
 
+    # ── Adaptive prediction engine (Kalman + regression) ────────────────────
+    city_tz_str = getattr(city, "tz", "America/New_York")
+    now_local = city_local_now(city)
+    adaptive_result = None
+
+    # Extract WU hourly peak time for composite peak timing
+    wu_hourly_peak_time = None
+    if wu_hourly_obs and wu_hourly_obs.raw_json:
+        try:
+            wu_hourly_peak_time = json.loads(wu_hourly_obs.raw_json).get("peak_hour")
+        except Exception:
+            pass
+
+    if valid_minutes and todays_obs_rows:
+        # Convert MetarObs rows to dicts for the adaptive engine
+        obs_dicts = []
+        for row in todays_obs_rows:
+            d = {
+                "observed_at": row.observed_at,
+                "temp_f": row.temp_f,
+            }
+            # Parse extended fields from raw_json if available
+            if row.raw_json:
+                try:
+                    raw = json.loads(row.raw_json) if isinstance(row.raw_json, str) else row.raw_json
+                    if isinstance(raw, dict):
+                        d["wind_speed_kt"] = raw.get("wspd")
+                        d["wx_string"] = raw.get("wxString")
+                        d["altimeter_inhg"] = raw.get("altim")
+                        cover = raw.get("cover")
+                        d["cloud_cover"] = cover
+                        cloud_map = {"CLR": 0, "SKC": 0, "FEW": 1, "SCT": 2, "BKN": 3, "OVC": 4}
+                        d["cloud_cover_val"] = cloud_map.get((cover or "").upper(), None)
+                        # Humidity from dewpoint + temp (Magnus formula)
+                        dewp = raw.get("dewp")
+                        temp_c = raw.get("temp")
+                        if dewp is not None and temp_c is not None:
+                            try:
+                                tc, dc = float(temp_c), float(dewp)
+                                d["humidity_pct"] = 100 * math.exp((17.625 * dc) / (243.04 + dc)) / math.exp((17.625 * tc) / (243.04 + tc))
+                            except Exception:
+                                pass
+                        # Precipitation flag
+                        wx = raw.get("wxString") or ""
+                        d["precip_flag"] = any(tok in wx.upper() for tok in ("RA", "TS", "SH", "SN", "DZ"))
+                except Exception:
+                    pass
+            obs_dicts.append(d)
+
+        try:
+            adaptive_result = run_adaptive(
+                todays_obs=obs_dicts,
+                observation_minutes=valid_minutes,
+                now_local=now_local,
+                city_tz=city_tz_str,
+                wu_hourly_peak_time=wu_hourly_peak_time,
+                historical_peak_mins=avg_peak_mins,
+            )
+        except Exception:
+            log.exception("signal: %s — adaptive engine failed", city.city_slug)
+
     # Run temperature model
     model = compute_model(
         nws_high=nws_obs.high_f if nws_obs else None,
@@ -222,13 +290,14 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         buckets=bucket_ranges,
         forecast_quality=event.forecast_quality or "ok",
         unit=getattr(city, "unit", "F"),
-        city_tz=getattr(city, "tz", "America/New_York"),
+        city_tz=city_tz_str,
         observed_high=observed_high_floor,
         ml_features={
             "temp_slope_3h": temp_slope_3h,
             "avg_peak_timing_mins": avg_peak_mins,
             "day_of_year": datetime.now(timezone.utc).timetuple().tm_yday,
         },
+        adaptive=adaptive_result,
     )
 
     if model is None:

@@ -151,12 +151,17 @@ async def run_all_gates(
             f"excessive, review required"
         )
 
+    # Fetch city object for timezone and date alignment gates
+    async with get_session() as sess:
+        city_obj = await sess.get(City, city_id)
+    city_tz = getattr(city_obj, "tz", "America/New_York") if city_obj else "America/New_York"
+
     # ── Gate: Already-surpassed bracket ─────────────────────────────────────
     # If METAR daily high already exceeds this bucket's ceiling, the bracket
     # is impossible — the final high will be at least as high as what's observed.
     if signal.high_f is not None:
         async with get_session() as sess:
-            obs_high = await get_daily_high_metar(sess, city_id, today_et)
+            obs_high = await get_daily_high_metar(sess, city_id, today_et, city_tz=city_tz)
         if obs_high is not None and obs_high >= signal.high_f:
             failures.append(
                 f"GATE_BRACKET_SURPASSED: observed high {obs_high:.1f} "
@@ -166,8 +171,6 @@ async def run_all_gates(
     # ── Gate: Date alignment ──────────────────────────────────────────────────
     # Verify event's date_et matches the city's current local date.
     # Prevents trading stale events when the date rolls over.
-    async with get_session() as sess:
-        city_obj = await sess.get(City, city_id)
     if city_obj:
         expected_date = city_local_date(city_obj)
         if event and event.date_et != expected_date:

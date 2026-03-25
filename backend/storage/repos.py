@@ -26,6 +26,7 @@ from backend.storage.models import (
     ForecastObs,
     MarketSnapshot,
     MetarObs,
+    MetarObsExtended,
     ModelSnapshot,
     Order,
     Position,
@@ -151,6 +152,43 @@ async def insert_metar_obs(session: AsyncSession, **kwargs) -> MetarObs:
     return obs
 
 
+async def insert_metar_obs_extended(session: AsyncSession, **kwargs) -> MetarObsExtended:
+    ext = MetarObsExtended(**kwargs)
+    session.add(ext)
+    await session.commit()
+    return ext
+
+
+async def get_todays_extended_obs(
+    session: AsyncSession,
+    city_id: int,
+    date_et: str,
+    city_tz: str = "America/New_York",
+) -> list[MetarObs]:
+    """Return ALL MetarObs with eagerly-loaded extended fields for a given local date.
+
+    Each returned MetarObs has its `.extended` relationship populated (or None).
+    """
+    from sqlalchemy.orm import selectinload
+
+    tz = ZoneInfo(city_tz)
+    start_dt = datetime.strptime(date_et, "%Y-%m-%d").replace(tzinfo=tz)
+    end_dt = start_dt + timedelta(days=1)
+
+    result = await session.execute(
+        select(MetarObs)
+        .options(selectinload(MetarObs.extended))
+        .where(
+            MetarObs.city_id == city_id,
+            MetarObs.temp_f.isnot(None),
+            MetarObs.observed_at >= start_dt,
+            MetarObs.observed_at < end_dt,
+        )
+        .order_by(MetarObs.observed_at)
+    )
+    return list(result.scalars().all())
+
+
 async def get_latest_metar(
     session: AsyncSession, city_id: int
 ) -> Optional[MetarObs]:
@@ -164,15 +202,14 @@ async def get_latest_metar(
 
 
 async def get_daily_high_metar(
-    session: AsyncSession, city_id: int, date_et: str
+    session: AsyncSession, city_id: int, date_et: str,
+    city_tz: str = "America/New_York",
 ) -> Optional[float]:
-    """Max temp_f observed for a city on the given ET date."""
-    from backend.tz_utils import ET
-    
-    # Parse date_et to a timezone-aware start and end datetime
-    start_dt = datetime.strptime(date_et, "%Y-%m-%d").replace(tzinfo=ET)
+    """Max temp_f observed for a city on the given local date."""
+    tz = ZoneInfo(city_tz)
+    start_dt = datetime.strptime(date_et, "%Y-%m-%d").replace(tzinfo=tz)
     end_dt = start_dt + timedelta(days=1)
-    
+
     result = await session.execute(
         select(func.max(MetarObs.temp_f))
         .where(
@@ -345,8 +382,13 @@ async def get_resolution_high_metar(
     date_et: str,
     valid_minutes: list[int],
     tolerance: int = 1,
+    city_tz: str = "America/New_York",
 ) -> Optional[float]:
     """Max temp_f only at valid observation timestamps (±tolerance minutes)."""
+    tz = ZoneInfo(city_tz)
+    start_dt = datetime.strptime(date_et, "%Y-%m-%d").replace(tzinfo=tz)
+    end_dt = start_dt + timedelta(days=1)
+
     # Expand valid minutes with tolerance
     expanded = set()
     for m in valid_minutes:
@@ -358,7 +400,8 @@ async def get_resolution_high_metar(
         select(func.max(MetarObs.temp_f))
         .where(
             MetarObs.city_id == city_id,
-            func.date(MetarObs.observed_at) == date_et,
+            MetarObs.observed_at >= start_dt,
+            MetarObs.observed_at < end_dt,
             extract("minute", MetarObs.observed_at).in_(list(expanded)),
         )
     )
@@ -376,6 +419,34 @@ async def get_metar_obs_for_station(
         .where(
             MetarObs.metar_station == metar_station,
             MetarObs.observed_at >= since,
+        )
+        .order_by(MetarObs.observed_at)
+    )
+    return list(result.scalars().all())
+
+
+async def get_todays_metar_obs(
+    session: AsyncSession,
+    city_id: int,
+    date_et: str,
+    city_tz: str = "America/New_York",
+) -> list[MetarObs]:
+    """Return ALL MetarObs for a city on the given local date, ordered by time.
+
+    Used by the adaptive engine to feed the full day's 5-minute observations
+    into the Kalman filter and regression.
+    """
+    tz = ZoneInfo(city_tz)
+    start_dt = datetime.strptime(date_et, "%Y-%m-%d").replace(tzinfo=tz)
+    end_dt = start_dt + timedelta(days=1)
+
+    result = await session.execute(
+        select(MetarObs)
+        .where(
+            MetarObs.city_id == city_id,
+            MetarObs.temp_f.isnot(None),
+            MetarObs.observed_at >= start_dt,
+            MetarObs.observed_at < end_dt,
         )
         .order_by(MetarObs.observed_at)
     )
@@ -400,6 +471,24 @@ async def get_latest_forecast(
             ForecastObs.city_id == city_id,
             ForecastObs.source == source,
             ForecastObs.date_et == date_et,
+        )
+        .order_by(desc(ForecastObs.fetched_at))
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_latest_successful_forecast(
+    session: AsyncSession, city_id: int, source: str, date_et: str
+) -> Optional[ForecastObs]:
+    """Like get_latest_forecast but only returns rows where high_f is not NULL."""
+    result = await session.execute(
+        select(ForecastObs)
+        .where(
+            ForecastObs.city_id == city_id,
+            ForecastObs.source == source,
+            ForecastObs.date_et == date_et,
+            ForecastObs.high_f.isnot(None),
         )
         .order_by(desc(ForecastObs.fetched_at))
         .limit(1)

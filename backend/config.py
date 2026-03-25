@@ -77,7 +77,7 @@ class Config:
     METAR_STALE_TTL_SECONDS: int = _int("METAR_STALE_TTL_SECONDS", 300)  # 5 min
 
     # ── API Rate Limiting ─────────────────────────────────────────────────────
-    WU_MIN_SCRAPE_INTERVAL_SECONDS: int = _int("WU_MIN_SCRAPE_INTERVAL_SECONDS", 3600)
+    WU_MIN_SCRAPE_INTERVAL_SECONDS: int = _int("WU_MIN_SCRAPE_INTERVAL_SECONDS", 1800)
 
     # ── Logging ───────────────────────────────────────────────────────────────
     LOG_LEVEL: str = os.environ.get("LOG_LEVEL", "INFO").upper()

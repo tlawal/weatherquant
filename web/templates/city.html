@@ -214,7 +214,10 @@
       <div class="space-y-1.5 opacity-90">
         <p class="py-1 italic mb-2">Projected true daily high, dynamically fusing NWS, WU Daily, and WU Hourly forecasts. Note: Timing and magnitude of the peak heavily depend on afternoon cloud cover/humidity regulating solar insolation.</p>
         <div class="flex justify-between"><span style="color:var(--text-muted)">Sigma Spread</span><span class="mono">{% if model and model.sigma %}{{ "%.2f"|format(model.sigma) }}{% else %}—{% endif %}</span></div>
-        <div class="flex justify-between"><span style="color:var(--text-muted)">Avg Peak Timing (3d)</span><span class="mono">{% if avg_peak_timing %}{{ avg_peak_timing }}{% else %}—{% endif %}</span></div>
+        <div class="flex justify-between"><span style="color:var(--text-muted)">Est. Peak Timing</span><span class="mono">{% if adaptive_info and adaptive_info.composite_peak_timing %}{{ adaptive_info.composite_peak_timing }}{% elif avg_peak_timing %}{{ avg_peak_timing }}{% else %}—{% endif %}</span></div>
+        {% if adaptive_info and adaptive_info.peak_timing_source %}
+        <div class="flex justify-between"><span style="color:var(--text-muted)">Peak Source</span><span class="mono text-[9px]">{{ adaptive_info.peak_timing_source }}</span></div>
+        {% endif %}
         <div class="flex justify-between"><span style="color:var(--text-muted)">Latest Computation</span><span class="mono">{% if event and event.status == 'open' %}Real-time{% else %}Finalized{% endif %}</span></div>
       </div>
     </div>
@@ -377,6 +380,171 @@
   </div>
   {% endif %}
 </div>
+{% endif %}
+
+<!-- ── STATION-TIME PREDICTIONS ────────────────────────────────────────────── -->
+{% if station_predictions %}
+<div class="card p-5 mb-6" x-data="{ showDetail: false }">
+  <div class="flex items-center justify-between mb-4">
+    <div class="flex items-center gap-2">
+      <h2 class="font-semibold text-sm">Station-Time Predictions</h2>
+      <button @click="showDetail = !showDetail" @click.outside="showDetail = false"
+              class="hover:text-cyan-400 opacity-50 hover:opacity-100 transition-all text-xs">ⓘ</button>
+    </div>
+    {% if adaptive_info %}
+    <div class="flex items-center gap-3 text-[10px]">
+      {% if adaptive_info.composite_peak_timing %}
+      <span class="px-2 py-0.5 rounded-full font-bold" style="background:rgba(234,179,8,0.15);color:#FBBF24">
+        Est. Peak: {{ adaptive_info.composite_peak_timing }}
+      </span>
+      {% endif %}
+      {% if adaptive_info.peak_already_passed %}
+      <span class="px-2 py-0.5 rounded-full font-bold" style="background:rgba(34,197,94,0.15);color:#86efac">Peak Passed</span>
+      {% endif %}
+      <span class="mono" style="color:var(--text-muted)">{{ adaptive_info.kalman_n_obs }} obs</span>
+    </div>
+    {% endif %}
+  </div>
+
+  <!-- Detailed methodology tooltip -->
+  <div x-show="showDetail" x-cloak
+       x-transition:enter="transition ease-out duration-100"
+       class="mb-4 p-4 rounded-xl border text-[11px] leading-relaxed space-y-2"
+       style="background:var(--bg-panel); border-color:var(--border);">
+    <div class="font-bold pb-1 border-b" style="color:var(--cyan); border-color:var(--border)">Adaptive Prediction Methodology</div>
+    <p><strong style="color:white">Data Source:</strong> All 5-minute METAR observations from api.weather.gov for {{ city.metar_station }} today{% if adaptive_info %} ({{ adaptive_info.kalman_n_obs }} readings since midnight){% endif %}.</p>
+    <p><strong style="color:white">Kalman Filter:</strong> 2-state Kalman filter [temp, trend] updated on every 5-min observation.{% if adaptive_info %} Current smoothed temp: {{ adaptive_info.kalman_temp }}°{{ city.unit|default('F') }}, trend: {{ "%+.2f"|format(adaptive_info.kalman_trend_per_hr) }}°/hr.{% endif %}</p>
+    <p><strong style="color:white">Regression:</strong>{% if adaptive_info %} 60-minute rolling OLS on {{ adaptive_info.kalman_n_obs }} recent points, slope: {{ "%+.2f"|format(adaptive_info.regression_slope_per_hr) }}°/hr, R²: {{ adaptive_info.regression_r2 }}. Features: {{ adaptive_info.regression_features|join(', ') }}.{% else %} 60-minute rolling OLS regression with weather features.{% endif %}</p>
+    <p><strong style="color:white">Prediction Method:</strong> Kalman trend + regression extrapolation blended by confidence, projected to each upcoming {% if observation_minutes %}:{{ observation_minutes|join(', :') }}{% endif %} observation time.</p>
+    <p><strong style="color:white">Weather Factors:</strong> Process noise adapts to wind speed, precipitation, cloud cover, and humidity — unstable conditions widen prediction uncertainty (Hacker & Rife 2007).</p>
+    <p style="color:var(--text-muted)"><em>Predictions recalculate every 60 seconds as new 5-minute observations arrive — always using the full day's data.</em></p>
+  </div>
+
+  <!-- Predictions table -->
+  <div class="overflow-x-auto">
+    <table class="w-full text-xs">
+      <thead>
+        <tr class="text-[10px] uppercase tracking-widest" style="color:var(--text-muted);border-bottom:1px solid var(--border)">
+          <th class="px-3 py-2 text-left">Station Time</th>
+          <th class="px-2 py-2 text-right">Actual</th>
+          <th class="px-2 py-2 text-right">Predicted</th>
+          <th class="px-2 py-2 text-right">Trend</th>
+          <th class="px-2 py-2 text-right">Confidence</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for sp in station_predictions %}
+        <tr class="border-b hover:bg-white/5 transition-colors {% if sp.is_predicted_high %}bg-cyan-900/10{% endif %}"
+            style="border-color:rgba(26,58,107,0.4)">
+          <td class="px-3 py-2 mono {% if sp.is_predicted_high %}font-bold{% endif %}">
+            {{ sp.time }}
+            {% if sp.is_predicted_high %}<span class="ml-1" style="color:#FBBF24" title="Expected High">★</span>{% endif %}
+          </td>
+          <td class="px-2 py-2 text-right mono">
+            {% if sp.actual_temp is not none %}
+            <span style="color:#FBBF24" class="font-medium">{{ "%.1f"|format(sp.actual_temp) }}°</span>
+            {% else %}—{% endif %}
+          </td>
+          <td class="px-2 py-2 text-right mono">
+            {% if not sp.is_past or sp.actual_temp is none %}
+            <span style="color:var(--cyan)" class="{% if sp.is_predicted_high %}font-bold{% endif %}">{{ "%.1f"|format(sp.predicted_temp) }}°</span>
+            {% else %}—{% endif %}
+          </td>
+          <td class="px-2 py-2 text-right mono">
+            {% if sp.trend_per_hour is not none and (not sp.is_past or sp.actual_temp is none) %}
+            <span class="{% if sp.trend_per_hour > 0 %}text-green-400{% elif sp.trend_per_hour < -0.3 %}text-red-400{% else %}text-yellow-400{% endif %}">
+              {{ "%+.1f"|format(sp.trend_per_hour) }}°/hr
+            </span>
+            {% else %}—{% endif %}
+          </td>
+          <td class="px-2 py-2 text-right mono" style="color:var(--text-muted)">
+            {% if not sp.is_past and sp.uncertainty %}±{{ "%.1f"|format(sp.uncertainty) }}°{% elif sp.is_past and sp.actual_temp is not none %}—{% else %}±{{ "%.1f"|format(sp.uncertainty) }}°{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if adaptive_info %}
+  <div class="mt-3 pt-3 border-t grid grid-cols-2 md:grid-cols-4 gap-3 text-[10px]" style="border-color:var(--border)">
+    <div>
+      <span style="color:var(--text-muted)">Predicted High</span>
+      <div class="mono font-bold" style="color:var(--cyan)">{{ adaptive_info.predicted_daily_high }}°{{ city.unit|default('F') }}{% if adaptive_info.predicted_high_time %} @ {{ adaptive_info.predicted_high_time }}{% endif %}</div>
+    </div>
+    <div>
+      <span style="color:var(--text-muted)">Kalman Trend</span>
+      <div class="mono font-medium {% if adaptive_info.kalman_trend_per_hr > 0 %}text-green-400{% elif adaptive_info.kalman_trend_per_hr < -0.3 %}text-red-400{% else %}text-yellow-400{% endif %}">{{ "%+.2f"|format(adaptive_info.kalman_trend_per_hr) }}°/hr</div>
+    </div>
+    <div>
+      <span style="color:var(--text-muted)">Regression R²</span>
+      <div class="mono font-medium">{{ adaptive_info.regression_r2 }}</div>
+    </div>
+    <div>
+      <span style="color:var(--text-muted)">Sigma Adj.</span>
+      <div class="mono font-medium">{{ adaptive_info.sigma_adjustment }}x</div>
+    </div>
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+
+<!-- ── TEMPERATURE TIMELINE CHART ────────────────────────────────────────── -->
+{% if obs_table %}
+<div class="card p-5 mb-6">
+  <h2 class="font-semibold text-sm mb-4" style="color:var(--text-muted)">Temperature Timeline (10 AM onward)</h2>
+  <div id="temp-timeline-chart" class="w-full" style="height:320px"></div>
+</div>
+{% endif %}
+
+<!-- ── FULL-DAY OBSERVATIONS TABLE ───────────────────────────────────────── -->
+{% if obs_table %}
+<details class="card mb-6">
+  <summary class="px-5 py-3 cursor-pointer flex items-center justify-between">
+    <div class="flex items-center gap-2">
+      <h2 class="font-semibold text-sm">Today's Observations</h2>
+      <span class="text-[10px] px-2 py-0.5 rounded-full mono" style="background:var(--bg-panel);color:var(--text-muted)">{{ obs_table|length }} readings</span>
+    </div>
+    <span class="text-[10px] uppercase tracking-widest" style="color:var(--text-muted)">Click to expand</span>
+  </summary>
+  <div class="px-5 pb-4 overflow-x-auto" style="max-height:500px; overflow-y:auto">
+    <table class="w-full text-[11px]">
+      <thead class="sticky top-0" style="background:var(--bg-card)">
+        <tr class="text-[10px] uppercase tracking-widest" style="color:var(--text-muted);border-bottom:1px solid var(--border)">
+          <th class="px-2 py-2 text-left">Time</th>
+          <th class="px-2 py-2 text-right">Temp</th>
+          <th class="px-2 py-2 text-right">Dew Pt</th>
+          <th class="px-2 py-2 text-right">Humidity</th>
+          <th class="px-2 py-2 text-right">Wind</th>
+          <th class="px-2 py-2 text-right">Speed</th>
+          <th class="px-2 py-2 text-right">Gust</th>
+          <th class="px-2 py-2 text-right">Pressure</th>
+          <th class="px-2 py-2 text-right">Precip</th>
+          <th class="px-2 py-2 text-left">Condition</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for o in obs_table %}
+        <tr class="border-b hover:bg-white/5 transition-colors
+          {% if o.is_daily_high %}bg-yellow-900/10{% endif %}"
+          style="border-color:rgba(26,58,107,0.3);{% if o.is_station_min %}border-left:3px solid #FBBF24{% endif %}">
+          <td class="px-2 py-1.5 mono {% if o.is_station_min %}font-bold{% endif %}">{{ o.time }}</td>
+          <td class="px-2 py-1.5 text-right mono font-medium {% if o.is_daily_high %}text-yellow-400 font-bold{% else %}text-white{% endif %}">
+            {% if o.temp_f is not none %}{{ "%.1f"|format(o.temp_f) }}°{% else %}—{% endif %}
+          </td>
+          <td class="px-2 py-1.5 text-right mono" style="color:var(--text-muted)">{% if o.dewpoint_f is not none %}{{ "%.1f"|format(o.dewpoint_f) }}°{% else %}—{% endif %}</td>
+          <td class="px-2 py-1.5 text-right mono" style="color:var(--text-muted)">{% if o.humidity_pct is not none %}{{ o.humidity_pct }}%{% else %}—{% endif %}</td>
+          <td class="px-2 py-1.5 text-right mono" style="color:var(--text-muted)">{% if o.wind_dir is not none %}{{ o.wind_dir }}°{% else %}—{% endif %}</td>
+          <td class="px-2 py-1.5 text-right mono" style="color:var(--text-muted)">{% if o.wind_speed_kt is not none %}{{ "%.0f"|format(o.wind_speed_kt) }}kt{% else %}—{% endif %}</td>
+          <td class="px-2 py-1.5 text-right mono" style="color:var(--text-muted)">{% if o.wind_gust_kt is not none %}{{ "%.0f"|format(o.wind_gust_kt) }}kt{% else %}—{% endif %}</td>
+          <td class="px-2 py-1.5 text-right mono" style="color:var(--text-muted)">{% if o.altimeter_inhg is not none %}{{ "%.2f"|format(o.altimeter_inhg) }}"{% else %}—{% endif %}</td>
+          <td class="px-2 py-1.5 text-right mono" style="color:var(--text-muted)">{% if o.precip_in is not none %}{{ "%.2f"|format(o.precip_in) }}"{% else %}—{% endif %}</td>
+          <td class="px-2 py-1.5 mono" style="color:var(--text-muted)">{{ o.condition or '—' }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</details>
 {% endif %}
 
 <!-- ── MAIN CONTENT GRID ───────────────────────────────────────────────────── -->
@@ -701,6 +869,109 @@ document.addEventListener('DOMContentLoaded', function() {
     };
 
     Plotly.newPlot('reliability-plot', relData, relLayout, {responsive: true, displayModeBar: false});
+  }
+
+  // ── Temperature Timeline Chart (10 AM onward) ──────────────────────────
+  const obsTableData = {{ obs_table_json|safe if obs_table_json else '[]' }};
+  const stationPredData = {{ station_predictions_json|safe if station_predictions_json else '[]' }};
+  const timelineEl = document.getElementById('temp-timeline-chart');
+
+  if (timelineEl && (obsTableData.length || stationPredData.length) && typeof Plotly !== 'undefined') {
+    const traces = [];
+    const obsMinutes = {{ observation_minutes|tojson if observation_minutes else '[]' }};
+
+    // Filter obs to 10 AM onward (reversed in template, so re-reverse for chronological)
+    const obsChron = [...obsTableData].reverse();
+    const allTimes = obsChron.map(o => o.time_sort);
+    const allTemps = obsChron.map(o => o.temp_f);
+
+    // Filter to 10 AM+ by parsing the ISO time_sort
+    const filteredObs = obsChron.filter(o => {
+      const d = new Date(o.time_sort);
+      return d.getHours() >= 10;
+    });
+
+    if (filteredObs.length) {
+      // Station-minute observations (gold dots)
+      const stationObs = filteredObs.filter(o => o.is_station_min);
+      const regularObs = filteredObs.filter(o => !o.is_station_min);
+
+      // Regular 5-min observations (small blue dots)
+      traces.push({
+        x: regularObs.map(o => o.time_sort),
+        y: regularObs.map(o => o.temp_f),
+        type: 'scatter', mode: 'markers',
+        name: '5-min obs',
+        marker: { color: '#60A5FA', size: 4, opacity: 0.6 },
+        hovertemplate: '%{y:.1f}°<br>%{x|%-I:%M %p}<extra></extra>'
+      });
+
+      // Station-minute observations (larger gold dots)
+      if (stationObs.length) {
+        traces.push({
+          x: stationObs.map(o => o.time_sort),
+          y: stationObs.map(o => o.temp_f),
+          type: 'scatter', mode: 'markers',
+          name: 'Station obs',
+          marker: { color: '#FBBF24', size: 8, symbol: 'diamond' },
+          hovertemplate: '%{y:.1f}° (station)<br>%{x|%-I:%M %p}<extra></extra>'
+        });
+      }
+    }
+
+    // Future predictions (cyan dashed line)
+    const futurePreds = stationPredData.filter(p => !p.is_past || p.actual_temp === null);
+    if (futurePreds.length) {
+      // Connect last actual to first prediction for continuity
+      const lastActual = stationPredData.filter(p => p.is_past && p.actual_temp !== null);
+      const connX = [], connY = [];
+      if (lastActual.length && filteredObs.length) {
+        // Find the matching obs for the last actual prediction
+        const lastSp = lastActual[lastActual.length - 1];
+        connX.push(filteredObs[filteredObs.length - 1].time_sort);
+        connY.push(filteredObs[filteredObs.length - 1].temp_f);
+      }
+      traces.push({
+        x: [...connX, ...futurePreds.map(p => p.time + ' (pred)')],
+        y: [...connY, ...futurePreds.map(p => p.predicted_temp)],
+        type: 'scatter', mode: 'lines+markers',
+        name: 'Predicted',
+        line: { color: '#22D3EE', width: 2, dash: 'dash' },
+        marker: { color: '#22D3EE', size: 6 },
+        hovertemplate: '%{y:.1f}° predicted<br>%{x}<extra></extra>'
+      });
+    }
+
+    // Horizontal line at current daily high
+    {% if obs_high_f is not none %}
+    const shapes = [{
+      type: 'line', xref: 'paper', x0: 0, x1: 1,
+      y0: {{ obs_high_f }}, y1: {{ obs_high_f }},
+      line: { color: '#FBBF24', width: 1, dash: 'dot' }
+    }];
+    {% else %}
+    const shapes = [];
+    {% endif %}
+
+    const timelineLayout = {
+      paper_bgcolor: 'transparent',
+      plot_bgcolor: 'transparent',
+      font: { family: 'JetBrains Mono', color: '#94A3B8', size: 10 },
+      xaxis: {
+        showgrid: false,
+        tickfont: { size: 9 },
+      },
+      yaxis: {
+        title: 'Temp (°{{ city.unit|default("F") }})',
+        gridcolor: 'rgba(26,58,107,0.4)',
+      },
+      legend: { orientation: 'h', y: -0.15, font: { size: 9 } },
+      margin: { t: 10, r: 10, b: 40, l: 40 },
+      hovermode: 'closest',
+      shapes: shapes,
+    };
+
+    Plotly.newPlot('temp-timeline-chart', traces, timelineLayout, {responsive: true, displayModeBar: false});
   }
 });
 

@@ -146,6 +146,36 @@ class MetarObs(Base):
     raw_json: Mapped[Optional[str]] = mapped_column(Text)
 
     city_ref: Mapped[City] = relationship("City", back_populates="metar_obs")
+    extended: Mapped[Optional["MetarObsExtended"]] = relationship(
+        "MetarObsExtended", back_populates="metar_obs_ref", uselist=False,
+        cascade="all, delete-orphan",
+    )
+
+
+class MetarObsExtended(Base):
+    """Extended METAR fields parsed from raw_json — 1:1 with MetarObs."""
+    __tablename__ = "metar_obs_extended"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    metar_obs_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("metar_obs.id"), unique=True, nullable=False
+    )
+    dewpoint_c: Mapped[Optional[float]] = mapped_column(Float)
+    dewpoint_f: Mapped[Optional[float]] = mapped_column(Float)
+    humidity_pct: Mapped[Optional[float]] = mapped_column(Float)
+    wind_dir_deg: Mapped[Optional[int]] = mapped_column(Integer)
+    wind_speed_kt: Mapped[Optional[float]] = mapped_column(Float)
+    wind_gust_kt: Mapped[Optional[float]] = mapped_column(Float)
+    altimeter_inhg: Mapped[Optional[float]] = mapped_column(Float)
+    sea_level_pressure_mb: Mapped[Optional[float]] = mapped_column(Float)
+    visibility_sm: Mapped[Optional[float]] = mapped_column(Float)
+    cloud_cover: Mapped[Optional[str]] = mapped_column(String(4))   # CLR/FEW/SCT/BKN/OVC
+    cloud_base_ft: Mapped[Optional[int]] = mapped_column(Integer)
+    wx_string: Mapped[Optional[str]] = mapped_column(String(64))    # -RA, TS, etc.
+    precip_in: Mapped[Optional[float]] = mapped_column(Float)
+    condition: Mapped[Optional[str]] = mapped_column(String(32))    # Fair, Cloudy, Rain, etc.
+
+    metar_obs_ref: Mapped[MetarObs] = relationship("MetarObs", back_populates="extended")
 
 
 class StationProfile(Base):
