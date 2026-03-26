@@ -275,7 +275,10 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
 
         # Build obs_table for template (full day, newest first)
         for row in reversed(ext_obs_rows):
-            dt_local = row.observed_at.astimezone(city_tz_obj) if row.observed_at.tzinfo else row.observed_at
+            _oa = row.observed_at
+            if _oa.tzinfo is None:
+                _oa = _oa.replace(tzinfo=timezone.utc)
+            dt_local = _oa.astimezone(city_tz_obj)
             ext = row.extended
             is_station_min = False
             if obs_minutes_list:
@@ -303,7 +306,10 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
         if obs_minutes_list and ext_obs_rows and len(ext_obs_rows) >= 3:
             obs_dicts = []
             for row in ext_obs_rows:
-                d = {"observed_at": row.observed_at, "temp_f": row.temp_f}
+                _oa = row.observed_at
+                if _oa.tzinfo is None:
+                    _oa = _oa.replace(tzinfo=timezone.utc)
+                d = {"observed_at": _oa, "temp_f": row.temp_f}
                 ext = row.extended
                 if ext:
                     d["wind_speed_kt"] = ext.wind_speed_kt

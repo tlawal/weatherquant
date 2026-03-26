@@ -307,10 +307,13 @@ def compute_station_predictions(
     today = now_local.date()
     predictions: list[StationTimePrediction] = []
 
-    # Build lookup of actual observations by (hour, minute)
+    # Build lookup of actual observations by (hour, minute) in LOCAL time
     actual_by_hm: dict[tuple[int, int], float] = {}
     for obs in todays_obs:
-        dt_local = obs[dt_key].astimezone(tz) if obs[dt_key].tzinfo else obs[dt_key]
+        _dt = obs[dt_key]
+        if _dt.tzinfo is None:
+            _dt = _dt.replace(tzinfo=timezone.utc)
+        dt_local = _dt.astimezone(tz)
         if dt_local.date() == today and obs.get(temp_key) is not None:
             actual_by_hm[(dt_local.hour, dt_local.minute)] = obs[temp_key]
 
@@ -420,8 +423,9 @@ def compute_peak_timing(
         if todays_obs:
             max_obs = max(todays_obs, key=lambda o: o.get(temp_key, -999))
             max_dt = max_obs[dt_key]
-            if hasattr(max_dt, 'astimezone'):
-                max_dt = max_dt.astimezone(tz)
+            if max_dt.tzinfo is None:
+                max_dt = max_dt.replace(tzinfo=timezone.utc)
+            max_dt = max_dt.astimezone(tz)
             peak_mins = max_dt.hour * 60 + max_dt.minute
             result["estimated_peak_mins"] = peak_mins
             result["estimated_peak_time"] = max_dt.strftime("%-I:%M %p")
