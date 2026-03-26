@@ -132,6 +132,7 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
         get_buckets_for_event,
         get_latest_metar,
         get_latest_forecast,
+        get_latest_successful_forecast,
         get_latest_model_snapshot,
         get_latest_signal_for_bucket,
         get_latest_market_snapshot,
@@ -180,9 +181,9 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
             obs_minutes_list = json.loads(station_profile.observation_minutes)
             resolution_high_f = await get_resolution_high_metar(sess, city.id, target_date_et, obs_minutes_list, city_tz=getattr(city, "tz", "America/New_York"))
 
-        wu_d = await get_latest_forecast(sess, city.id, "wu_daily", target_date_et)
-        wu_h = await get_latest_forecast(sess, city.id, "wu_hourly", target_date_et)
-        wu_history = await get_latest_forecast(sess, city.id, "wu_history", target_date_et)
+        wu_d = await get_latest_successful_forecast(sess, city.id, "wu_daily", target_date_et)
+        wu_h = await get_latest_successful_forecast(sess, city.id, "wu_hourly", target_date_et)
+        wu_history = await get_latest_successful_forecast(sess, city.id, "wu_history", target_date_et)
         
         primary_fc = None
         if city.is_us:

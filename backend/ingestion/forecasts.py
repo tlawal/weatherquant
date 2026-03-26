@@ -312,29 +312,41 @@ async def _scrape_wu_city(city: City, date_et: str) -> None:
         if profile and profile.observation_minutes:
             valid_minutes = json.loads(profile.observation_minutes)
 
-    daily_high = await _scrape_wu_daily(city)
-    hourly_peak, peak_hour = await _fetch_wu_hourly_api(city)
-    
+    # Isolate each scraper so one failure doesn't block the others
+    daily_high = None
+    try:
+        daily_high = await _scrape_wu_daily(city)
+    except Exception as e:
+        log.exception("wu_daily: %s scrape exception: %s", city.city_slug, e)
+
+    hourly_peak, peak_hour = None, None
+    try:
+        hourly_peak, peak_hour = await _fetch_wu_hourly_api(city)
+    except Exception as e:
+        log.exception("wu_hourly_api: %s scrape exception: %s", city.city_slug, e)
+
+    log.info("wu: %s fetched — daily=%.1f hourly=%.1f", city.city_slug, daily_high or 0, hourly_peak or 0)
+
     # Smart scheduling for WU History (~35 mins after station observation)
     now_utc = datetime.now(timezone.utc)
     fetch_history = True
     history_high, obs_time = None, None
-    
+
     async with get_session() as sess:
         last_hist = await get_latest_forecast(sess, city.id, "wu_history", date_et)
-        
+
     if last_hist and last_hist.fetched_at:
         age_hist = (now_utc - last_hist.fetched_at).total_seconds()
-        
+
         if age_hist < 3600:
             fetch_history = False  # Default to waiting an hour if we already fetched recently
-            
+
             # Override: If we haven't fetched since the optimal data-drop minute, allow it
             if valid_minutes and len(valid_minutes) > 0:
                 target_min = (valid_minutes[-1] + 35) % 60
                 last_m = last_hist.fetched_at.minute
                 now_m = now_utc.minute
-                
+
                 # Check if we crossed the target minute since the last fetch
                 # Requires age > 900 (15m) to avoid rapid spam if target minute just hit
                 if age_hist > 900:
@@ -345,7 +357,10 @@ async def _scrape_wu_city(city: City, date_et: str) -> None:
                         fetch_history = True
 
     if fetch_history:
-        history_high, obs_time = await _fetch_wu_history_api(city, date_et, valid_minutes=valid_minutes)
+        try:
+            history_high, obs_time = await _fetch_wu_history_api(city, date_et, valid_minutes=valid_minutes)
+        except Exception as e:
+            log.exception("wu_history: %s scrape exception: %s", city.city_slug, e)
     elif last_hist:
         history_high = last_hist.high_f
         try:
@@ -357,6 +372,7 @@ async def _scrape_wu_city(city: City, date_et: str) -> None:
     wu_ok = daily_high is not None or hourly_peak is not None or history_high is not None
     parse_err = None if wu_ok else "all_wu_sources_failed"
 
+    # DB inserts — isolate per source so one failure doesn't block others
     async with get_session() as sess:
         # Floor: wu_daily can't be below any already-known high for today.
         # The WU daily page transitions to night forecast in late afternoon, causing
@@ -364,7 +380,12 @@ async def _scrape_wu_city(city: City, date_et: str) -> None:
         # Use history_high + hourly_peak (already fetched above) as primary floors
         # since they come from APIs rather than HTML scraping. METAR provides
         # an additional floor if available.
-        metar_high = await get_daily_high_metar(sess, city.id, date_et, city_tz=getattr(city, "tz", "America/New_York"))
+        try:
+            metar_high = await get_daily_high_metar(sess, city.id, date_et, city_tz=getattr(city, "tz", "America/New_York"))
+        except Exception as e:
+            log.exception("wu: %s failed get_daily_high_metar: %s", city.city_slug, e)
+            metar_high = None
+
         floor = max(
             (v for v in [metar_high, history_high, hourly_peak] if v is not None),
             default=None,
@@ -378,19 +399,22 @@ async def _scrape_wu_city(city: City, date_et: str) -> None:
             )
             daily_high = floor
 
-        raw = json.dumps({"high_f": daily_high, "source": "wu_daily"})
-        await insert_forecast_obs(
-            sess,
-            city_id=city.id,
-            source="wu_daily",
-            date_et=date_et,
-            high_f=daily_high,
-            raw_payload_hash=hashlib.md5(raw.encode()).hexdigest(),
-            raw_json=raw,
-            parse_error=None if daily_high is not None else "parse_failed",
-        )
+        try:
+            raw = json.dumps({"high_f": daily_high, "source": "wu_daily"})
+            await insert_forecast_obs(
+                sess,
+                city_id=city.id,
+                source="wu_daily",
+                date_et=date_et,
+                high_f=daily_high,
+                raw_payload_hash=hashlib.md5(raw.encode()).hexdigest(),
+                raw_json=raw,
+                parse_error=None if daily_high is not None else "parse_failed",
+            )
+        except Exception as e:
+            log.exception("wu: %s failed to insert wu_daily: %s", city.city_slug, e)
 
-        if hourly_peak is not None or True:
+        try:
             raw = json.dumps({"high_f": hourly_peak, "peak_hour": peak_hour, "source": "wu_hourly"})
             await insert_forecast_obs(
                 sess,
@@ -402,8 +426,10 @@ async def _scrape_wu_city(city: City, date_et: str) -> None:
                 raw_json=raw,
                 parse_error=None if hourly_peak is not None else "parse_failed",
             )
+        except Exception as e:
+            log.exception("wu: %s failed to insert wu_hourly: %s", city.city_slug, e)
 
-        if history_high is not None or True:
+        try:
             raw = json.dumps({"high_f": history_high, "obs_time": obs_time, "source": "wu_history"})
             await insert_forecast_obs(
                 sess,
@@ -415,16 +441,24 @@ async def _scrape_wu_city(city: City, date_et: str) -> None:
                 raw_json=raw,
                 parse_error=None if history_high is not None else "parse_failed",
             )
+        except Exception as e:
+            log.exception("wu: %s failed to insert wu_history: %s", city.city_slug, e)
 
         # Update forecast_quality on the event
-        event = await get_event(sess, city.id, date_et)
-        if event:
-            quality = "ok" if wu_ok else "degraded"
-            event.forecast_quality = quality
-            event.wu_scrape_error = parse_err
-            await sess.commit()
+        try:
+            event = await get_event(sess, city.id, date_et)
+            if event:
+                quality = "ok" if wu_ok else "degraded"
+                event.forecast_quality = quality
+                event.wu_scrape_error = parse_err
+                await sess.commit()
+        except Exception as e:
+            log.exception("wu: %s failed to update event quality: %s", city.city_slug, e)
 
-        await update_heartbeat(sess, "fetch_wu", success=wu_ok, error=parse_err)
+        try:
+            await update_heartbeat(sess, "fetch_wu", success=wu_ok, error=parse_err)
+        except Exception as e:
+            log.exception("wu: %s failed to update heartbeat: %s", city.city_slug, e)
 
     log.info(
         "wu: %s daily=%.1f hourly=%.1f history=%.1f quality=%s",
