@@ -509,6 +509,8 @@ async def htmx_signals_table(request: Request):
             "unit": c.unit if c else "F",
             "bucket_idx": b.bucket_idx,
             "label": b.label or f"Bucket {b.bucket_idx}",
+            "low_f": b.low_f,
+            "high_f": b.high_f,
             "model_prob": sig.model_prob,
             "mkt_prob": sig.mkt_prob,
             "true_edge": sig.true_edge,
