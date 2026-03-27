@@ -18,6 +18,8 @@ import aiohttp
 from backend.config import Config
 from backend.tz_utils import city_local_date
 from backend.storage.db import get_session
+from sqlalchemy import select
+from backend.storage.models import MetarObs
 from backend.storage.repos import (
     get_all_cities,
     get_daily_high_metar,
@@ -285,6 +287,17 @@ async def _fetch_us_metars(cities: list[City]) -> None:
         raw_str = json.dumps(obs, default=str)
 
         async with get_session() as sess:
+            # Dedup: skip if we already have this observation
+            dup = await sess.execute(
+                select(MetarObs.id).where(
+                    MetarObs.city_id == city.id,
+                    MetarObs.metar_station == station_id,
+                    MetarObs.observed_at == obs_time,
+                ).limit(1)
+            )
+            if dup.scalar_one_or_none() is not None:
+                continue
+
             prev_high = await get_daily_high_metar(sess, city.id, today_local, city_tz=getattr(city, "tz", "America/New_York"))
             daily_high = max(
                 (v for v in [temp_f, prev_high] if v is not None), default=temp_f
@@ -346,6 +359,17 @@ async def _fetch_nws_observations(cities: list[City]) -> None:
 
                 today_local = city_local_date(city)
                 async with get_session() as sess:
+                    # Dedup: skip if we already have this observation
+                    dup = await sess.execute(
+                        select(MetarObs.id).where(
+                            MetarObs.city_id == city.id,
+                            MetarObs.metar_station == city.metar_station,
+                            MetarObs.observed_at == obs_time,
+                        ).limit(1)
+                    )
+                    if dup.scalar_one_or_none() is not None:
+                        continue
+
                     prev_high = await get_daily_high_metar(sess, city.id, today_local, city_tz=getattr(city, "tz", "America/New_York"))
                     daily_high = max(
                         (v for v in [temp_f, prev_high] if v is not None), default=temp_f

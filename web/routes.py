@@ -302,6 +302,15 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                 "is_daily_high": row.temp_f == obs_high_f if obs_high_f is not None else False,
             })
 
+        # Deduplicate: multiple pollers can insert the same observation
+        seen_times = set()
+        deduped = []
+        for row in obs_table:
+            if row["time_sort"] not in seen_times:
+                seen_times.add(row["time_sort"])
+                deduped.append(row)
+        obs_table = deduped
+
         # Run adaptive engine for station-time predictions
         if obs_minutes_list and ext_obs_rows and len(ext_obs_rows) >= 3:
             obs_dicts = []
