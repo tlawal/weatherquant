@@ -78,6 +78,7 @@ class Config:
 
     # ── API Rate Limiting ─────────────────────────────────────────────────────
     WU_MIN_SCRAPE_INTERVAL_SECONDS: int = _int("WU_MIN_SCRAPE_INTERVAL_SECONDS", 1800)
+    WU_FAILED_RETRY_INTERVAL_SECONDS: int = _int("WU_FAILED_RETRY_INTERVAL_SECONDS", 300)
 
     # ── Logging ───────────────────────────────────────────────────────────────
     LOG_LEVEL: str = os.environ.get("LOG_LEVEL", "INFO").upper()

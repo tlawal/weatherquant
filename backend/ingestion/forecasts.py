@@ -279,19 +279,54 @@ async def fetch_wu_all() -> None:
         if event and not event.settlement_source_verified:
             log.debug("wu: %s settlement_source_verified=False (temporarily unverified on Polymarket), fetching forecast anyway", city.city_slug)
 
-        # Rate limit: check last *successful* WU scrape time (high_f IS NOT NULL).
-        # Failed scrapes (high_f=None) must not reset the rate-limit clock,
-        # otherwise a parse failure blocks re-scraping for another interval.
+        # Rate limit: source-aware.  If ALL three WU sources have succeeded
+        # recently, use the normal 30-min cooldown.  If ANY source has never
+        # succeeded today, use a shorter retry interval so broken sources
+        # recover quickly without hammering WU.
         async with get_session() as sess:
             last_daily = await get_latest_successful_forecast(sess, city.id, "wu_daily", today_et)
+            last_hourly = await get_latest_successful_forecast(sess, city.id, "wu_hourly", today_et)
+            last_history = await get_latest_successful_forecast(sess, city.id, "wu_history", today_et)
 
-        if last_daily and last_daily.fetched_at:
-            age = (
-                datetime.now(timezone.utc) - last_daily.fetched_at
-            ).total_seconds()
-            if age < Config.WU_MIN_SCRAPE_INTERVAL_SECONDS:
-                log.debug("wu: %s rate limited (age=%.0fs < %ds)", city.city_slug, age, Config.WU_MIN_SCRAPE_INTERVAL_SECONDS)
+        all_sources = [last_daily, last_hourly, last_history]
+        all_succeeded = all(f and f.fetched_at for f in all_sources)
+
+        if all_succeeded:
+            oldest_age = max(
+                (datetime.now(timezone.utc) - f.fetched_at).total_seconds()
+                for f in all_sources
+            )
+            if oldest_age < Config.WU_MIN_SCRAPE_INTERVAL_SECONDS:
+                log.debug("wu: %s all sources fresh, rate limited (oldest=%.0fs < %ds)",
+                          city.city_slug, oldest_age, Config.WU_MIN_SCRAPE_INTERVAL_SECONDS)
                 continue
+        else:
+            # At least one source missing — use shorter retry interval
+            # Gate on the most recent *attempt* (any row, including failures)
+            # to avoid hammering WU servers
+            from backend.storage.repos import get_latest_forecast as _get_latest_any
+            async with get_session() as sess:
+                recent_attempts = []
+                for src in ["wu_daily", "wu_hourly", "wu_history"]:
+                    rec = await _get_latest_any(sess, city.id, src, today_et)
+                    if rec and rec.fetched_at:
+                        recent_attempts.append(rec.fetched_at)
+
+            if recent_attempts:
+                newest_attempt_age = min(
+                    (datetime.now(timezone.utc) - ts).total_seconds()
+                    for ts in recent_attempts
+                )
+                if newest_attempt_age < Config.WU_FAILED_RETRY_INTERVAL_SECONDS:
+                    log.debug("wu: %s has failed source(s) but attempted %.0fs ago, waiting",
+                              city.city_slug, newest_attempt_age)
+                    continue
+
+            log.info("wu: %s has failed source(s) [daily=%s hourly=%s history=%s], retrying now",
+                     city.city_slug,
+                     "ok" if last_daily else "FAIL",
+                     "ok" if last_hourly else "FAIL",
+                     "ok" if last_history else "FAIL")
 
         try:
             await _scrape_wu_city(city, today_et)
@@ -333,7 +368,7 @@ async def _scrape_wu_city(city: City, date_et: str) -> None:
     history_high, obs_time = None, None
 
     async with get_session() as sess:
-        last_hist = await get_latest_forecast(sess, city.id, "wu_history", date_et)
+        last_hist = await get_latest_successful_forecast(sess, city.id, "wu_history", date_et)
 
     if last_hist and last_hist.fetched_at:
         age_hist = (now_utc - last_hist.fetched_at).total_seconds()
@@ -429,20 +464,21 @@ async def _scrape_wu_city(city: City, date_et: str) -> None:
         except Exception as e:
             log.exception("wu: %s failed to insert wu_hourly: %s", city.city_slug, e)
 
-        try:
-            raw = json.dumps({"high_f": history_high, "obs_time": obs_time, "source": "wu_history"})
-            await insert_forecast_obs(
-                sess,
-                city_id=city.id,
-                source="wu_history",
-                date_et=date_et,
-                high_f=history_high,
-                raw_payload_hash=hashlib.md5(raw.encode()).hexdigest(),
-                raw_json=raw,
-                parse_error=None if history_high is not None else "parse_failed",
-            )
-        except Exception as e:
-            log.exception("wu: %s failed to insert wu_history: %s", city.city_slug, e)
+        if fetch_history:
+            try:
+                raw = json.dumps({"high_f": history_high, "obs_time": obs_time, "source": "wu_history"})
+                await insert_forecast_obs(
+                    sess,
+                    city_id=city.id,
+                    source="wu_history",
+                    date_et=date_et,
+                    high_f=history_high,
+                    raw_payload_hash=hashlib.md5(raw.encode()).hexdigest(),
+                    raw_json=raw,
+                    parse_error=None if history_high is not None else "parse_failed",
+                )
+            except Exception as e:
+                log.exception("wu: %s failed to insert wu_history: %s", city.city_slug, e)
 
         # Update forecast_quality on the event
         try:
@@ -572,7 +608,9 @@ async def _fetch_wu_hourly_api(city: City) -> tuple[Optional[float], Optional[st
                         log.warning("wu_hourly_api: %s — 404", city.city_slug)
                         return None, None
                     else:
-                        log.warning("wu_hourly_api: HTTP %d for %s", resp.status, city.city_slug)
+                        body = await resp.text()
+                        log.warning("wu_hourly_api: HTTP %d for %s — body: %.200s",
+                                    resp.status, city.city_slug, body)
         except Exception as e:
             log.warning("wu_hourly_api: failed for %s (attempt %d/3): %s", city.city_slug, attempt + 1, e)
             if attempt < 2:
@@ -669,8 +707,16 @@ async def _fetch_wu_history_api(
                                 except Exception:
                                     pass
                             return high_f, obs_time_str
-                    elif resp.status == 404:
+                        log.info("wu_history: %s — 200 OK but 0 valid observations (total=%d)",
+                                 city.city_slug, len(obs))
                         return None, None
+                    elif resp.status == 404:
+                        log.info("wu_history: %s — 404 (no data for %s)", city.city_slug, date_et)
+                        return None, None
+                    else:
+                        body = await resp.text()
+                        log.warning("wu_history: HTTP %d for %s — body: %.200s",
+                                    resp.status, city.city_slug, body)
         except Exception as e:
             log.warning("wu_history: fetch failed for %s: %s", city.city_slug, e)
             await asyncio.sleep(2)
