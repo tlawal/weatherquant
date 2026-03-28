@@ -96,6 +96,7 @@ async def execute_signal(
         "GATE_ARMED", "GATE_EDGE", "GATE_TRADING_WINDOW",
         "GATE_SETTLEMENT_SOURCE", "GATE_BRACKET_SURPASSED",
         "GATE_MKT_EXTREME", "GATE_DATE_ALIGNMENT", "GATE_WU_FRESHNESS",
+        "GATE_LIQUIDITY", "GATE_METAR",
     }
     if manual:
         filtered = [f for f in gate_result.failures
