@@ -23,7 +23,7 @@ from typing import Optional
 
 from backend.config import Config
 from backend.tz_utils import city_local_date
-from backend.engine.gating import run_all_gates
+from backend.engine.gating import run_all_gates, GateResult
 from backend.engine.signal_engine import BucketSignal
 from backend.execution.arming import is_armed
 from backend.execution.risk_manager import compute_size
@@ -47,6 +47,7 @@ async def execute_signal(
     bankroll: float,
     actor: str = "auto_trader",
     dry_run: bool = False,
+    manual: bool = False,
 ) -> dict:
     """
     Attempt to execute a trade for the given signal.
@@ -75,14 +76,32 @@ async def execute_signal(
             result["error"] = f"city not found: {signal.city_slug}"
             return result
 
-        today_local = city_local_date(city)
-        event = await get_event(sess, city.id, today_local)
+        from backend.tz_utils import city_local_now, city_local_tomorrow
+        now_local = city_local_now(city)
+        if now_local.hour >= 20:
+            active_date = city_local_tomorrow(city)
+        else:
+            active_date = city_local_date(city)
+        event = await get_event(sess, city.id, active_date)
         if not event:
             result["status"] = "no_event"
             return result
 
     # ── Run all safety gates ──────────────────────────────────────────────────
     gate_result = await run_all_gates(signal, event, city.id)
+
+    # For manual trades, filter out bot-only gates that don't apply to
+    # human-initiated trades. Keep critical safety gates (daily loss, max positions).
+    BOT_ONLY_GATES = {
+        "GATE_ARMED", "GATE_EDGE", "GATE_TRADING_WINDOW",
+        "GATE_SETTLEMENT_SOURCE", "GATE_BRACKET_SURPASSED",
+        "GATE_MKT_EXTREME", "GATE_DATE_ALIGNMENT", "GATE_WU_FRESHNESS",
+    }
+    if manual:
+        filtered = [f for f in gate_result.failures
+                    if not any(f.startswith(g) for g in BOT_ONLY_GATES)]
+        gate_result = GateResult(passed=len(filtered) == 0, failures=filtered)
+
     result["gate_failures"] = gate_result.failures
 
     if not gate_result.passed:
