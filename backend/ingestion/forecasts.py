@@ -293,7 +293,7 @@ async def fetch_wu_all() -> None:
 
         if all_succeeded:
             oldest_age = max(
-                (datetime.now(timezone.utc) - f.fetched_at).total_seconds()
+                (datetime.now(timezone.utc) - (f.fetched_at.replace(tzinfo=timezone.utc) if f.fetched_at.tzinfo is None else f.fetched_at)).total_seconds()
                 for f in all_sources
             )
             if oldest_age < Config.WU_MIN_SCRAPE_INTERVAL_SECONDS:
@@ -314,7 +314,7 @@ async def fetch_wu_all() -> None:
 
             if recent_attempts:
                 newest_attempt_age = min(
-                    (datetime.now(timezone.utc) - ts).total_seconds()
+                    (datetime.now(timezone.utc) - (ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else ts)).total_seconds()
                     for ts in recent_attempts
                 )
                 if newest_attempt_age < Config.WU_FAILED_RETRY_INTERVAL_SECONDS:
@@ -371,7 +371,10 @@ async def _scrape_wu_city(city: City, date_et: str) -> None:
         last_hist = await get_latest_successful_forecast(sess, city.id, "wu_history", date_et)
 
     if last_hist and last_hist.fetched_at:
-        age_hist = (now_utc - last_hist.fetched_at).total_seconds()
+        _fetched = last_hist.fetched_at
+        if _fetched.tzinfo is None:
+            _fetched = _fetched.replace(tzinfo=timezone.utc)
+        age_hist = (now_utc - _fetched).total_seconds()
 
         if age_hist < 3600:
             fetch_history = False  # Default to waiting an hour if we already fetched recently

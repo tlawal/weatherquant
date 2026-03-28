@@ -209,6 +209,7 @@ async def start_scheduler() -> AsyncIOScheduler:
         (job_fetch_gamma, "fetch_gamma"),
         (job_fetch_metar, "fetch_metar"),
         (job_fetch_nws, "fetch_nws"),
+        (job_fetch_wu, "fetch_wu"),
         (job_fetch_open_meteo, "fetch_open_meteo"),
         (job_refresh_missing_station_profiles, "refresh_missing_station_profiles"),
     ]:
