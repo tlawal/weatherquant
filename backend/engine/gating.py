@@ -99,7 +99,10 @@ async def run_all_gates(
     if metar is None:
         failures.append("GATE_METAR: no METAR observation found")
     else:
-        age_s = (datetime.now(timezone.utc) - metar.fetched_at).total_seconds()
+        fetched = metar.fetched_at
+        if fetched.tzinfo is None:
+            fetched = fetched.replace(tzinfo=timezone.utc)
+        age_s = (datetime.now(timezone.utc) - fetched).total_seconds()
         if age_s > Config.METAR_STALE_TTL_SECONDS:
             failures.append(
                 f"GATE_METAR_FRESHNESS: last METAR age={age_s:.0f}s > {Config.METAR_STALE_TTL_SECONDS}s"
@@ -169,14 +172,19 @@ async def run_all_gates(
             )
 
     # ── Gate: Date alignment ──────────────────────────────────────────────────
-    # Verify event's date_et matches the city's current local date.
+    # Verify event's date_et matches the city's active date (with 8 PM rollover).
     # Prevents trading stale events when the date rolls over.
     if city_obj:
-        expected_date = city_local_date(city_obj)
+        from backend.tz_utils import city_local_now, city_local_tomorrow
+        _now_local = city_local_now(city_obj)
+        if _now_local.hour >= 20:
+            expected_date = city_local_tomorrow(city_obj)
+        else:
+            expected_date = city_local_date(city_obj)
         if event and event.date_et != expected_date:
             failures.append(
                 f"GATE_DATE_ALIGNMENT: event.date_et={event.date_et} != "
-                f"city_local_date={expected_date} (tz={getattr(city_obj, 'tz', 'unknown')})"
+                f"active_date={expected_date} (tz={getattr(city_obj, 'tz', 'unknown')})"
             )
 
     if failures:
