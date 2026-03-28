@@ -209,15 +209,24 @@ class CLOBClient:
 
 async def fetch_clob_orderbooks(clob: CLOBClient) -> None:
     """Fetch order books for all watched buckets and persist snapshots."""
+    from backend.tz_utils import city_local_now, city_local_tomorrow
+
     async with get_session() as sess:
         cities = await get_all_cities(sess, enabled_only=True)
 
     # Collect all orderbook data first (HTTP calls, no DB)
     snapshots_to_insert = []
     for city in cities:
-        today_local = city_local_date(city)
+        # Match the 8 PM rollover logic from fetch_gamma_all —
+        # after 8 PM local, the active market is *tomorrow's* event.
+        now_local = city_local_now(city)
+        if now_local.hour >= 20:
+            active_date = city_local_tomorrow(city)
+        else:
+            active_date = city_local_date(city)
+
         async with get_session() as sess:
-            event = await get_event(sess, city.id, today_local)
+            event = await get_event(sess, city.id, active_date)
             if not event or event.status != "ok":
                 continue
             buckets = await get_buckets_for_event(sess, event.id)
