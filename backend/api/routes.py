@@ -831,13 +831,21 @@ async def manual_trade(
     from backend.engine.signal_engine import BucketSignal
     from backend.execution.trader import execute_signal
     from backend.ingestion.polymarket_clob import get_clob
+    from backend.tz_utils import city_local_now, city_local_tomorrow
 
     async with get_session() as sess:
         city = await _get_city_or_404(sess, body.city_slug)
-        today_city = city_local_date(city)
-        event = await get_event(sess, city.id, today_city)
+
+        # Match the 8 PM rollover logic used by the web UI and Gamma scanner
+        now_local = city_local_now(city)
+        if now_local.hour >= 20:
+            active_date = city_local_tomorrow(city)
+        else:
+            active_date = city_local_date(city)
+
+        event = await get_event(sess, city.id, active_date)
         if not event:
-            raise HTTPException(status_code=404, detail="No event today for this city")
+            raise HTTPException(status_code=404, detail=f"No event for {body.city_slug} on {active_date}")
 
         buckets = await get_buckets_for_event(sess, event.id)
 

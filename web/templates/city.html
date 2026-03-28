@@ -782,10 +782,11 @@
         <button @click="side = 'sell'" class="flex-1 py-2 rounded-md text-sm font-semibold transition-all"
                 :class="side === 'sell' ? 'text-white' : ''"
                 :style="side === 'sell' ? 'background:var(--bg-card);box-shadow:0 1px 3px rgba(0,0,0,0.3)' : 'color:var(--text-muted)'">Sell</button>
-        <!-- Order Type -->
-        <div class="ml-auto flex items-center gap-1 text-[10px] px-2" style="color:var(--text-muted)">
-          Limit <span class="opacity-50">▾</span>
-        </div>
+        <!-- Order Type Toggle -->
+        <button @click="orderType = orderType === 'limit' ? 'market' : 'limit'" class="ml-auto flex items-center gap-1 text-[10px] px-2 py-1 rounded-md hover:bg-white/10 transition-colors cursor-pointer" style="color:var(--text-muted)">
+          <span x-text="orderType === 'limit' ? 'Limit' : 'Market'" class="font-semibold"></span>
+          <span class="opacity-50">▾</span>
+        </button>
       </div>
 
       <!-- Yes / No Outcome Buttons -->
@@ -812,12 +813,13 @@
       <div>
         <div class="flex items-center justify-between mb-2">
           <div>
-            <span class="text-xs font-medium">Limit Price</span>
+            <span class="text-xs font-medium" x-text="orderType === 'limit' ? 'Limit Price' : 'Market Order'"></span>
             <div class="text-[10px] mono" style="color:var(--text-muted)">
               Balance <span x-text="balance !== null ? '$' + balance.toFixed(2) : '—'" :style="balance !== null && balance < 1 ? 'color:var(--red)' : ''"></span>
             </div>
           </div>
-          <div class="flex items-center gap-0">
+          <!-- Limit price stepper (only for limit orders) -->
+          <div x-show="orderType === 'limit'" class="flex items-center gap-0">
             <button @click="adjustPrice(-0.01)"
                     class="w-9 h-9 rounded-l-lg flex items-center justify-center text-lg font-bold hover:bg-white/10 transition-colors"
                     style="background:var(--bg-panel);color:var(--text-muted)">−</button>
@@ -827,6 +829,10 @@
             <button @click="adjustPrice(0.01)"
                     class="w-9 h-9 rounded-r-lg flex items-center justify-center text-lg font-bold hover:bg-white/10 transition-colors"
                     style="background:var(--bg-panel);color:var(--text-muted)">+</button>
+          </div>
+          <!-- Market order indicator -->
+          <div x-show="orderType === 'market'" class="px-3 py-1.5 rounded-lg text-xs mono font-medium" style="background:var(--bg-panel);color:var(--cyan)">
+            Best available price
           </div>
         </div>
       </div>
@@ -1154,7 +1160,13 @@ async function apiCall(path, method='POST', body=null) {
     method, headers: {'Content-Type':'application/json','X-Admin-Token': tok},
     body: body ? JSON.stringify(body) : undefined,
   });
-  return res.json();
+  // Handle non-JSON error responses gracefully
+  const text = await res.text();
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    return { status: 'error', error: text.substring(0, 200), http_status: res.status };
+  }
 }
 
 function tradingPanel() {
@@ -1164,6 +1176,7 @@ function tradingPanel() {
     selectedBucketIdx: null,
     side: 'buy',
     outcome: 'yes',
+    orderType: 'limit',  // 'limit' or 'market'
     limitPrice: 0.50,
     shares: 0,
     dryRun: true,
@@ -1287,13 +1300,17 @@ function tradingPanel() {
       this.tradeResult = null;
 
       try {
-        const result = await apiCall('/trade', 'POST', {
+        const payload = {
           city_slug: '{{ city.city_slug }}',
           bucket_idx: this.selectedBucketIdx,
           side: this.side === 'buy' ? 'buy_yes' : 'buy_no',
-          limit_price: this.limitPrice,
           dry_run: this.dryRun,
-        });
+        };
+        // Only send limit_price for limit orders; market orders use best available
+        if (this.orderType === 'limit') {
+          payload.limit_price = this.limitPrice;
+        }
+        const result = await apiCall('/trade', 'POST', payload);
         this.tradeResult = result;
 
         // Refresh balance after trade
