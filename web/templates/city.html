@@ -748,30 +748,197 @@
   </div>
 </div>
 
-<!-- Hidden Trade Modal -->
-<div id="trade-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center"
-     style="background:rgba(0,0,0,0.7)" onclick="if(event.target===this)hideTradeModal()">
-  <div class="card w-96 p-6 space-y-4" style="background:var(--bg-card)">
-    <h2 class="font-bold text-base" style="color:var(--cyan)">Trade — <span id="modal-label"></span></h2>
-    <input id="trade-city" type="hidden" value="{{ city.city_slug }}">
-    <input id="trade-bucket-idx" type="hidden">
-    <div class="space-y-2">
-      <input id="trade-price" type="number" step="0.01" min="0.01" max="0.99" placeholder="Limit price (optional)"
-        class="w-full px-3 py-2 rounded text-sm" style="background:var(--bg-panel);border:1px solid var(--border)">
-      <label class="flex items-center gap-2 text-sm">
-        <input id="trade-dry-run" type="checkbox" checked> Dry run
-      </label>
+<!-- ── TRADING PANEL (Polymarket-style) ───────────────────────────────────── -->
+{% if event %}
+<div id="trading-panel-section" class="mt-5" x-data="tradingPanel()" x-cloak>
+  <div class="card overflow-hidden" x-show="selectedBucket !== null"
+       x-transition:enter="transition ease-out duration-200"
+       x-transition:enter-start="opacity-0 translate-y-4"
+       x-transition:enter-end="opacity-100 translate-y-0">
+
+    <!-- Header -->
+    <div class="px-5 py-4 border-b flex items-center justify-between" style="border-color:var(--border)">
+      <div class="flex items-center gap-3">
+        <div class="w-10 h-10 rounded-lg flex items-center justify-center text-xl" style="background:var(--bg-panel)">🌡️</div>
+        <div>
+          <div class="text-sm font-semibold leading-tight" x-text="questionText"></div>
+          <div class="text-[10px] mono mt-0.5" style="color:var(--text-muted)" x-text="'Bucket ' + selectedBucketIdx"></div>
+        </div>
+      </div>
+      <button @click="closeTrade()" class="w-8 h-8 rounded-lg flex items-center justify-center hover:bg-white/10 transition-colors text-lg" style="color:var(--text-muted)">×</button>
     </div>
-    <div class="flex gap-2">
-      <button onclick="submitTrade()" class="flex-1 py-2 rounded font-semibold text-sm"
-        style="background:var(--cyan);color:#000">Execute</button>
-      <button onclick="hideTradeModal()" class="flex-1 py-2 rounded text-sm"
-        style="background:var(--bg-panel);border:1px solid var(--border)">Cancel</button>
+
+    <div class="p-5 space-y-5">
+
+      <!-- Buy / Sell Toggle -->
+      <div class="flex items-center gap-1 p-1 rounded-lg" style="background:var(--bg-panel)">
+        <button @click="side = 'buy'" class="flex-1 py-2 rounded-md text-sm font-semibold transition-all"
+                :class="side === 'buy' ? 'text-white' : ''"
+                :style="side === 'buy' ? 'background:var(--bg-card);box-shadow:0 1px 3px rgba(0,0,0,0.3)' : 'color:var(--text-muted)'">Buy</button>
+        <button @click="side = 'sell'" class="flex-1 py-2 rounded-md text-sm font-semibold transition-all"
+                :class="side === 'sell' ? 'text-white' : ''"
+                :style="side === 'sell' ? 'background:var(--bg-card);box-shadow:0 1px 3px rgba(0,0,0,0.3)' : 'color:var(--text-muted)'">Sell</button>
+        <!-- Order Type -->
+        <div class="ml-auto flex items-center gap-1 text-[10px] px-2" style="color:var(--text-muted)">
+          Limit <span class="opacity-50">▾</span>
+        </div>
+      </div>
+
+      <!-- Yes / No Outcome Buttons -->
+      <div class="grid grid-cols-2 gap-3">
+        <button @click="outcome = 'yes'; limitPrice = yesPrice || limitPrice"
+                class="py-3 rounded-xl font-bold text-sm transition-all border-2"
+                :class="outcome === 'yes' ? 'border-green-500/80' : 'border-transparent'"
+                :style="outcome === 'yes'
+                  ? 'background:rgba(34,197,94,0.2);color:#86efac;box-shadow:0 0 12px rgba(34,197,94,0.15)'
+                  : 'background:var(--bg-panel);color:var(--text-muted)'">
+          Yes <span class="mono ml-1" x-text="yesPrice ? (yesPrice * 100).toFixed(0) + '¢' : '—'"></span>
+        </button>
+        <button @click="outcome = 'no'; limitPrice = noPrice || limitPrice"
+                class="py-3 rounded-xl font-bold text-sm transition-all border-2"
+                :class="outcome === 'no' ? 'border-red-500/80' : 'border-transparent'"
+                :style="outcome === 'no'
+                  ? 'background:rgba(239,68,68,0.15);color:#fca5a5;box-shadow:0 0 12px rgba(239,68,68,0.15)'
+                  : 'background:var(--bg-panel);color:var(--text-muted)'">
+          No <span class="mono ml-1" x-text="noPrice ? (noPrice * 100).toFixed(0) + '¢' : '—'"></span>
+        </button>
+      </div>
+
+      <!-- Limit Price + Balance -->
+      <div>
+        <div class="flex items-center justify-between mb-2">
+          <div>
+            <span class="text-xs font-medium">Limit Price</span>
+            <div class="text-[10px] mono" style="color:var(--text-muted)">
+              Balance <span x-text="balance !== null ? '$' + balance.toFixed(2) : '—'" :style="balance !== null && balance < 1 ? 'color:var(--red)' : ''"></span>
+            </div>
+          </div>
+          <div class="flex items-center gap-0">
+            <button @click="adjustPrice(-0.01)"
+                    class="w-9 h-9 rounded-l-lg flex items-center justify-center text-lg font-bold hover:bg-white/10 transition-colors"
+                    style="background:var(--bg-panel);color:var(--text-muted)">−</button>
+            <div class="h-9 px-4 flex items-center justify-center mono font-bold text-sm min-w-[5rem] text-center"
+                 style="background:var(--bg-panel)"
+                 x-text="(limitPrice * 100).toFixed(0) + '¢'"></div>
+            <button @click="adjustPrice(0.01)"
+                    class="w-9 h-9 rounded-r-lg flex items-center justify-center text-lg font-bold hover:bg-white/10 transition-colors"
+                    style="background:var(--bg-panel);color:var(--text-muted)">+</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Shares Input -->
+      <div>
+        <div class="flex items-center justify-between mb-2">
+          <div>
+            <span class="text-xs font-medium">Shares</span>
+            <div class="text-[10px] hover:underline cursor-pointer" style="color:var(--cyan)" @click="setMaxShares()">Max</div>
+          </div>
+          <input type="number" min="0" step="1" x-model.number="shares"
+                 class="w-28 h-9 px-3 rounded-lg mono text-sm text-right font-medium"
+                 style="background:var(--bg-panel);border:1px solid var(--border);color:var(--text-main)"
+                 placeholder="0">
+        </div>
+        <div class="flex gap-2 mt-2">
+          <template x-for="adj in [-100, -10, +10, +100]">
+            <button @click="shares = Math.max(0, (shares || 0) + adj)"
+                    class="flex-1 py-1.5 rounded-lg text-xs mono font-medium hover:bg-white/10 transition-colors"
+                    style="background:var(--bg-panel);color:var(--text-muted)"
+                    x-text="(adj > 0 ? '+' : '') + adj"></button>
+          </template>
+        </div>
+      </div>
+
+      <!-- Orderbook Info -->
+      <div class="rounded-lg p-3 text-[11px] space-y-1.5" style="background:var(--bg-panel)"
+           x-show="obLoaded">
+        <div class="flex justify-between">
+          <span style="color:var(--text-muted)">Best Ask</span>
+          <span class="mono font-medium" x-text="obAsk ? (obAsk * 100).toFixed(1) + '¢' : '—'"></span>
+        </div>
+        <div class="flex justify-between">
+          <span style="color:var(--text-muted)">Best Bid</span>
+          <span class="mono font-medium" x-text="obBid ? (obBid * 100).toFixed(1) + '¢' : '—'"></span>
+        </div>
+        <div class="flex justify-between">
+          <span style="color:var(--text-muted)">Spread</span>
+          <span class="mono font-medium" x-text="obSpread ? (obSpread * 100).toFixed(1) + '¢' : '—'"></span>
+        </div>
+        <div class="flex justify-between">
+          <span style="color:var(--text-muted)">Ask Depth</span>
+          <span class="mono font-medium" x-text="obAskDepth ? obAskDepth.toFixed(0) + ' shares' : '—'"></span>
+        </div>
+        <!-- Liquidity warning -->
+        <div x-show="shares > 0 && obAskDepth > 0 && shares > obAskDepth && side === 'buy'"
+             class="mt-2 p-2 rounded-lg text-[10px] font-medium" style="background:rgba(249,115,22,0.1);color:#FB923C;border:1px solid rgba(249,115,22,0.3)">
+          ⚠ Only <span class="mono font-bold" x-text="Math.floor(obAskDepth)"></span> shares available at this price level
+        </div>
+      </div>
+
+      <!-- Dry Run Toggle -->
+      <div class="flex items-center justify-between">
+        <label class="flex items-center gap-2 text-xs cursor-pointer" style="color:var(--text-muted)">
+          <input type="checkbox" x-model="dryRun" class="rounded">
+          <span>Dry run (simulate only)</span>
+        </label>
+      </div>
+
+      <!-- Totals -->
+      <div class="space-y-2 pt-2 border-t" style="border-color:var(--border)">
+        <div class="flex justify-between text-sm">
+          <span style="color:var(--text-muted)">Total</span>
+          <span class="mono font-bold" style="color:var(--cyan)" x-text="'$' + totalCost.toFixed(2)"></span>
+        </div>
+        <div class="flex justify-between text-sm">
+          <div class="flex items-center gap-1">
+            <span style="color:var(--text-muted)">To win</span>
+            <span class="text-[10px] opacity-40 cursor-help" title="Payout if outcome is correct = shares × $1 − cost">ⓘ</span>
+          </div>
+          <span class="mono font-bold flex items-center gap-1" style="color:var(--green)">
+            💵 <span x-text="'$' + toWin.toFixed(2)"></span>
+          </span>
+        </div>
+      </div>
+
+      <!-- Submit Button -->
+      <button @click="submitTrade()"
+              :disabled="submitting || shares <= 0 || limitPrice <= 0"
+              class="w-full py-3 rounded-xl font-bold text-sm transition-all"
+              :style="submitting || shares <= 0 || limitPrice <= 0
+                ? 'background:var(--bg-panel);color:var(--text-muted);cursor:not-allowed'
+                : (side === 'buy'
+                  ? 'background:linear-gradient(135deg,#059669,#10B981);color:white;box-shadow:0 2px 12px rgba(16,185,129,0.3)'
+                  : 'background:linear-gradient(135deg,#DC2626,#EF4444);color:white;box-shadow:0 2px 12px rgba(239,68,68,0.3)')">
+        <span x-show="!submitting" x-text="side === 'buy' ? 'Place Buy Order' : 'Place Sell Order'"></span>
+        <span x-show="submitting" class="flex items-center justify-center gap-2">
+          <svg class="w-4 h-4 animate-spin" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" fill="none"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+          Submitting...
+        </span>
+      </button>
+
+      <!-- Trade Result -->
+      <div x-show="tradeResult" x-transition class="rounded-lg p-3 text-xs mono" style="background:var(--bg-panel);max-height:160px;overflow:auto">
+        <div class="flex items-center gap-2 mb-2">
+          <template x-if="tradeResult && tradeResult.status === 'filled'">
+            <span class="px-2 py-0.5 rounded-full text-[10px] font-bold" style="background:rgba(34,197,94,0.2);color:#86efac">FILLED</span>
+          </template>
+          <template x-if="tradeResult && tradeResult.status === 'dry_run'">
+            <span class="px-2 py-0.5 rounded-full text-[10px] font-bold" style="background:rgba(234,179,8,0.2);color:#FDE047">DRY RUN</span>
+          </template>
+          <template x-if="tradeResult && tradeResult.status === 'gate_blocked'">
+            <span class="px-2 py-0.5 rounded-full text-[10px] font-bold" style="background:rgba(239,68,68,0.2);color:#fca5a5">GATE BLOCKED</span>
+          </template>
+          <template x-if="tradeResult && !['filled','dry_run','gate_blocked'].includes(tradeResult.status)">
+            <span class="px-2 py-0.5 rounded-full text-[10px] font-bold" style="background:rgba(239,68,68,0.2);color:#fca5a5" x-text="(tradeResult.status || 'ERROR').toUpperCase()"></span>
+          </template>
+        </div>
+        <pre class="text-[10px] whitespace-pre-wrap" style="color:var(--text-muted)" x-text="JSON.stringify(tradeResult, null, 2)"></pre>
+      </div>
+
     </div>
-    <pre id="trade-result" class="text-xs p-2 rounded hidden"
-      style="background:var(--bg-panel);max-height:120px;overflow:auto"></pre>
   </div>
 </div>
+{% endif %}
 {% endblock %}
 
 {% block scripts %}
@@ -975,6 +1142,7 @@ document.addEventListener('DOMContentLoaded', function() {
   }
 });
 
+// ── Trading Panel Alpine Component ──────────────────────────────────────────
 async function apiCall(path, method='POST', body=null) {
   const tok = getAdminToken() || promptForToken();
   if (!tok) return null;
@@ -984,22 +1152,171 @@ async function apiCall(path, method='POST', body=null) {
   });
   return res.json();
 }
-function showTradeModal() { document.getElementById('trade-modal').classList.remove('hidden'); }
-function hideTradeModal() { document.getElementById('trade-modal').classList.add('hidden'); }
-function quickTrade(city_slug, bucket_idx) {
-  document.getElementById('trade-bucket-idx').value = bucket_idx;
-  document.getElementById('modal-label').textContent = `Bucket ${bucket_idx}`;
-  showTradeModal();
+
+function tradingPanel() {
+  return {
+    // State
+    selectedBucket: null,
+    selectedBucketIdx: null,
+    side: 'buy',
+    outcome: 'yes',
+    limitPrice: 0.50,
+    shares: 0,
+    dryRun: true,
+    submitting: false,
+    tradeResult: null,
+    balance: null,
+
+    // Orderbook state
+    obLoaded: false,
+    obBid: null,
+    obAsk: null,
+    obSpread: null,
+    obAskDepth: 0,
+    obBidDepth: 0,
+
+    // Computed from bucket data
+    yesPrice: null,
+    noPrice: null,
+
+    get questionText() {
+      if (!this.selectedBucket) return '';
+      const b = this.selectedBucket;
+      const city = '{{ city.display_name }}';
+      const date = '{{ today_et }}';
+      if (b.low_f !== null && b.high_f !== null) {
+        return `Will the highest temperature in ${city} be between ${b.low_f}–${b.high_f}°{{ city.unit|default('F') }} on ${date}?`;
+      }
+      if (b.low_f !== null) return `Will the highest temperature in ${city} be ≥${b.low_f}°{{ city.unit|default('F') }} on ${date}?`;
+      if (b.high_f !== null) return `Will the highest temperature in ${city} be <${b.high_f}°{{ city.unit|default('F') }} on ${date}?`;
+      return `Temperature market for ${city} on ${date}`;
+    },
+
+    get totalCost() {
+      return (this.shares || 0) * this.limitPrice;
+    },
+
+    get toWin() {
+      if (this.shares <= 0 || this.limitPrice <= 0) return 0;
+      return this.shares * (1 - this.limitPrice);
+    },
+
+    async selectBucket(bucketIdx) {
+      const buckets = {{ buckets|tojson }};
+      const b = buckets.find(x => x.bucket_idx === bucketIdx);
+      if (!b) return;
+
+      this.selectedBucket = b;
+      this.selectedBucketIdx = bucketIdx;
+      this.tradeResult = null;
+      this.shares = 0;
+      this.outcome = 'yes';
+      this.side = 'buy';
+
+      // Set initial prices from stored data
+      this.yesPrice = b.yes_ask || b.mkt_prob || null;
+      this.noPrice = this.yesPrice ? (1 - this.yesPrice) : null;
+      this.limitPrice = this.yesPrice || 0.50;
+
+      // Scroll to panel
+      this.$nextTick(() => {
+        document.getElementById('trading-panel-section')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      });
+
+      // Fetch live orderbook
+      await this.fetchOrderbook(bucketIdx);
+    },
+
+    async fetchOrderbook(bucketIdx) {
+      this.obLoaded = false;
+      try {
+        const resp = await fetch(`/api/orderbook/{{ city.city_slug }}/${bucketIdx}`);
+        if (!resp.ok) return;
+        const data = await resp.json();
+
+        this.obBid = data.yes_bid;
+        this.obAsk = data.yes_ask;
+        this.obSpread = data.spread;
+        this.obAskDepth = data.yes_ask_depth || 0;
+        this.obBidDepth = data.yes_bid_depth || 0;
+        this.balance = data.balance;
+
+        // Update prices with live data
+        if (data.yes_ask) {
+          this.yesPrice = data.yes_ask;
+          this.noPrice = 1 - data.yes_ask;
+          if (this.outcome === 'yes') this.limitPrice = data.yes_ask;
+          else this.limitPrice = data.yes_bid || (1 - data.yes_ask);
+        }
+
+        this.obLoaded = true;
+      } catch (e) {
+        console.error('Failed to fetch orderbook:', e);
+      }
+    },
+
+    adjustPrice(delta) {
+      this.limitPrice = Math.max(0.01, Math.min(0.99, +(this.limitPrice + delta).toFixed(2)));
+    },
+
+    setMaxShares() {
+      if (this.limitPrice <= 0) return;
+      let max = 9999;
+      if (this.balance !== null && this.balance > 0) {
+        max = Math.min(max, Math.floor(this.balance / this.limitPrice));
+      }
+      if (this.side === 'buy' && this.obAskDepth > 0) {
+        max = Math.min(max, Math.floor(this.obAskDepth));
+      }
+      this.shares = Math.max(0, max);
+    },
+
+    closeTrade() {
+      this.selectedBucket = null;
+      this.selectedBucketIdx = null;
+      this.tradeResult = null;
+    },
+
+    async submitTrade() {
+      if (this.submitting || this.shares <= 0 || this.limitPrice <= 0) return;
+      this.submitting = true;
+      this.tradeResult = null;
+
+      try {
+        const result = await apiCall('/trade', 'POST', {
+          city_slug: '{{ city.city_slug }}',
+          bucket_idx: this.selectedBucketIdx,
+          side: this.side === 'buy' ? 'buy_yes' : 'buy_no',
+          limit_price: this.limitPrice,
+          dry_run: this.dryRun,
+        });
+        this.tradeResult = result;
+
+        // Refresh balance after trade
+        if (result && result.status === 'filled') {
+          await this.fetchOrderbook(this.selectedBucketIdx);
+        }
+      } catch (e) {
+        this.tradeResult = { status: 'error', error: e.message };
+      } finally {
+        this.submitting = false;
+      }
+    },
+  };
 }
-async function submitTrade() {
-  const city_slug = document.getElementById('trade-city').value;
-  const bucket_idx = parseInt(document.getElementById('trade-bucket-idx').value);
-  const limit_price = parseFloat(document.getElementById('trade-price').value) || null;
-  const dry_run = document.getElementById('trade-dry-run').checked;
-  const result = await apiCall('/trade', 'POST', {city_slug, bucket_idx, side:'buy_yes', limit_price, dry_run});
-  const el = document.getElementById('trade-result');
-  el.textContent = JSON.stringify(result, null, 2);
-  el.classList.remove('hidden');
+
+// Global: open trading panel from bucket table ▶ button
+function quickTrade(city_slug, bucket_idx) {
+  const panel = document.querySelector('[x-data]');
+  if (panel && panel.__x) {
+    panel.__x.$data.selectBucket(bucket_idx);
+  } else {
+    // Alpine 3.x approach
+    const el = document.getElementById('trading-panel-section');
+    if (el && el._x_dataStack) {
+      el._x_dataStack[0].selectBucket(bucket_idx);
+    }
+  }
 }
 </script>
 <script>

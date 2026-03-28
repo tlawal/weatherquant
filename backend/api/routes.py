@@ -693,6 +693,124 @@ async def disable_arming(request: Request, actor: str = Depends(require_admin)):
     return {"ok": True, "message": message, "orders_cancelled": cancelled}
 
 
+# ─── Wallet Balance ──────────────────────────────────────────────────────────
+
+@router.get("/api/balance")
+async def get_wallet_balance():
+    """Return USDC balance and portfolio exposure for header display."""
+    from backend.ingestion.polymarket_clob import get_clob
+
+    clob = get_clob()
+    balance = None
+    if clob and clob.can_trade:
+        balance = await clob.get_balance()
+
+    async with get_session() as sess:
+        positions = await get_all_positions(sess)
+
+    open_exposure = sum(
+        (p.net_qty * p.avg_cost) for p in positions if p.net_qty > 0
+    )
+    unrealized_pnl = sum(p.unrealized_pnl for p in positions)
+    open_count = len([p for p in positions if p.net_qty > 0])
+
+    return {
+        "balance": round(balance, 2) if balance is not None else None,
+        "open_exposure": round(open_exposure, 4),
+        "unrealized_pnl": round(unrealized_pnl, 4),
+        "open_positions": open_count,
+        "portfolio_value": round((balance or 0) + open_exposure, 2),
+    }
+
+
+# ─── Live Orderbook ──────────────────────────────────────────────────────────
+
+@router.get("/api/orderbook/{city_slug}/{bucket_idx}")
+async def get_orderbook(city_slug: str, bucket_idx: int):
+    """Live orderbook + balance for the trading panel."""
+    from backend.ingestion.polymarket_clob import get_clob
+
+    async with get_session() as sess:
+        city = await _get_city_or_404(sess, city_slug)
+        today_city = city_local_date(city)
+        event = await get_event(sess, city.id, today_city)
+        if not event:
+            raise HTTPException(status_code=404, detail="No event today for this city")
+        buckets = await get_buckets_for_event(sess, event.id)
+
+    bucket = next((b for b in buckets if b.bucket_idx == bucket_idx), None)
+    if not bucket:
+        raise HTTPException(status_code=404, detail=f"Bucket {bucket_idx} not found")
+    if not bucket.yes_token_id:
+        return {"error": "No token ID for this bucket", "bids": [], "asks": []}
+
+    clob = get_clob()
+    raw_book = None
+    balance = None
+    if clob:
+        raw_book = await clob.get_order_book(bucket.yes_token_id)
+        if clob.can_trade:
+            balance = await clob.get_balance()
+
+    bids = []
+    asks = []
+    yes_bid = None
+    yes_ask = None
+    yes_bid_depth = 0.0
+    yes_ask_depth = 0.0
+
+    if raw_book:
+        raw_bids = raw_book.get("bids") or []
+        raw_asks = raw_book.get("asks") or []
+
+        for b in raw_bids:
+            price = float(b.get("price", 0))
+            size = float(b.get("size", 0))
+            if price > 0:
+                bids.append({"price": price, "size": size})
+        for a in raw_asks:
+            price = float(a.get("price", 0))
+            size = float(a.get("size", 0))
+            if price > 0:
+                asks.append({"price": price, "size": size})
+
+        bids.sort(key=lambda x: x["price"], reverse=True)
+        asks.sort(key=lambda x: x["price"])
+
+        if bids:
+            yes_bid = bids[0]["price"]
+            yes_bid_depth = sum(b["size"] for b in bids if b["price"] >= yes_bid)
+        if asks:
+            yes_ask = asks[0]["price"]
+            yes_ask_depth = sum(a["size"] for a in asks if a["price"] <= yes_ask)
+
+    spread = round(yes_ask - yes_bid, 4) if (yes_ask and yes_bid) else None
+    yes_mid = round((yes_ask + yes_bid) / 2, 4) if (yes_ask and yes_bid) else None
+
+    # Also fetch latest stored signal for model info
+    async with get_session() as sess:
+        sig = await get_latest_market_snapshot(sess, bucket.id)
+
+    return {
+        "bucket_idx": bucket_idx,
+        "label": bucket.label,
+        "low_f": bucket.low_f,
+        "high_f": bucket.high_f,
+        "yes_token_id": bucket.yes_token_id,
+        "yes_bid": yes_bid,
+        "yes_ask": yes_ask,
+        "yes_mid": yes_mid,
+        "spread": spread,
+        "yes_bid_depth": round(yes_bid_depth, 2),
+        "yes_ask_depth": round(yes_ask_depth, 2),
+        "bids": bids[:10],
+        "asks": asks[:10],
+        "balance": round(balance, 2) if balance is not None else None,
+        "stored_ask": sig.yes_ask if sig else None,
+        "stored_bid": sig.yes_bid if sig else None,
+    }
+
+
 # ─── Manual Trade ─────────────────────────────────────────────────────────────
 
 class ManualTradeRequest(BaseModel):

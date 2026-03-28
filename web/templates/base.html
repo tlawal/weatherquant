@@ -125,8 +125,30 @@
         </nav>
       </div>
 
-      <!-- Right: ET clock + arming badge -->
+      <!-- Right: Balance + ET clock + arming badge -->
       <div class="flex items-center gap-3">
+        <!-- Wallet Balance -->
+        <div class="hidden md:flex items-center gap-3 px-3 py-1 rounded-lg" style="background:var(--bg-panel)"
+             x-data="walletBalance()" x-init="fetchBalance()">
+          <div class="flex items-center gap-1.5">
+            <span class="text-[10px] uppercase tracking-widest font-bold" style="color:var(--text-muted)">Cash</span>
+            <span class="mono text-sm font-semibold" style="color:var(--cyan)"
+                  x-text="balance !== null ? '$' + balance.toFixed(2) : '—'"></span>
+          </div>
+          <div class="w-px h-4" style="background:var(--border)"></div>
+          <div class="flex items-center gap-1.5">
+            <span class="text-[10px] uppercase tracking-widest font-bold" style="color:var(--text-muted)">Exposure</span>
+            <span class="mono text-sm font-medium"
+                  :style="exposure > 0 ? 'color:var(--yellow)' : 'color:var(--text-muted)'"
+                  x-text="'$' + exposure.toFixed(2)"></span>
+          </div>
+          <div class="w-px h-4" style="background:var(--border)"></div>
+          <div class="flex items-center gap-1.5">
+            <span class="text-[10px] uppercase tracking-widest font-bold" style="color:var(--text-muted)">Total</span>
+            <span class="mono text-sm font-bold" style="color:var(--green)"
+                  x-text="'$' + portfolio.toFixed(2)"></span>
+          </div>
+        </div>
         <span id="et-clock" class="mono text-sm" style="color:var(--text-muted)">-- ET</span>
         <div id="arming-badge" class="text-xs px-3 py-1 rounded font-semibold
           {% if arming_state == 'ARMED' %}badge-armed glow-red
@@ -186,6 +208,28 @@
       const t = prompt('Enter Admin Token:');
       if (t) sessionStorage.setItem('adminToken', t);
       return t;
+    }
+
+    // Wallet balance component for header
+    function walletBalance() {
+      return {
+        balance: null,
+        exposure: 0,
+        portfolio: 0,
+        async fetchBalance() {
+          try {
+            const res = await fetch('/api/balance');
+            if (res.ok) {
+              const data = await res.json();
+              this.balance = data.balance;
+              this.exposure = data.open_exposure || 0;
+              this.portfolio = data.portfolio_value || 0;
+            }
+          } catch (e) { /* silent */ }
+          // Auto-refresh every 60s
+          setTimeout(() => this.fetchBalance(), 60000);
+        }
+      };
     }
   </script>
 

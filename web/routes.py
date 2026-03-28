@@ -219,14 +219,18 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
 
                 buckets_with_signals.append({
                     "bucket_idx": bucket.bucket_idx,
+                    "bucket_id": bucket.id,
                     "label": bucket.label or f"Bucket {bucket.bucket_idx}",
                     "low_f": bucket.low_f,
                     "high_f": bucket.high_f,
+                    "yes_token_id": bucket.yes_token_id,
                     "model_prob": round(model_prob, 4) if model_prob is not None else None,
                     "mkt_prob": mkt.yes_mid if mkt else None,
                     "yes_bid": mkt.yes_bid if mkt else None,
                     "yes_ask": mkt.yes_ask if mkt else None,
                     "spread": mkt.spread if mkt else None,
+                    "ask_depth": mkt.yes_ask_depth if mkt else None,
+                    "bid_depth": mkt.yes_bid_depth if mkt else None,
                     "true_edge": sig.true_edge if sig else None,
                     "ev": ev,
                     "kelly_f": kelly_f,
