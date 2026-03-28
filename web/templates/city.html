@@ -491,7 +491,7 @@
 <!-- ── TEMPERATURE TIMELINE CHART ────────────────────────────────────────── -->
 {% if obs_table %}
 <div class="card p-5 mb-6">
-  <h2 class="font-semibold text-sm mb-4" style="color:var(--text-muted)">Temperature Timeline (10 AM onward)</h2>
+  <h2 class="font-semibold text-sm mb-4" style="color:var(--text-muted)">Temperature Timeline (6 AM onward)</h2>
   <div id="temp-timeline-chart" class="w-full" style="height:320px"></div>
 </div>
 {% endif %}
@@ -1048,7 +1048,7 @@ document.addEventListener('DOMContentLoaded', function() {
     Plotly.newPlot('reliability-plot', relData, relLayout, {responsive: true, displayModeBar: false});
   }
 
-  // ── Temperature Timeline Chart (10 AM onward) ──────────────────────────
+  // ── Temperature Timeline Chart (6 AM onward) ───────────────────────────
   const obsTableData = {{ obs_table_json|safe if obs_table_json else '[]' }};
   const stationPredData = {{ station_predictions_json|safe if station_predictions_json else '[]' }};
   const timelineEl = document.getElementById('temp-timeline-chart');
@@ -1062,10 +1062,10 @@ document.addEventListener('DOMContentLoaded', function() {
     const allTimes = obsChron.map(o => o.time_sort);
     const allTemps = obsChron.map(o => o.temp_f);
 
-    // Filter to 10 AM+ by parsing the ISO time_sort
+    // Filter to 6 AM+ by parsing the ISO time_sort
     const filteredObs = obsChron.filter(o => {
       const d = new Date(o.time_sort);
-      return d.getHours() >= 10;
+      return d.getHours() >= 6;
     });
 
     if (filteredObs.length) {

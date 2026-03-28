@@ -292,7 +292,7 @@ def compute_station_predictions(
     observation_minutes: list[int],
     now_local: datetime,
     todays_obs: list[dict],
-    start_hour: int = 10,
+    start_hour: int = 6,
     end_hour: int = 20,       # up to 7:52 PM (exclusive of 20:xx)
     dt_key: str = "observed_at",
     temp_key: str = "temp_f",
