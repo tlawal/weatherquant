@@ -713,7 +713,11 @@
               {% if b.actionable %}
               <button onclick="quickTrade('{{ city.city_slug }}', {{ b.bucket_idx }})"
                 class="px-2 py-0.5 rounded text-xs font-semibold"
-                style="background:#065F46;border:1px solid #22C55E;color:#86EFAC">▶</button>
+                style="background:#065F46;border:1px solid #22C55E;color:#86EFAC" title="Strong edge — trade">▶</button>
+              {% elif b.mkt_prob is not none %}
+              <button onclick="quickTrade('{{ city.city_slug }}', {{ b.bucket_idx }})"
+                class="px-2 py-0.5 rounded text-xs font-semibold hover:opacity-80 transition-opacity"
+                style="background:var(--bg-panel);border:1px solid var(--border);color:var(--text-muted)" title="Trade this bucket">▶</button>
               {% endif %}
             </td>
           </tr>
