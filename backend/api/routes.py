@@ -866,6 +866,7 @@ async def manual_trade(
     signal = BucketSignal(
         city_slug=body.city_slug,
         city_display=city.display_name,
+        unit=getattr(city, "unit", "F"),
         event_id=event.id,
         bucket_id=bucket.id,
         bucket_idx=body.bucket_idx,
