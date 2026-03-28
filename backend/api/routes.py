@@ -894,7 +894,7 @@ async def manual_trade(
         if balance:
             bankroll = min(balance, Config.BANKROLL_CAP)
 
-    result = await execute_signal(signal, bankroll=bankroll, actor=actor, dry_run=body.dry_run, manual=True)
+    result = await execute_signal(signal, bankroll=bankroll, actor=actor, dry_run=body.dry_run, manual=True, qty_override=body.qty)
     return result
 
 

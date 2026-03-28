@@ -48,6 +48,7 @@ async def execute_signal(
     actor: str = "auto_trader",
     dry_run: bool = False,
     manual: bool = False,
+    qty_override: float | None = None,
 ) -> dict:
     """
     Attempt to execute a trade for the given signal.
@@ -119,46 +120,53 @@ async def execute_signal(
         return result
 
     # ── Compute position size ─────────────────────────────────────────────────
-    async with get_session() as sess:
-        all_positions = await get_all_positions(sess)
-
-    open_exposure = sum(
-        (p.net_qty * p.avg_cost) for p in all_positions if p.net_qty > 0
-    )
-
     limit_price = signal.yes_ask or signal.yes_mid or 0.0
     if limit_price <= 0:
         result["status"] = "error"
         result["error"] = "no valid ask price"
         return result
 
-    sizing = compute_size(
-        model_prob=signal.model_prob,
-        limit_price=limit_price,
-        bankroll=bankroll,
-        open_exposure=open_exposure,
-        ask_depth=signal.yes_ask_depth,
-    )
-
-    if sizing.rejected:
-        result["status"] = "sizing_rejected"
-        result["error"] = sizing.reject_reason
+    if qty_override and qty_override > 0:
+        # Manual trade — user specified their own quantity, skip auto-sizing
+        shares = qty_override
+        cost = round(shares * limit_price, 2)
+    else:
+        # Auto-size via Kelly criterion
         async with get_session() as sess:
-            await append_audit(
-                sess,
-                actor=actor,
-                action="trade_sizing_rejected",
-                payload={**result, "sizing": {
-                    "kelly_f": sizing.kelly_f,
-                    "kelly_size": sizing.kelly_size,
-                    "reject_reason": sizing.reject_reason,
-                }},
-                ok=False,
-            )
-        return result
+            all_positions = await get_all_positions(sess)
 
-    shares = sizing.size
-    cost = round(shares * limit_price, 2)
+        open_exposure = sum(
+            (p.net_qty * p.avg_cost) for p in all_positions if p.net_qty > 0
+        )
+
+        sizing = compute_size(
+            model_prob=signal.model_prob,
+            limit_price=limit_price,
+            bankroll=bankroll,
+            open_exposure=open_exposure,
+            ask_depth=signal.yes_ask_depth,
+        )
+
+        if sizing.rejected:
+            result["status"] = "sizing_rejected"
+            result["error"] = sizing.reject_reason
+            async with get_session() as sess:
+                await append_audit(
+                    sess,
+                    actor=actor,
+                    action="trade_sizing_rejected",
+                    payload={**result, "sizing": {
+                        "kelly_f": sizing.kelly_f,
+                        "kelly_size": sizing.kelly_size,
+                        "reject_reason": sizing.reject_reason,
+                    }},
+                    ok=False,
+                )
+            return result
+
+        shares = sizing.size
+        cost = round(shares * limit_price, 2)
+
     result["shares"] = shares
     result["limit_price"] = limit_price
     result["estimated_cost"] = cost

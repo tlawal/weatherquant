@@ -1304,6 +1304,7 @@ function tradingPanel() {
           city_slug: '{{ city.city_slug }}',
           bucket_idx: this.selectedBucketIdx,
           side: this.side === 'buy' ? 'buy_yes' : 'buy_no',
+          qty: this.shares,
           dry_run: this.dryRun,
         };
         // Only send limit_price for limit orders; market orders use best available
