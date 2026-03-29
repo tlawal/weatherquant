@@ -282,73 +282,79 @@ class CLOBClient:
 
         log.warning("clob: USDC allowance is 0 — sending on-chain approve txs")
 
-        chain_id = Config.CHAIN_ID
-        cfg = get_contract_config(chain_id, neg_risk=False)
-        cfg_neg = get_contract_config(chain_id, neg_risk=True)
-        usdc_addr = cfg.collateral
-        spenders = [cfg.exchange, cfg_neg.exchange]
-
-        from eth_account import Account
-        account = Account.from_key(Config.POLYMARKET_PRIVATE_KEY)
-        sender = account.address
-        max_uint256 = 2**256 - 1
-
-        # Get initial nonce
-        nonce_payload = {
-            "jsonrpc": "2.0", "id": 1, "method": "eth_getTransactionCount",
-            "params": [sender, "latest"],
-        }
-        gas_payload = {
-            "jsonrpc": "2.0", "id": 2, "method": "eth_gasPrice", "params": [],
-        }
-        async with self.session.post(POLYGON_RPC, json=nonce_payload) as r:
-            nonce_result = await r.json()
-        nonce = int(nonce_result["result"], 16)
-
-        async with self.session.post(POLYGON_RPC, json=gas_payload) as r:
-            gas_result = await r.json()
-        gas_price = int(gas_result["result"], 16)
-
-        # ERC20 approve(address,uint256) selector = 0x095ea7b3
-        for spender in spenders:
-            calldata = (
-                bytes.fromhex("095ea7b3")
-                + bytes.fromhex(spender[2:].lower().zfill(64))
-                + max_uint256.to_bytes(32, "big")
-            )
-            tx = {
-                "to": usdc_addr,
-                "value": 0,
-                "gas": 60_000,
-                "gasPrice": gas_price,
-                "nonce": nonce,
-                "chainId": chain_id,
-                "data": calldata,
-            }
-            signed = account.sign_transaction(tx)
-            send_payload = {
-                "jsonrpc": "2.0", "id": 3, "method": "eth_sendRawTransaction",
-                "params": [signed.raw_transaction.hex()],
-            }
-            async with self.session.post(POLYGON_RPC, json=send_payload) as r:
-                send_result = await r.json()
-
-            if "error" in send_result:
-                log.error("clob: approve tx failed for %s: %s", spender, send_result["error"])
-            else:
-                tx_hash = send_result.get("result")
-                log.info("clob: approve tx sent for %s: %s", spender, tx_hash)
-            nonce += 1
-
-        # Refresh CLOB server's cached allowance
         try:
+            chain_id = Config.CHAIN_ID
+            cfg = get_contract_config(chain_id, neg_risk=False)
+            cfg_neg = get_contract_config(chain_id, neg_risk=True)
+            usdc_addr = cfg.collateral
+            spenders = [cfg.exchange, cfg_neg.exchange]
+
+            from eth_account import Account
+            account = Account.from_key(Config.POLYMARKET_PRIVATE_KEY)
+            sender = account.address
+            max_uint256 = 2**256 - 1
+
+            # Get initial nonce
+            nonce_payload = {
+                "jsonrpc": "2.0", "id": 1, "method": "eth_getTransactionCount",
+                "params": [sender, "latest"],
+            }
+            gas_payload = {
+                "jsonrpc": "2.0", "id": 2, "method": "eth_gasPrice", "params": [],
+            }
+            async with self.session.post(POLYGON_RPC, json=nonce_payload) as r:
+                nonce_result = await r.json()
+            if "error" in nonce_result:
+                log.error("clob: approve RPC nonce error: %s", nonce_result["error"])
+                return
+            nonce = int(nonce_result["result"], 16)
+
+            async with self.session.post(POLYGON_RPC, json=gas_payload) as r:
+                gas_result = await r.json()
+            if "error" in gas_result:
+                log.error("clob: approve RPC gasPrice error: %s", gas_result["error"])
+                return
+            gas_price = int(gas_result["result"], 16)
+
+            # ERC20 approve(address,uint256) selector = 0x095ea7b3
+            for spender in spenders:
+                calldata = (
+                    bytes.fromhex("095ea7b3")
+                    + bytes.fromhex(spender[2:].lower().zfill(64))
+                    + max_uint256.to_bytes(32, "big")
+                )
+                tx = {
+                    "to": usdc_addr,
+                    "value": 0,
+                    "gas": 60_000,
+                    "gasPrice": gas_price,
+                    "nonce": nonce,
+                    "chainId": chain_id,
+                    "data": calldata,
+                }
+                signed = account.sign_transaction(tx)
+                send_payload = {
+                    "jsonrpc": "2.0", "id": 3, "method": "eth_sendRawTransaction",
+                    "params": [signed.raw_transaction.hex()],
+                }
+                async with self.session.post(POLYGON_RPC, json=send_payload) as r:
+                    send_result = await r.json()
+
+                if "error" in send_result:
+                    log.error("clob: approve tx failed for %s: %s", spender, send_result["error"])
+                else:
+                    tx_hash = send_result.get("result")
+                    log.info("clob: approve tx sent for %s: %s", spender, tx_hash)
+                nonce += 1
+
+            # Refresh CLOB server's cached allowance
             await asyncio.wait_for(
                 loop.run_in_executor(None, lambda: self._client.update_balance_allowance(params)),
                 timeout=8.0,
             )
             log.info("clob: allowance cache refreshed")
         except Exception as e:
-            log.warning("clob: allowance cache refresh failed (will sync eventually): %s", e)
+            log.warning("clob: on-chain approve failed (non-fatal, trading may still work): %s", e)
 
 
 async def fetch_clob_orderbooks(clob: CLOBClient) -> None:
