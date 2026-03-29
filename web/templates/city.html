@@ -4,11 +4,11 @@
 
 {% block content %}
 <!-- ── HEADER ROW ─────────────────────────────────────────────────────────── -->
-<div class="flex flex-wrap items-center justify-between gap-4 mb-6">
-  <div class="flex items-center gap-3">
+<div class="flex flex-wrap items-start justify-between gap-4 mb-6">
+  <div class="flex min-w-0 flex-wrap items-center gap-3">
     <a href="/" class="text-sm hover:underline" style="color:var(--text-muted)">← Signals</a>
     <span style="color:var(--text-muted)">/</span>
-    <h1 class="text-3xl font-bold tracking-tight">
+    <h1 class="min-w-0 break-words text-2xl font-bold tracking-tight sm:text-3xl">
       {{ city.display_name }}
       {% if not city.is_us %}
       <span class="ml-1 text-[10px] px-1.5 py-0.5 rounded uppercase tracking-widest align-middle" style="background:var(--bg-panel); color:var(--cyan)">Intl</span>
@@ -23,11 +23,11 @@
     {% endif %}
   </div>
 
-  <div class="flex items-center gap-4 ml-auto">
-    <div class="flex items-center gap-2">
+  <div class="flex w-full flex-col gap-3 sm:ml-auto sm:w-auto sm:flex-row sm:items-center sm:justify-end sm:gap-4">
+    <div class="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-2">
       <span class="text-[10px] uppercase tracking-widest font-bold" style="color:var(--text-muted)">Event Date</span>
       <select onchange="window.location.href='/city/{{ city.city_slug }}?date=' + this.value"
-              class="text-xs mono px-2 py-1 rounded bg-transparent border border-white/10 hover:border-cyan-500/50 outline-none transition-colors cursor-pointer">
+              class="w-full text-xs mono px-2 py-1 rounded bg-transparent border border-white/10 hover:border-cyan-500/50 outline-none transition-colors cursor-pointer sm:w-auto">
         {% for d in available_dates %}
         <option value="{{ d }}" {% if d == today_et %}selected{% endif %} style="background:var(--bg-card)">{{ d }}</option>
         {% endfor %}
@@ -39,7 +39,7 @@
     </div>
     {% if event and event.gamma_slug %}
     <a href="https://polymarket.com/event/{{ event.gamma_slug }}" target="_blank"
-       class="text-[10px] px-3 py-1.5 rounded-full font-bold tracking-widest transition-all hover:glow-cyan border"
+       class="inline-flex items-center justify-center text-[10px] px-3 py-1.5 rounded-full font-bold tracking-widest transition-all hover:glow-cyan border sm:w-auto"
        style="background:var(--bg-panel); border-color:var(--cyan); color:var(--cyan)">
       VIEW MARKET ↗
     </a>
@@ -48,7 +48,7 @@
 </div>
 
 <!-- ── TEMPERATURE SNAPSHOT ROW (4 key stats) ─────────────────────────────── -->
-<div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
 
   <!-- Current Temp -->
   <div class="card p-4 relative" x-data="currentTemp('{{ city.city_slug }}', '{{ city.unit|default('F') }}', {{ 'true' if city.is_us else 'false' }})">
@@ -65,7 +65,7 @@
          x-transition:enter="transition ease-out duration-100"
          x-transition:enter-start="opacity-0 scale-95"
          x-transition:enter-end="opacity-100 scale-100"
-         class="absolute right-4 top-10 w-80 p-3 rounded-xl shadow-2xl z-50 border text-[10px] normal-case tracking-tight font-medium"
+         class="absolute left-2 right-2 top-10 w-auto p-3 rounded-xl shadow-2xl z-50 border text-[10px] normal-case tracking-tight font-medium sm:left-auto sm:right-4 sm:w-80"
          style="background:var(--bg-card); border-color:var(--border);">
       <div class="font-bold mb-2 pb-1 border-b" style="color:var(--cyan); border-color:var(--border)">
         <span x-text="isUs ? 'METAR Observation' : 'Open-Meteo Current Weather'"></span>
@@ -154,7 +154,7 @@
          x-transition:enter="transition ease-out duration-100"
          x-transition:enter-start="opacity-0 scale-95"
          x-transition:enter-end="opacity-100 scale-100"
-         class="absolute right-4 top-10 w-80 p-3 rounded-xl shadow-2xl z-50 border text-[10px] normal-case tracking-tight font-medium"
+         class="absolute left-2 right-2 top-10 w-auto p-3 rounded-xl shadow-2xl z-50 border text-[10px] normal-case tracking-tight font-medium sm:left-auto sm:right-4 sm:w-80"
          style="background:var(--bg-card); border-color:var(--border);">
       <div class="font-bold mb-2 pb-1 border-b" style="color:var(--cyan); border-color:var(--border)">
         <span>Weather Underground History</span>
@@ -206,7 +206,7 @@
          x-transition:enter="transition ease-out duration-100"
          x-transition:enter-start="opacity-0 scale-95"
          x-transition:enter-end="opacity-100 scale-100"
-         class="absolute right-4 top-10 w-80 p-3 rounded-xl shadow-2xl z-50 border text-[10px] normal-case tracking-tight font-medium"
+         class="absolute left-2 right-2 top-10 w-auto p-3 rounded-xl shadow-2xl z-50 border text-[10px] normal-case tracking-tight font-medium sm:left-auto sm:right-4 sm:w-80"
          style="background:var(--bg-card); border-color:var(--border);">
       <div class="font-bold mb-2 pb-1 border-b" style="color:var(--cyan); border-color:var(--border)">
         <span>Distribution Model Mean</span>
@@ -253,7 +253,7 @@
         </span>
         <!-- Popover -->
         <div x-show="showMeta" x-cloak
-             x-transition:enter="transition ease-out duration-100" class="absolute left-0 top-6 w-64 p-3 rounded-xl shadow-2xl z-50 border font-medium normal-case flex flex-col items-start text-left"
+             x-transition:enter="transition ease-out duration-100" class="absolute left-0 right-0 top-6 w-auto p-3 rounded-xl shadow-2xl z-50 border font-medium normal-case flex flex-col items-start text-left sm:right-auto sm:w-64"
              style="background:var(--bg-panel); border-color:var(--border);">
              <div class="font-bold mb-1 pb-1 border-b w-full" style="color:var(--cyan); border-color:var(--border)">{{ forecasts.primary.source }} Forecast</div>
              <p class="opacity-80 mb-2 mt-1 italic text-[9px]">Baseline foundational forecast.</p>
@@ -274,7 +274,7 @@
         </span>
         <!-- Popover -->
         <div x-show="showMeta" x-cloak
-             x-transition:enter="transition ease-out duration-100" class="absolute left-0 top-6 w-64 p-3 rounded-xl shadow-2xl z-50 border font-medium normal-case flex flex-col items-start text-left"
+             x-transition:enter="transition ease-out duration-100" class="absolute left-0 right-0 top-6 w-auto p-3 rounded-xl shadow-2xl z-50 border font-medium normal-case flex flex-col items-start text-left sm:right-auto sm:w-64"
              style="background:var(--bg-panel); border-color:var(--border);">
              <div class="font-bold mb-1 pb-1 border-b w-full" style="color:var(--cyan); border-color:var(--border)">Weather Underground Daily</div>
              <p class="opacity-80 mb-2 mt-1 italic text-[9px]">The daily highest temperature prediction directly from WU's frontend.</p>
@@ -295,7 +295,7 @@
         </span>
         <!-- Popover -->
         <div x-show="showMeta" x-cloak
-             x-transition:enter="transition ease-out duration-100" class="absolute left-0 top-6 w-64 p-3 rounded-xl shadow-2xl z-50 border font-medium normal-case flex flex-col items-start text-left"
+             x-transition:enter="transition ease-out duration-100" class="absolute left-0 right-0 top-6 w-auto p-3 rounded-xl shadow-2xl z-50 border font-medium normal-case flex flex-col items-start text-left sm:right-auto sm:w-64"
              style="background:var(--bg-panel); border-color:var(--border);">
              <div class="font-bold mb-1 pb-1 border-b w-full" style="color:var(--cyan); border-color:var(--border)">Weather Underground Hourly Max</div>
              <p class="opacity-80 mb-2 mt-1 italic text-[9px]">The highest individual hour's projection from the WU 24-hour model. Crucial for afternoon temperature spikes.</p>
@@ -330,7 +330,7 @@
       <span class="text-[10px] px-2 py-0.5 rounded-full font-bold" style="background:rgba(239,68,68,0.15);color:#fca5a5">Unverified</span>
     {% endif %}
   </div>
-  <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-[11px]">
+  <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 text-[11px]">
     <div>
       <div style="color:var(--text-muted)" class="mb-1">Settlement Source</div>
       {% if settlement_source_verified %}
@@ -385,14 +385,14 @@
 <!-- ── STATION-TIME PREDICTIONS ────────────────────────────────────────────── -->
 {% if station_predictions %}
 <div class="card p-5 mb-6" x-data="{ showDetail: false }">
-  <div class="flex items-center justify-between mb-4">
+  <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-4">
     <div class="flex items-center gap-2">
       <h2 class="font-semibold text-sm">Station-Time Predictions</h2>
       <button @click="showDetail = !showDetail" @click.outside="showDetail = false"
               class="hover:text-cyan-400 opacity-50 hover:opacity-100 transition-all text-xs">ⓘ</button>
     </div>
     {% if adaptive_info %}
-    <div class="flex items-center gap-3 text-[10px]">
+    <div class="flex flex-wrap items-center gap-3 text-[10px]">
       {% if adaptive_info.composite_peak_timing %}
       <span class="px-2 py-0.5 rounded-full font-bold" style="background:rgba(234,179,8,0.15);color:#FBBF24">
         Est. Peak: {{ adaptive_info.composite_peak_timing }}
@@ -422,7 +422,7 @@
 
   <!-- Predictions table -->
   <div class="overflow-x-auto">
-    <table class="w-full text-xs">
+    <table class="w-full text-xs" style="min-width:32rem">
       <thead>
         <tr class="text-[10px] uppercase tracking-widest" style="color:var(--text-muted);border-bottom:1px solid var(--border)">
           <th class="px-3 py-2 text-left">Station Time</th>
@@ -466,7 +466,7 @@
     </table>
   </div>
   {% if adaptive_info %}
-  <div class="mt-3 pt-3 border-t grid grid-cols-2 md:grid-cols-4 gap-3 text-[10px]" style="border-color:var(--border)">
+  <div class="mt-3 pt-3 border-t grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 text-[10px]" style="border-color:var(--border)">
     <div>
       <span style="color:var(--text-muted)">Predicted High</span>
       <div class="mono font-bold" style="color:var(--cyan)">{{ adaptive_info.predicted_daily_high }}°{{ city.unit|default('F') }}{% if adaptive_info.predicted_high_time %} @ {{ adaptive_info.predicted_high_time }}{% endif %}</div>
@@ -507,7 +507,7 @@
     <span class="text-[10px] uppercase tracking-widest" style="color:var(--text-muted)">Click to expand</span>
   </summary>
   <div class="px-5 pb-4 overflow-x-auto" style="max-height:500px; overflow-y:auto">
-    <table class="w-full text-[11px]">
+    <table class="w-full text-[11px]" style="min-width:48rem">
       <thead class="sticky top-0" style="background:var(--bg-card)">
         <tr class="text-[10px] uppercase tracking-widest" style="color:var(--text-muted);border-bottom:1px solid var(--border)">
           <th class="px-2 py-2 text-left">Time</th>
@@ -559,7 +559,7 @@
       <div id="prob-chart" class="w-full" style="height:300px"></div>
 
       {% if model and model.inputs %}
-      <div class="mt-4 grid grid-cols-3 gap-3 text-xs border-t pt-4" style="border-color:var(--border)">
+      <div class="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs border-t pt-4" style="border-color:var(--border)">
         <div class="panel rounded p-2">
           <div style="color:var(--text-muted)">Projected High</div>
           <div class="mono font-semibold">
@@ -580,7 +580,7 @@
                x-transition:enter="transition ease-out duration-100"
                x-transition:enter-start="opacity-0 scale-95"
                x-transition:enter-end="opacity-100 scale-100"
-               class="absolute right-0 top-8 w-72 p-3 rounded-xl shadow-2xl z-50 border text-[10px] normal-case tracking-tight font-medium"
+               class="absolute left-2 right-2 top-8 w-auto p-3 rounded-xl shadow-2xl z-50 border text-[10px] normal-case tracking-tight font-medium sm:left-auto sm:right-0 sm:w-72"
                style="background:var(--bg-card); border-color:var(--border);">
             <div class="font-bold mb-2 pb-1 border-b" style="color:var(--cyan); border-color:var(--border)">
               METAR Observation Weight
@@ -614,7 +614,7 @@
           <div x-show="showTip" x-cloak
                @click.outside="showTip = false"
                x-transition:enter="transition ease-out duration-100" 
-               class="absolute left-0 top-7 w-72 p-4 rounded-xl shadow-2xl z-50 border text-[11px] leading-relaxed normal-case"
+               class="absolute left-0 right-0 top-7 w-auto p-4 rounded-xl shadow-2xl z-50 border text-[11px] leading-relaxed normal-case sm:right-auto sm:w-72"
                style="background:var(--bg-panel); border-color:var(--border);">
             <div class="font-bold mb-2 pb-1 border-b" style="color:var(--cyan); border-color:var(--border)">Model Truth Meter</div>
             <p class="opacity-90 mb-2">Measures if the model's predicted probabilities match historical reality.</p>
@@ -665,65 +665,67 @@
           {% endif %}
         </div>
       </div>
-      <table class="w-full text-xs">
-        <thead>
-          <tr class="text-[10px] uppercase tracking-widest" style="color:var(--text-muted);border-bottom:1px solid var(--border)">
-            <th class="px-3 py-2 text-left">Range</th>
-            <th class="px-2 py-2 text-right">Mkt</th>
-            <th class="px-2 py-2 text-right">Model</th>
-            <th class="px-2 py-2 text-right" style="color:var(--cyan)">EV</th>
-            <th class="px-2 py-2 text-right">Kelly</th>
-            <th class="px-2 py-2 text-center">▶</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for b in buckets %}
-          {% set surpassed = b.high_f is not none and obs_high_f is not none and obs_high_f >= b.high_f %}
-          <tr class="border-b hover:bg-white/5 transition-colors
-            {% if surpassed %}opacity-30 line-through{% elif b.actionable %}edge-hot{% elif b.ev and b.ev >= 0.10 %}edge-warm{% else %}edge-cold{% endif %}"
-            style="border-color:rgba(26,58,107,0.4)"
-            {% if surpassed %}title="Surpassed: observed high {{ '%.1f'|format(obs_high_f) }}° ≥ bucket ceiling {{ '%.1f'|format(b.high_f) }}°"{% endif %}>
-            <td class="px-3 py-2.5 mono font-medium text-xs">
-              {% if b.low_f is not none and b.high_f is not none %}
-                {{ b.low_f|int }}–{{ b.high_f|int }}°
-              {% elif b.low_f is not none %}≥{{ b.low_f|int }}°
-              {% elif b.high_f is not none %}&lt;{{ b.high_f|int }}°
-              {% else %}{{ b.label }}{% endif %}
-            </td>
-            <td class="px-2 py-2.5 text-right mono" style="color:var(--text-muted)">
-              {% if b.mkt_prob is not none %}{{ "%.1f"|format(b.mkt_prob * 100) }}%{% else %}—{% endif %}
-            </td>
-            <td class="px-2 py-2.5 text-right mono font-medium text-white">
-              {% if b.model_prob is not none %}{{ "%.1f"|format(b.model_prob * 100) }}%{% else %}—{% endif %}
-            </td>
-            <td class="px-2 py-2.5 text-right mono font-bold">
-              {% if b.ev is not none %}
-                {% if b.ev >= 0.20 %}<span class="text-green-400">+{{ "%.2f"|format(b.ev) }}</span>
-                {% elif b.ev >= 0.10 %}<span class="text-yellow-400">+{{ "%.2f"|format(b.ev) }}</span>
-                {% elif b.ev > 0 %}<span class="text-yellow-600">+{{ "%.2f"|format(b.ev) }}</span>
-                {% else %}<span style="color:var(--text-muted)">{{ "%.2f"|format(b.ev) }}</span>{% endif %}
-              {% else %}—{% endif %}
-            </td>
-            <td class="px-2 py-2.5 text-right mono">
-              {% if b.kelly_f is not none and b.kelly_f > 0 %}
-                <span class="text-cyan-400 font-bold">{{ "%.1f"|format(b.kelly_f * 100) }}%</span>
-              {% else %}—{% endif %}
-            </td>
-            <td class="px-2 py-2.5 text-center">
-              {% if b.actionable %}
-              <button onclick="quickTrade('{{ city.city_slug }}', {{ b.bucket_idx }})"
-                class="px-2 py-0.5 rounded text-xs font-semibold"
-                style="background:#065F46;border:1px solid #22C55E;color:#86EFAC" title="Strong edge — trade">▶</button>
-              {% elif b.mkt_prob is not none %}
-              <button onclick="quickTrade('{{ city.city_slug }}', {{ b.bucket_idx }})"
-                class="px-2 py-0.5 rounded text-xs font-semibold hover:opacity-80 transition-opacity"
-                style="background:var(--bg-panel);border:1px solid var(--border);color:var(--text-muted)" title="Trade this bucket">▶</button>
-              {% endif %}
-            </td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
+      <div class="overflow-x-auto">
+        <table class="w-full text-xs" style="min-width:32rem">
+          <thead>
+            <tr class="text-[10px] uppercase tracking-widest" style="color:var(--text-muted);border-bottom:1px solid var(--border)">
+              <th class="px-3 py-2 text-left">Range</th>
+              <th class="px-2 py-2 text-right">Mkt</th>
+              <th class="px-2 py-2 text-right">Model</th>
+              <th class="px-2 py-2 text-right" style="color:var(--cyan)">EV</th>
+              <th class="px-2 py-2 text-right">Kelly</th>
+              <th class="px-2 py-2 text-center">▶</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for b in buckets %}
+            {% set surpassed = b.high_f is not none and obs_high_f is not none and obs_high_f >= b.high_f %}
+            <tr class="border-b hover:bg-white/5 transition-colors
+              {% if surpassed %}opacity-30 line-through{% elif b.actionable %}edge-hot{% elif b.ev and b.ev >= 0.10 %}edge-warm{% else %}edge-cold{% endif %}"
+              style="border-color:rgba(26,58,107,0.4)"
+              {% if surpassed %}title="Surpassed: observed high {{ '%.1f'|format(obs_high_f) }}° ≥ bucket ceiling {{ '%.1f'|format(b.high_f) }}°"{% endif %}>
+              <td class="px-3 py-2.5 mono font-medium text-xs">
+                {% if b.low_f is not none and b.high_f is not none %}
+                  {{ b.low_f|int }}–{{ b.high_f|int }}°
+                {% elif b.low_f is not none %}≥{{ b.low_f|int }}°
+                {% elif b.high_f is not none %}&lt;{{ b.high_f|int }}°
+                {% else %}{{ b.label }}{% endif %}
+              </td>
+              <td class="px-2 py-2.5 text-right mono" style="color:var(--text-muted)">
+                {% if b.mkt_prob is not none %}{{ "%.1f"|format(b.mkt_prob * 100) }}%{% else %}—{% endif %}
+              </td>
+              <td class="px-2 py-2.5 text-right mono font-medium text-white">
+                {% if b.model_prob is not none %}{{ "%.1f"|format(b.model_prob * 100) }}%{% else %}—{% endif %}
+              </td>
+              <td class="px-2 py-2.5 text-right mono font-bold">
+                {% if b.ev is not none %}
+                  {% if b.ev >= 0.20 %}<span class="text-green-400">+{{ "%.2f"|format(b.ev) }}</span>
+                  {% elif b.ev >= 0.10 %}<span class="text-yellow-400">+{{ "%.2f"|format(b.ev) }}</span>
+                  {% elif b.ev > 0 %}<span class="text-yellow-600">+{{ "%.2f"|format(b.ev) }}</span>
+                  {% else %}<span style="color:var(--text-muted)">{{ "%.2f"|format(b.ev) }}</span>{% endif %}
+                {% else %}—{% endif %}
+              </td>
+              <td class="px-2 py-2.5 text-right mono">
+                {% if b.kelly_f is not none and b.kelly_f > 0 %}
+                  <span class="text-cyan-400 font-bold">{{ "%.1f"|format(b.kelly_f * 100) }}%</span>
+                {% else %}—{% endif %}
+              </td>
+              <td class="px-2 py-2.5 text-center">
+                {% if b.actionable %}
+                <button onclick="quickTrade('{{ city.city_slug }}', {{ b.bucket_idx }})"
+                  class="px-2 py-0.5 rounded text-xs font-semibold"
+                  style="background:#065F46;border:1px solid #22C55E;color:#86EFAC" title="Strong edge — trade">▶</button>
+                {% elif b.mkt_prob is not none %}
+                <button onclick="quickTrade('{{ city.city_slug }}', {{ b.bucket_idx }})"
+                  class="px-2 py-0.5 rounded text-xs font-semibold hover:opacity-80 transition-opacity"
+                  style="background:var(--bg-panel);border:1px solid var(--border);color:var(--text-muted)" title="Trade this bucket">▶</button>
+                {% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
     </div>
 
     <!-- City Meta Card -->

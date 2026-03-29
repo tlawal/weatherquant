@@ -75,12 +75,15 @@ class CLOBClient:
                 self._client.set_api_creds(creds)
                 self.can_trade = True
                 log.info("clob: credentials derived successfully")
-                await self.ensure_allowance()
             except Exception as e:
                 log.error("clob: credential derivation failed: %s", e)
                 self.can_trade = False
         else:
             log.warning("clob: POLYMARKET_PRIVATE_KEY not set — read-only mode")
+
+        # Ensure USDC allowance after credentials are ready (non-fatal)
+        if self.can_trade:
+            await self.ensure_allowance()
 
     async def close(self) -> None:
         if self._session:
