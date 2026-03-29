@@ -28,6 +28,7 @@ log = logging.getLogger(__name__)
 
 CLOB_HOST = Config.POLYMARKET_HOST
 GAMMA_API = "https://gamma-api.polymarket.com"
+POLYGON_RPC = "https://polygon-rpc.com"
 _TIMEOUT = aiohttp.ClientTimeout(total=10)
 _HEADERS = {"User-Agent": "WeatherQuant/1.0 (contact@weatherquant.local)"}
 
@@ -74,6 +75,7 @@ class CLOBClient:
                 self._client.set_api_creds(creds)
                 self.can_trade = True
                 log.info("clob: credentials derived successfully")
+                await self.ensure_allowance()
             except Exception as e:
                 log.error("clob: credential derivation failed: %s", e)
                 self.can_trade = False
@@ -244,6 +246,106 @@ class CLOBClient:
         except Exception as e:
             log.warning("clob: get_balance failed: %s", e)
             return None
+
+    async def ensure_allowance(self) -> None:
+        """Approve USDC spending for both Polymarket exchange contracts if allowance is 0."""
+        if not self.can_trade:
+            return
+
+        from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+        from py_clob_client.config import get_contract_config
+
+        loop = asyncio.get_event_loop()
+        params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+        try:
+            result = await asyncio.wait_for(
+                loop.run_in_executor(None, lambda: self._client.get_balance_allowance(params)),
+                timeout=8.0,
+            )
+        except Exception as e:
+            log.warning("clob: allowance check failed: %s", e)
+            return
+
+        allowance = 0
+        if isinstance(result, dict):
+            try:
+                allowance = int(result.get("allowance", 0))
+            except (ValueError, TypeError):
+                pass
+
+        if allowance > 0:
+            log.info("clob: USDC allowance already set (%d)", allowance)
+            return
+
+        log.warning("clob: USDC allowance is 0 — sending on-chain approve txs")
+
+        chain_id = Config.CHAIN_ID
+        cfg = get_contract_config(chain_id, neg_risk=False)
+        cfg_neg = get_contract_config(chain_id, neg_risk=True)
+        usdc_addr = cfg.collateral
+        spenders = [cfg.exchange, cfg_neg.exchange]
+
+        from eth_account import Account
+        account = Account.from_key(Config.POLYMARKET_PRIVATE_KEY)
+        sender = account.address
+        max_uint256 = 2**256 - 1
+
+        # Get initial nonce
+        nonce_payload = {
+            "jsonrpc": "2.0", "id": 1, "method": "eth_getTransactionCount",
+            "params": [sender, "latest"],
+        }
+        gas_payload = {
+            "jsonrpc": "2.0", "id": 2, "method": "eth_gasPrice", "params": [],
+        }
+        async with self.session.post(POLYGON_RPC, json=nonce_payload) as r:
+            nonce_result = await r.json()
+        nonce = int(nonce_result["result"], 16)
+
+        async with self.session.post(POLYGON_RPC, json=gas_payload) as r:
+            gas_result = await r.json()
+        gas_price = int(gas_result["result"], 16)
+
+        # ERC20 approve(address,uint256) selector = 0x095ea7b3
+        for spender in spenders:
+            calldata = (
+                bytes.fromhex("095ea7b3")
+                + bytes.fromhex(spender[2:].lower().zfill(64))
+                + max_uint256.to_bytes(32, "big")
+            )
+            tx = {
+                "to": usdc_addr,
+                "value": 0,
+                "gas": 60_000,
+                "gasPrice": gas_price,
+                "nonce": nonce,
+                "chainId": chain_id,
+                "data": calldata,
+            }
+            signed = account.sign_transaction(tx)
+            send_payload = {
+                "jsonrpc": "2.0", "id": 3, "method": "eth_sendRawTransaction",
+                "params": [signed.raw_transaction.hex()],
+            }
+            async with self.session.post(POLYGON_RPC, json=send_payload) as r:
+                send_result = await r.json()
+
+            if "error" in send_result:
+                log.error("clob: approve tx failed for %s: %s", spender, send_result["error"])
+            else:
+                tx_hash = send_result.get("result")
+                log.info("clob: approve tx sent for %s: %s", spender, tx_hash)
+            nonce += 1
+
+        # Refresh CLOB server's cached allowance
+        try:
+            await asyncio.wait_for(
+                loop.run_in_executor(None, lambda: self._client.update_balance_allowance(params)),
+                timeout=8.0,
+            )
+            log.info("clob: allowance cache refreshed")
+        except Exception as e:
+            log.warning("clob: allowance cache refresh failed (will sync eventually): %s", e)
 
 
 async def fetch_clob_orderbooks(clob: CLOBClient) -> None:
