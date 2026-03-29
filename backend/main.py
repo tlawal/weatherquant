@@ -33,6 +33,17 @@ def _log_config_warnings() -> None:
         log.warning("config: %s", w)
 
 
+async def _run_startup_backfills() -> None:
+    """Run idempotent startup backfills before normal background work begins."""
+    from backend.ingestion.metar import backfill_recent_nws_extended
+
+    try:
+        repaired = await backfill_recent_nws_extended()
+        log.info("startup: recent NWS extended backfill repaired=%d", repaired)
+    except Exception as e:
+        log.exception("startup: NWS extended backfill failed: %s", e)
+
+
 async def run_api(start_worker: bool = False) -> None:
     """Start API server (FastAPI + Uvicorn)."""
     import uvicorn
@@ -52,6 +63,7 @@ async def run_api(start_worker: bool = False) -> None:
         try:
             log.info("api: background init starting (db + CLOB)")
             await init_db()
+            await _run_startup_backfills()
             _ready["db"] = True
             log.info("api: db init complete")
 
@@ -128,6 +140,7 @@ async def run_worker() -> None:
     log.info("worker: starting up")
     _log_config_warnings()
     await init_db()
+    await _run_startup_backfills()
 
     clob = CLOBClient()
     await clob.start()

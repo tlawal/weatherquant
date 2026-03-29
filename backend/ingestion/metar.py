@@ -6,39 +6,66 @@ Ground truth for real-time temperature observations.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
-from datetime import date, datetime, timezone
-from typing import Optional
-from zoneinfo import ZoneInfo
+from datetime import datetime, timedelta, timezone
+from typing import Any, Optional
 
 import aiohttp
 
-from backend.config import Config
 from backend.tz_utils import city_local_date
 from backend.storage.db import get_session
-from sqlalchemy import select
-from backend.storage.models import MetarObs
+from backend.storage.models import City
 from backend.storage.repos import (
     get_all_cities,
     get_daily_high_metar,
+    get_metar_obs_by_key,
+    get_recent_metar_obs_missing_extended,
     insert_metar_obs,
-    insert_metar_obs_extended,
+    upsert_metar_obs_extended,
     update_heartbeat,
 )
 
 log = logging.getLogger(__name__)
 
 METAR_URL = "https://aviationweather.gov/api/data/metar"
-ET = ZoneInfo("America/New_York")
 
 _USER_AGENT = "WeatherQuant/1.0 (contact@weatherquant.local)"
 _TIMEOUT = aiohttp.ClientTimeout(total=15)
+_KNOTS_PER_MPS = 1.9438444924406
+_KNOTS_PER_KPH = 0.539956803
+_KNOTS_PER_MPH = 0.868976242
+_INHG_PER_PA = 0.000295299830714
+_INHG_PER_HPA = 0.0295299830714
+_IN_PER_MM = 0.0393700787402
+_FT_PER_M = 3.28083989501
+_SM_PER_M = 0.000621371192237
 
 
 def _c_to_f(c: float) -> float:
     return round(c * 9 / 5 + 32, 1)
+
+
+def _round_value(value: float, digits: int = 1) -> float:
+    return round(float(value), digits)
+
+
+def _coerce_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(round(float(value)))
+    except (TypeError, ValueError):
+        return None
 
 
 def _parse_temp(obs: dict) -> Optional[tuple[float, float]]:
@@ -92,17 +119,18 @@ def _humidity_from_magnus(temp_c: float, dewp_c: float) -> float:
 
 
 # Map wx_string + cloud cover to human-readable condition
-_WX_CONDITION_MAP = [
-    ("TS", "Thunderstorm"),
-    ("GR", "Hail"),
-    ("SN", "Snow"),
-    ("FZRA", "Freezing Rain"),
-    ("RA", "Rain"),
-    ("DZ", "Drizzle"),
-    ("SH", "Showers"),
-    ("FG", "Fog"),
-    ("HZ", "Haze"),
-    ("BR", "Mist"),
+_WX_CONDITION_PATTERNS = [
+    (("thunder", "ts", "tstm", "lightning"), "Thunderstorm"),
+    (("hail", "small hail", "gr", "gs"), "Hail"),
+    (("freezing rain", "fzra", "ice pellets", "sleet"), "Freezing Rain"),
+    (("snow", "sn", "blowing snow"), "Snow"),
+    (("showers", "shower", "shra"), "Showers"),
+    (("drizzle", "dz"), "Drizzle"),
+    (("rain", "ra"), "Rain"),
+    (("fog", "fg"), "Fog"),
+    (("mist", "br"), "Mist"),
+    (("haze", "hz"), "Haze"),
+    (("smoke", "fu"), "Smoke"),
 ]
 
 _COVER_CONDITION = {
@@ -110,82 +138,196 @@ _COVER_CONDITION = {
     "SCT": "Partly Cloudy", "BKN": "Mostly Cloudy", "OVC": "Cloudy",
 }
 
+_NWS_CLOUD_COVER_MAP = {
+    "CLEAR": "CLR",
+    "CLR": "CLR",
+    "SKC": "SKC",
+    "FEW": "FEW",
+    "SCATTERED": "SCT",
+    "SCT": "SCT",
+    "BROKEN": "BKN",
+    "BKN": "BKN",
+    "OVERCAST": "OVC",
+    "OVC": "OVC",
+}
 
-def _derive_condition(wx_string: Optional[str], cloud_cover: Optional[str]) -> str:
-    """Derive a human-readable condition string from wx_string and cloud cover."""
-    if wx_string:
-        wx_upper = wx_string.upper()
-        for token, label in _WX_CONDITION_MAP:
-            if token in wx_upper:
+def _extract_qv_value(payload: Any) -> Optional[float]:
+    if isinstance(payload, dict):
+        return _coerce_float(payload.get("value"))
+    return _coerce_float(payload)
+
+
+def _normalize_unit_code(unit_code: Optional[str]) -> str:
+    return (unit_code or "").strip().lower()
+
+
+def _convert_speed_to_knots(value: float, unit_code: Optional[str]) -> Optional[float]:
+    unit = _normalize_unit_code(unit_code)
+    if "m_s-1" in unit:
+        return _round_value(value * _KNOTS_PER_MPS)
+    if "km_h-1" in unit or "km/h" in unit:
+        return _round_value(value * _KNOTS_PER_KPH)
+    if "mi_h-1" in unit or "mph" in unit:
+        return _round_value(value * _KNOTS_PER_MPH)
+    if "kt" in unit or "knot" in unit:
+        return _round_value(value)
+    return None
+
+
+def _convert_pressure_to_inhg(value: float, unit_code: Optional[str]) -> Optional[float]:
+    unit = _normalize_unit_code(unit_code)
+    if unit.endswith(":pa") or unit.endswith("/pa") or unit == "pa":
+        return round(value * _INHG_PER_PA, 2)
+    if "hectopa" in unit or "hpa" in unit or unit.endswith(":mb") or unit == "mb":
+        return round(value * _INHG_PER_HPA, 2)
+    if "inhg" in unit or "in_hg" in unit:
+        return round(value, 2)
+    return None
+
+
+def _convert_pressure_to_mb(value: float, unit_code: Optional[str]) -> Optional[float]:
+    unit = _normalize_unit_code(unit_code)
+    if unit.endswith(":pa") or unit.endswith("/pa") or unit == "pa":
+        return _round_value(value / 100.0)
+    if "hectopa" in unit or "hpa" in unit or unit.endswith(":mb") or unit == "mb":
+        return _round_value(value)
+    if "inhg" in unit or "in_hg" in unit:
+        return _round_value(value / _INHG_PER_HPA)
+    return None
+
+
+def _convert_length_to_inches(value: float, unit_code: Optional[str]) -> Optional[float]:
+    unit = _normalize_unit_code(unit_code)
+    if unit.endswith(":mm") or unit == "mm":
+        return round(value * _IN_PER_MM, 2)
+    if unit.endswith(":cm") or unit == "cm":
+        return round(value * _IN_PER_MM * 10, 2)
+    if unit.endswith(":m") or unit == "m":
+        return round(value * _IN_PER_MM * 1000, 2)
+    if "inch" in unit or unit.endswith(":in") or unit == "in":
+        return round(value, 2)
+    return None
+
+
+def _convert_length_to_feet(value: float, unit_code: Optional[str]) -> Optional[float]:
+    unit = _normalize_unit_code(unit_code)
+    if unit.endswith(":m") or unit == "m":
+        return _coerce_int(value * _FT_PER_M)
+    if "foot" in unit or unit.endswith(":ft") or unit == "ft":
+        return _coerce_int(value)
+    return None
+
+
+def _convert_visibility_to_sm(value: float, unit_code: Optional[str]) -> Optional[float]:
+    unit = _normalize_unit_code(unit_code)
+    if unit.endswith(":m") or unit == "m":
+        return _round_value(value * _SM_PER_M)
+    if "mile" in unit or unit.endswith(":sm") or unit == "sm":
+        return _round_value(value)
+    return None
+
+
+def _extract_qv_converted(payload: Any, converter) -> Optional[float]:
+    if not isinstance(payload, dict):
+        return None
+    value = _extract_qv_value(payload)
+    if value is None:
+        return None
+    return converter(value, payload.get("unitCode"))
+
+
+def _normalize_cloud_cover(cloud_cover: Optional[str]) -> Optional[str]:
+    if not cloud_cover:
+        return None
+    return _NWS_CLOUD_COVER_MAP.get(str(cloud_cover).strip().upper())
+
+
+def _format_present_weather(present_weather: Any) -> Optional[str]:
+    if not isinstance(present_weather, list):
+        return None
+
+    parts: list[str] = []
+    for entry in present_weather:
+        if not isinstance(entry, dict):
+            continue
+        token_parts = [
+            str(entry.get(key)).strip()
+            for key in ("coverage", "intensity", "modifier", "weather")
+            if entry.get(key)
+        ]
+        if token_parts:
+            parts.append(" ".join(token_parts))
+
+    if not parts:
+        return None
+
+    return "; ".join(parts)[:64]
+
+
+def _derive_condition(
+    wx_string: Optional[str],
+    cloud_cover: Optional[str],
+    text_description: Optional[str] = None,
+) -> Optional[str]:
+    """Derive a short human-readable condition from weather/cloud signals."""
+    haystack = " ".join(
+        part for part in [wx_string, text_description] if part
+    ).lower()
+
+    if haystack:
+        for tokens, label in _WX_CONDITION_PATTERNS:
+            if any(token in haystack for token in tokens):
                 return label
     if cloud_cover:
-        return _COVER_CONDITION.get(cloud_cover.upper(), "Fair")
-    return "Fair"
+        return _COVER_CONDITION.get(cloud_cover.upper())
+    if haystack and any(token in haystack for token in ("fair", "clear", "sunny")):
+        return "Fair"
+    return None
 
 
-def _parse_extended(obs: dict, temp_c: Optional[float] = None) -> dict:
+def parse_aviationweather_extended(obs: dict, temp_c: Optional[float] = None) -> dict:
     """Parse extended METAR fields from aviationweather.gov JSON response.
 
-    Returns a dict suitable for insert_metar_obs_extended().
+    Returns a dict suitable for upsert_metar_obs_extended().
     """
     ext: dict = {}
 
     # Dewpoint
     dewp_c = obs.get("dewp")
     if dewp_c is not None:
-        try:
-            dc = float(dewp_c)
+        dc = _coerce_float(dewp_c)
+        if dc is not None:
             ext["dewpoint_c"] = round(dc, 1)
-            ext["dewpoint_f"] = round(dc * 9 / 5 + 32, 1)
+            ext["dewpoint_f"] = _c_to_f(dc)
             if temp_c is not None:
                 ext["humidity_pct"] = _humidity_from_magnus(float(temp_c), dc)
-        except (ValueError, TypeError):
-            pass
 
     # Wind
-    wdir = obs.get("wdir")
+    wdir = _coerce_int(obs.get("wdir"))
     if wdir is not None:
-        try:
-            ext["wind_dir_deg"] = int(wdir)
-        except (ValueError, TypeError):
-            pass
+        ext["wind_dir_deg"] = wdir
 
-    wspd = obs.get("wspd")
+    wspd = _coerce_float(obs.get("wspd"))
     if wspd is not None:
-        try:
-            ext["wind_speed_kt"] = float(wspd)
-        except (ValueError, TypeError):
-            pass
+        ext["wind_speed_kt"] = wspd
 
-    wgst = obs.get("wgst")
+    wgst = _coerce_float(obs.get("wgst"))
     if wgst is not None:
-        try:
-            ext["wind_gust_kt"] = float(wgst)
-        except (ValueError, TypeError):
-            pass
+        ext["wind_gust_kt"] = wgst
 
     # Pressure
-    altim = obs.get("altim")
+    altim = _coerce_float(obs.get("altim"))
     if altim is not None:
-        try:
-            ext["altimeter_inhg"] = round(float(altim), 2)
-        except (ValueError, TypeError):
-            pass
+        ext["altimeter_inhg"] = round(altim, 2)
 
-    slp = obs.get("slp")
+    slp = _coerce_float(obs.get("slp"))
     if slp is not None:
-        try:
-            ext["sea_level_pressure_mb"] = round(float(slp), 1)
-        except (ValueError, TypeError):
-            pass
+        ext["sea_level_pressure_mb"] = round(slp, 1)
 
     # Visibility
-    visib = obs.get("visib")
+    visib = _coerce_float(obs.get("visib"))
     if visib is not None:
-        try:
-            ext["visibility_sm"] = round(float(visib), 1)
-        except (ValueError, TypeError):
-            pass
+        ext["visibility_sm"] = round(visib, 1)
 
     # Cloud cover — use the dominant (highest) cover level
     clouds = obs.get("clouds")
@@ -196,11 +338,9 @@ def _parse_extended(obs: dict, temp_c: Optional[float] = None) -> dict:
         first = clouds[0]
         ext["cloud_cover"] = first.get("cover")
         base = first.get("base")
-        if base is not None:
-            try:
-                ext["cloud_base_ft"] = int(base)
-            except (ValueError, TypeError):
-                pass
+        base_ft = _coerce_int(base)
+        if base_ft is not None:
+            ext["cloud_base_ft"] = base_ft
     elif cover:
         ext["cloud_cover"] = str(cover)
 
@@ -210,9 +350,179 @@ def _parse_extended(obs: dict, temp_c: Optional[float] = None) -> dict:
         ext["wx_string"] = str(wx)[:64]
 
     # Derive human-readable condition
-    ext["condition"] = _derive_condition(ext.get("wx_string"), ext.get("cloud_cover"))
+    condition = _derive_condition(ext.get("wx_string"), ext.get("cloud_cover"))
+    if condition:
+        ext["condition"] = condition
 
     return ext
+
+
+def parse_nws_extended(props: dict) -> dict:
+    """Parse extended observation fields from api.weather.gov properties."""
+    ext: dict = {}
+
+    dewpoint_c = _extract_qv_value(props.get("dewpoint"))
+    if dewpoint_c is not None:
+        ext["dewpoint_c"] = _round_value(dewpoint_c)
+        ext["dewpoint_f"] = _c_to_f(dewpoint_c)
+
+    humidity = _extract_qv_value(props.get("relativeHumidity"))
+    if humidity is not None:
+        ext["humidity_pct"] = _round_value(humidity)
+
+    wind_dir = _extract_qv_value(props.get("windDirection"))
+    if wind_dir is not None:
+        ext["wind_dir_deg"] = _coerce_int(wind_dir)
+
+    wind_speed = _extract_qv_converted(props.get("windSpeed"), _convert_speed_to_knots)
+    if wind_speed is not None:
+        ext["wind_speed_kt"] = wind_speed
+
+    wind_gust = _extract_qv_converted(props.get("windGust"), _convert_speed_to_knots)
+    if wind_gust is not None:
+        ext["wind_gust_kt"] = wind_gust
+
+    altimeter = _extract_qv_converted(props.get("barometricPressure"), _convert_pressure_to_inhg)
+    if altimeter is not None:
+        ext["altimeter_inhg"] = altimeter
+
+    sea_level = _extract_qv_converted(props.get("seaLevelPressure"), _convert_pressure_to_mb)
+    if sea_level is not None:
+        ext["sea_level_pressure_mb"] = sea_level
+
+    visibility = _extract_qv_converted(props.get("visibility"), _convert_visibility_to_sm)
+    if visibility is not None:
+        ext["visibility_sm"] = visibility
+
+    precip = _extract_qv_converted(props.get("precipitationLastHour"), _convert_length_to_inches)
+    if precip is not None:
+        ext["precip_in"] = precip
+
+    cloud_layers = props.get("cloudLayers")
+    if isinstance(cloud_layers, list) and cloud_layers:
+        for layer in cloud_layers:
+            if not isinstance(layer, dict):
+                continue
+            cover = _normalize_cloud_cover(layer.get("amount"))
+            base_ft = _extract_qv_converted(layer.get("base"), _convert_length_to_feet)
+            if cover:
+                ext["cloud_cover"] = cover
+            if base_ft is not None:
+                ext["cloud_base_ft"] = _coerce_int(base_ft)
+            if cover or base_ft is not None:
+                break
+
+    wx_string = _format_present_weather(props.get("presentWeather"))
+    text_description = props.get("textDescription")
+    if not wx_string and text_description:
+        wx_string = str(text_description)[:64]
+    if wx_string:
+        ext["wx_string"] = wx_string[:64]
+
+    condition = _derive_condition(
+        ext.get("wx_string"),
+        ext.get("cloud_cover"),
+        str(text_description) if text_description else None,
+    )
+    if condition:
+        ext["condition"] = condition[:32]
+
+    return ext
+
+
+def _parse_nws_temp(props: dict) -> Optional[tuple[float, float]]:
+    temp_c = _extract_qv_value(props.get("temperature"))
+    if temp_c is None:
+        return None
+    return float(temp_c), _c_to_f(temp_c)
+
+
+def _parse_nws_obs_time(props: dict) -> datetime:
+    ts_str = props.get("timestamp")
+    if ts_str:
+        try:
+            return datetime.fromisoformat(str(ts_str).rstrip("Z")).replace(tzinfo=timezone.utc)
+        except Exception:
+            pass
+    return datetime.now(timezone.utc)
+
+
+async def _insert_or_merge_metar_observation(
+    city: City,
+    station_id: str,
+    observed_at: datetime,
+    report_at: datetime,
+    temp_c: float,
+    temp_f: float,
+    raw_text: Optional[str],
+    raw_json: str,
+    ext_data: dict,
+) -> None:
+    today_local = city_local_date(city)
+
+    async with get_session() as sess:
+        metar_row = await get_metar_obs_by_key(sess, city.id, station_id, observed_at)
+        if metar_row is None:
+            prev_high = await get_daily_high_metar(
+                sess,
+                city.id,
+                today_local,
+                city_tz=getattr(city, "tz", "America/New_York"),
+            )
+            daily_high = max((v for v in [temp_f, prev_high] if v is not None), default=temp_f)
+            metar_row = await insert_metar_obs(
+                sess,
+                city_id=city.id,
+                metar_station=station_id,
+                observed_at=observed_at,
+                report_at=report_at,
+                temp_c=temp_c,
+                temp_f=temp_f,
+                daily_high_f=daily_high,
+                raw_text=raw_text,
+                raw_json=raw_json,
+            )
+
+        if ext_data:
+            try:
+                await upsert_metar_obs_extended(sess, metar_obs_id=metar_row.id, **ext_data)
+            except Exception as e:
+                log.debug("metar_ext: failed for %s at %s: %s", station_id, observed_at, e)
+
+
+async def backfill_recent_nws_extended(hours: int = 24) -> int:
+    """Backfill missing extended rows for recent NWS observations."""
+    repaired = 0
+    since = datetime.now(timezone.utc) - timedelta(hours=hours)
+
+    async with get_session() as sess:
+        rows = await get_recent_metar_obs_missing_extended(sess, since)
+        for row in rows:
+            raw_json = row.raw_json
+            if not raw_json:
+                continue
+
+            try:
+                raw = json.loads(raw_json) if isinstance(raw_json, str) else raw_json
+            except Exception:
+                log.debug("nws_backfill: invalid raw_json for metar_obs_id=%s", row.id)
+                continue
+
+            if not isinstance(raw, dict) or raw.get("source") != "nws_obs":
+                continue
+
+            ext_data = parse_nws_extended(raw)
+            if not ext_data:
+                continue
+
+            await upsert_metar_obs_extended(sess, metar_obs_id=row.id, **ext_data)
+            repaired += 1
+
+    if repaired:
+        log.info("nws_backfill: repaired %d recent extended observation rows", repaired)
+    else:
+        log.info("nws_backfill: no recent rows needed repair")
+    return repaired
 
 
 async def fetch_metar_all() -> None:
@@ -276,8 +586,6 @@ async def _fetch_us_metars(cities: list[City]) -> None:
         if not city:
             continue
 
-        today_local = city_local_date(city)
-
         temp = _parse_temp(obs)
         if temp is None:
             continue
@@ -285,48 +593,21 @@ async def _fetch_us_metars(cities: list[City]) -> None:
 
         obs_time = _parse_obs_time(obs)
         raw_str = json.dumps(obs, default=str)
+        report_at = _parse_obs_time({"obsTime": obs.get("reportTime")}) if obs.get("reportTime") else obs_time
+        raw_text = obs.get("rawOb")
+        ext_data = parse_aviationweather_extended(obs, temp_c=temp_c)
 
-        async with get_session() as sess:
-            # Dedup: skip if we already have this observation
-            dup = await sess.execute(
-                select(MetarObs.id).where(
-                    MetarObs.city_id == city.id,
-                    MetarObs.metar_station == station_id,
-                    MetarObs.observed_at == obs_time,
-                ).limit(1)
-            )
-            if dup.scalar_one_or_none() is not None:
-                continue
-
-            prev_high = await get_daily_high_metar(sess, city.id, today_local, city_tz=getattr(city, "tz", "America/New_York"))
-            daily_high = max(
-                (v for v in [temp_f, prev_high] if v is not None), default=temp_f
-            )
-
-            # Extract reportTime if available separately
-            report_at = _parse_obs_time({"obsTime": obs.get("reportTime")}) if obs.get("reportTime") else obs_time
-            raw_text = obs.get("rawOb")
-
-            metar_row = await insert_metar_obs(
-                sess,
-                city_id=city.id,
-                metar_station=station_id,
-                observed_at=obs_time,
-                report_at=report_at,
-                temp_c=temp_c,
-                temp_f=temp_f,
-                daily_high_f=daily_high,
-                raw_text=raw_text,
-                raw_json=raw_str,
-            )
-
-            # Parse and store extended fields (dewpoint, wind, pressure, etc.)
-            ext_data = _parse_extended(obs, temp_c=temp_c)
-            if ext_data:
-                try:
-                    await insert_metar_obs_extended(sess, metar_obs_id=metar_row.id, **ext_data)
-                except Exception as e:
-                    log.debug("metar_ext: failed for %s: %s", station_id, e)
+        await _insert_or_merge_metar_observation(
+            city=city,
+            station_id=station_id,
+            observed_at=obs_time,
+            report_at=report_at,
+            temp_c=temp_c,
+            temp_f=temp_f,
+            raw_text=raw_text,
+            raw_json=raw_str,
+            ext_data=ext_data,
+        )
 
     await _mark_heartbeat_success()
 
@@ -345,47 +626,24 @@ async def _fetch_nws_observations(cities: list[City]) -> None:
                     data = await resp.json(content_type=None)
 
                 props = data.get("properties", {})
-                temp_c_val = (props.get("temperature") or {}).get("value")
-                if temp_c_val is None:
+                temp = _parse_nws_temp(props)
+                if temp is None:
                     continue
-                temp_c = float(temp_c_val)
-                temp_f = _c_to_f(temp_c)
+                temp_c, temp_f = temp
+                obs_time = _parse_nws_obs_time(props)
+                station_id = (city.metar_station or "").upper()
 
-                ts_str = props.get("timestamp")
-                obs_time = (
-                    datetime.fromisoformat(ts_str.rstrip("Z")).replace(tzinfo=timezone.utc)
-                    if ts_str else datetime.now(timezone.utc)
+                await _insert_or_merge_metar_observation(
+                    city=city,
+                    station_id=station_id,
+                    observed_at=obs_time,
+                    report_at=obs_time,
+                    temp_c=temp_c,
+                    temp_f=temp_f,
+                    raw_text=props.get("rawMessage"),
+                    raw_json=json.dumps({"source": "nws_obs", **props}, default=str),
+                    ext_data=parse_nws_extended(props),
                 )
-
-                today_local = city_local_date(city)
-                async with get_session() as sess:
-                    # Dedup: skip if we already have this observation
-                    dup = await sess.execute(
-                        select(MetarObs.id).where(
-                            MetarObs.city_id == city.id,
-                            MetarObs.metar_station == city.metar_station,
-                            MetarObs.observed_at == obs_time,
-                        ).limit(1)
-                    )
-                    if dup.scalar_one_or_none() is not None:
-                        continue
-
-                    prev_high = await get_daily_high_metar(sess, city.id, today_local, city_tz=getattr(city, "tz", "America/New_York"))
-                    daily_high = max(
-                        (v for v in [temp_f, prev_high] if v is not None), default=temp_f
-                    )
-                    await insert_metar_obs(
-                        sess,
-                        city_id=city.id,
-                        metar_station=city.metar_station,
-                        observed_at=obs_time,
-                        report_at=obs_time,
-                        temp_c=temp_c,
-                        temp_f=temp_f,
-                        daily_high_f=daily_high,
-                        raw_text=props.get("rawMessage"),
-                        raw_json=json.dumps({"source": "nws_obs", **props}, default=str),
-                    )
                 await asyncio.sleep(0.3)  # rate limit courtesy
             except Exception as e:
                 log.error("nws_obs: %s failed: %s", city.metar_station, e)

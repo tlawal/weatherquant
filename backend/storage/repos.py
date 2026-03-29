@@ -159,6 +159,67 @@ async def insert_metar_obs_extended(session: AsyncSession, **kwargs) -> MetarObs
     return ext
 
 
+async def get_metar_obs_by_key(
+    session: AsyncSession,
+    city_id: int,
+    metar_station: str,
+    observed_at: datetime,
+) -> Optional[MetarObs]:
+    result = await session.execute(
+        select(MetarObs).where(
+            MetarObs.city_id == city_id,
+            MetarObs.metar_station == metar_station,
+            MetarObs.observed_at == observed_at,
+        ).limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def upsert_metar_obs_extended(
+    session: AsyncSession,
+    metar_obs_id: int,
+    **kwargs,
+) -> MetarObsExtended:
+    clean_kwargs = {
+        key: value
+        for key, value in kwargs.items()
+        if value is not None and hasattr(MetarObsExtended, key)
+    }
+
+    result = await session.execute(
+        select(MetarObsExtended).where(MetarObsExtended.metar_obs_id == metar_obs_id).limit(1)
+    )
+    ext = result.scalar_one_or_none()
+    if ext is None:
+        ext = MetarObsExtended(metar_obs_id=metar_obs_id, **clean_kwargs)
+        session.add(ext)
+    else:
+        for key, value in clean_kwargs.items():
+            if getattr(ext, key) is None:
+                setattr(ext, key, value)
+
+    await session.commit()
+    await session.refresh(ext)
+    return ext
+
+
+async def get_recent_metar_obs_missing_extended(
+    session: AsyncSession,
+    since: datetime,
+) -> list[MetarObs]:
+    result = await session.execute(
+        select(MetarObs)
+        .outerjoin(MetarObsExtended, MetarObsExtended.metar_obs_id == MetarObs.id)
+        .where(
+            MetarObs.observed_at >= since,
+            MetarObs.raw_json.isnot(None),
+            MetarObsExtended.id.is_(None),
+        )
+        .order_by(MetarObs.observed_at.desc())
+    )
+    return list(result.scalars().all())
+
+
 async def get_todays_extended_obs(
     session: AsyncSession,
     city_id: int,
