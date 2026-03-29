@@ -49,6 +49,7 @@ async def execute_signal(
     dry_run: bool = False,
     manual: bool = False,
     qty_override: float | None = None,
+    order_type: str = "limit",
 ) -> dict:
     """
     Attempt to execute a trade for the given signal.
@@ -220,12 +221,19 @@ async def execute_signal(
             await update_order_status(sess, order.id, "rejected", cancel_reason="no_clob_client")
         return result
 
-    clob_result = await clob.place_limit_order(
-        token_id=bucket.yes_token_id,
-        side="BUY",
-        size=shares,
-        price=limit_price,
-    )
+    if order_type == "market":
+        clob_result = await clob.place_market_order(
+            token_id=bucket.yes_token_id,
+            side="BUY",
+            amount=shares * limit_price,
+        )
+    else:
+        clob_result = await clob.place_limit_order(
+            token_id=bucket.yes_token_id,
+            side="BUY",
+            size=shares,
+            price=limit_price,
+        )
 
     if not clob_result:
         result["status"] = "order_failed"

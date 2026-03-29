@@ -139,14 +139,13 @@ class CLOBClient:
             return None
 
         try:
-            from py_clob_client.clob_types import OrderArgs, OrderType
+            from py_clob_client.clob_types import OrderArgs
             loop = asyncio.get_event_loop()
             args = OrderArgs(
                 token_id=token_id,
                 price=price,
                 size=size,
                 side=side,
-                order_type=OrderType.GTC,
             )
             result = await asyncio.wait_for(
                 loop.run_in_executor(None, lambda: self._client.create_and_post_order(args)),
@@ -162,6 +161,46 @@ class CLOBClient:
             return None
         except Exception as e:
             log.error("clob: place_limit_order failed: %s", e)
+            return None
+
+    async def place_market_order(
+        self,
+        token_id: str,
+        side: str,  # "BUY" | "SELL"
+        amount: float,  # $ for BUY, shares for SELL
+    ) -> Optional[dict]:
+        """Place a FOK market order. Returns order dict or None on failure."""
+        if not self.can_trade:
+            log.error("clob: cannot place order — no credentials")
+            return None
+
+        try:
+            from py_clob_client.clob_types import MarketOrderArgs, OrderType
+            loop = asyncio.get_event_loop()
+            args = MarketOrderArgs(
+                token_id=token_id,
+                amount=amount,
+                side=side,
+            )
+
+            def _create_and_post():
+                order = self._client.create_market_order(args)
+                return self._client.post_order(order, orderType=OrderType.FOK)
+
+            result = await asyncio.wait_for(
+                loop.run_in_executor(None, _create_and_post),
+                timeout=15.0,
+            )
+            log.info(
+                "clob: market order placed token=%s side=%s amount=%.2f result=%s",
+                token_id[:16], side, amount, result,
+            )
+            return result
+        except asyncio.TimeoutError:
+            log.error("clob: place_market_order timed out")
+            return None
+        except Exception as e:
+            log.error("clob: place_market_order failed: %s", e)
             return None
 
     async def cancel_order(self, order_id: str) -> bool:

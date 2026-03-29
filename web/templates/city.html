@@ -1306,6 +1306,7 @@ function tradingPanel() {
           side: this.side === 'buy' ? 'buy_yes' : 'buy_no',
           qty: this.shares,
           dry_run: this.dryRun,
+          order_type: this.orderType,
         };
         // Only send limit_price for limit orders; market orders use best available
         if (this.orderType === 'limit') {

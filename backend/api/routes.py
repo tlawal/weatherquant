@@ -819,6 +819,7 @@ class ManualTradeRequest(BaseModel):
     side: str  # "buy_yes" | "buy_no"
     qty: Optional[float] = None  # None = auto-size
     limit_price: Optional[float] = None
+    order_type: str = "limit"  # "limit" | "market"
     dry_run: bool = False
 
 
@@ -894,7 +895,7 @@ async def manual_trade(
         if balance:
             bankroll = min(balance, Config.BANKROLL_CAP)
 
-    result = await execute_signal(signal, bankroll=bankroll, actor=actor, dry_run=body.dry_run, manual=True, qty_override=body.qty)
+    result = await execute_signal(signal, bankroll=bankroll, actor=actor, dry_run=body.dry_run, manual=True, qty_override=body.qty, order_type=body.order_type)
     return result
 
 
