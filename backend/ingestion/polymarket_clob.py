@@ -287,7 +287,12 @@ class CLOBClient:
             cfg = get_contract_config(chain_id, neg_risk=False)
             cfg_neg = get_contract_config(chain_id, neg_risk=True)
             usdc_addr = cfg.collateral
+            # Polymarket requires USDC approval for 3 contracts:
+            # CTF Exchange, Neg Risk Exchange, and Neg Risk Adapter
+            NEG_RISK_ADAPTER = {137: "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"}
             spenders = [cfg.exchange, cfg_neg.exchange]
+            if chain_id in NEG_RISK_ADAPTER:
+                spenders.append(NEG_RISK_ADAPTER[chain_id])
 
             from eth_account import Account
             account = Account.from_key(Config.POLYMARKET_PRIVATE_KEY)
