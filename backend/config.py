@@ -83,6 +83,23 @@ class Config:
     WU_MIN_SCRAPE_INTERVAL_SECONDS: int = _int("WU_MIN_SCRAPE_INTERVAL_SECONDS", 1800)
     WU_FAILED_RETRY_INTERVAL_SECONDS: int = _int("WU_FAILED_RETRY_INTERVAL_SECONDS", 300)
 
+    # ── Market Context LLM ────────────────────────────────────────────────────
+    MARKET_CONTEXT_LLM_PROVIDER: str = os.environ.get(
+        "MARKET_CONTEXT_LLM_PROVIDER", ""
+    ).strip().lower()
+    MARKET_CONTEXT_LLM_MODEL: str = os.environ.get(
+        "MARKET_CONTEXT_LLM_MODEL", ""
+    ).strip()
+    MARKET_CONTEXT_LLM_API_KEY: str = os.environ.get(
+        "MARKET_CONTEXT_LLM_API_KEY", ""
+    ).strip()
+    MARKET_CONTEXT_LLM_BASE_URL: str = os.environ.get(
+        "MARKET_CONTEXT_LLM_BASE_URL", ""
+    ).strip()
+    MARKET_CONTEXT_LLM_TIMEOUT_SECONDS: int = _int(
+        "MARKET_CONTEXT_LLM_TIMEOUT_SECONDS", 45
+    )
+
     # ── Logging ───────────────────────────────────────────────────────────────
     LOG_LEVEL: str = os.environ.get("LOG_LEVEL", "INFO").upper()
     LOG_JSON: bool = _bool("LOG_JSON", default=True)
@@ -90,6 +107,19 @@ class Config:
     # ── Cities (canonical registry; more discovered via Gamma) ────────────────
     from backend.city_registry import get_db_city_dicts as _get_db_city_dicts
     INITIAL_CITIES: list[dict] = _get_db_city_dicts()
+
+    @classmethod
+    def market_context_llm_ready(cls) -> bool:
+        provider = cls.MARKET_CONTEXT_LLM_PROVIDER
+        model = cls.MARKET_CONTEXT_LLM_MODEL
+        if not provider or not model:
+            return False
+        if provider == "anthropic":
+            return bool(cls.MARKET_CONTEXT_LLM_API_KEY or os.environ.get("ANTHROPIC_API_KEY"))
+        if provider == "openai":
+            return bool(cls.MARKET_CONTEXT_LLM_API_KEY or os.environ.get("OPENAI_API_KEY"))
+        return bool(cls.MARKET_CONTEXT_LLM_API_KEY)
+
     @classmethod
     def validate(cls) -> list[str]:
         """Return list of critical missing config warnings."""
@@ -102,4 +132,8 @@ class Config:
             warnings.append("ARMING_SECRET not set — arming disabled")
         if cls.BANKROLL_CAP > 100:
             warnings.append(f"BANKROLL_CAP={cls.BANKROLL_CAP} exceeds $100 safety limit!")
+        if cls.MARKET_CONTEXT_LLM_PROVIDER and not cls.market_context_llm_ready():
+            warnings.append(
+                "MARKET_CONTEXT_LLM_PROVIDER configured but model/API key incomplete — Market Context refresh disabled"
+            )
         return warnings

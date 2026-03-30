@@ -24,6 +24,7 @@ from backend.storage.models import (
     Event,
     Fill,
     ForecastObs,
+    MarketContextSnapshot,
     MarketSnapshot,
     MetarObs,
     MetarObsExtended,
@@ -108,6 +109,20 @@ async def get_event_with_buckets(
         .where(Event.city_id == city_id, Event.date_et == date_et)
     )
     return result.scalar_one_or_none()
+
+
+async def get_recent_events_for_city(
+    session: AsyncSession,
+    city_id: int,
+    before_or_on_date_et: str | None = None,
+    limit: int = 14,
+) -> list[Event]:
+    q = select(Event).where(Event.city_id == city_id)
+    if before_or_on_date_et:
+        q = q.where(Event.date_et <= before_or_on_date_et)
+    q = q.order_by(desc(Event.date_et)).limit(limit)
+    result = await session.execute(q)
+    return list(result.scalars().all())
 
 
 # ─── Buckets ──────────────────────────────────────────────────────────────────
@@ -514,6 +529,23 @@ async def get_todays_metar_obs(
     return list(result.scalars().all())
 
 
+async def get_metar_obs_for_city_since(
+    session: AsyncSession,
+    city_id: int,
+    since: datetime,
+) -> list[MetarObs]:
+    result = await session.execute(
+        select(MetarObs)
+        .where(
+            MetarObs.city_id == city_id,
+            MetarObs.temp_f.isnot(None),
+            MetarObs.observed_at >= since,
+        )
+        .order_by(MetarObs.observed_at)
+    )
+    return list(result.scalars().all())
+
+
 # ─── Forecasts ────────────────────────────────────────────────────────────────
 
 async def insert_forecast_obs(session: AsyncSession, **kwargs) -> ForecastObs:
@@ -557,6 +589,28 @@ async def get_latest_successful_forecast(
     return result.scalar_one_or_none()
 
 
+async def get_recent_successful_forecasts(
+    session: AsyncSession,
+    city_id: int,
+    source: str,
+    limit: int = 10,
+    before_or_on_date_et: str | None = None,
+) -> list[ForecastObs]:
+    q = (
+        select(ForecastObs)
+        .where(
+            ForecastObs.city_id == city_id,
+            ForecastObs.source == source,
+            ForecastObs.high_f.isnot(None),
+        )
+        .order_by(desc(ForecastObs.date_et), desc(ForecastObs.fetched_at))
+    )
+    if before_or_on_date_et:
+        q = q.where(ForecastObs.date_et <= before_or_on_date_et)
+    result = await session.execute(q.limit(limit))
+    return list(result.scalars().all())
+
+
 # ─── Market Snapshots ─────────────────────────────────────────────────────────
 
 async def insert_market_snapshot(session: AsyncSession, **kwargs) -> MarketSnapshot:
@@ -578,6 +632,39 @@ async def get_latest_market_snapshot(
     return result.scalar_one_or_none()
 
 
+async def get_market_snapshots_for_bucket(
+    session: AsyncSession,
+    bucket_id: int,
+    since: datetime | None = None,
+    limit: int | None = None,
+) -> list[MarketSnapshot]:
+    q = select(MarketSnapshot).where(MarketSnapshot.bucket_id == bucket_id)
+    if since:
+        q = q.where(MarketSnapshot.fetched_at >= since)
+    q = q.order_by(MarketSnapshot.fetched_at)
+    if limit:
+        q = q.limit(limit)
+    result = await session.execute(q)
+    return list(result.scalars().all())
+
+
+async def get_market_snapshots_for_event(
+    session: AsyncSession,
+    event_id: int,
+    since: datetime | None = None,
+) -> list[MarketSnapshot]:
+    q = (
+        select(MarketSnapshot)
+        .join(Bucket, Bucket.id == MarketSnapshot.bucket_id)
+        .where(Bucket.event_id == event_id)
+        .order_by(MarketSnapshot.fetched_at)
+    )
+    if since:
+        q = q.where(MarketSnapshot.fetched_at >= since)
+    result = await session.execute(q)
+    return list(result.scalars().all())
+
+
 # ─── Model Snapshots ──────────────────────────────────────────────────────────
 
 async def insert_model_snapshot(session: AsyncSession, **kwargs) -> ModelSnapshot:
@@ -597,6 +684,57 @@ async def get_latest_model_snapshot(
         .limit(1)
     )
     return result.scalar_one_or_none()
+
+
+async def get_recent_model_snapshots(
+    session: AsyncSession,
+    event_id: int,
+    limit: int = 10,
+) -> list[ModelSnapshot]:
+    result = await session.execute(
+        select(ModelSnapshot)
+        .where(ModelSnapshot.event_id == event_id)
+        .order_by(desc(ModelSnapshot.computed_at))
+        .limit(limit)
+    )
+    return list(result.scalars().all())
+
+
+# ─── Market Context ───────────────────────────────────────────────────────────
+
+async def get_market_context_snapshot(
+    session: AsyncSession,
+    city_id: int,
+    date_et: str,
+) -> Optional[MarketContextSnapshot]:
+    result = await session.execute(
+        select(MarketContextSnapshot)
+        .where(
+            MarketContextSnapshot.city_id == city_id,
+            MarketContextSnapshot.date_et == date_et,
+        )
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def upsert_market_context_snapshot(
+    session: AsyncSession,
+    city_id: int,
+    date_et: str,
+    **kwargs,
+) -> MarketContextSnapshot:
+    snap = await get_market_context_snapshot(session, city_id, date_et)
+    if snap is None:
+        snap = MarketContextSnapshot(city_id=city_id, date_et=date_et, **kwargs)
+        session.add(snap)
+    else:
+        for k, v in kwargs.items():
+            if hasattr(snap, k):
+                setattr(snap, k, v)
+    await session.commit()
+    await session.refresh(snap)
+    return snap
 
 
 # ─── Signals ──────────────────────────────────────────────────────────────────

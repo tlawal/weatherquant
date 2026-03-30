@@ -382,6 +382,95 @@
 </div>
 {% endif %}
 
+<!-- ── MARKET CONTEXT ─────────────────────────────────────────────────────── -->
+<div class="card p-5 mb-6">
+  <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between mb-4">
+    <div class="space-y-1">
+      <div class="flex items-center gap-2">
+        <h2 class="font-semibold text-sm">Market Context</h2>
+        {% if market_context_snapshot and market_context_snapshot.selection %}
+        <span class="text-[10px] px-2 py-0.5 rounded-full font-bold"
+              style="background:rgba(34,211,238,0.12);color:var(--cyan)">
+          {{ market_context_snapshot.selection.label }} · {{ market_context_snapshot.selection.confidence_pct }}%
+        </span>
+        {% endif %}
+      </div>
+      <div class="text-[10px] flex flex-wrap items-center gap-2" style="color:var(--text-muted)">
+        {% if market_context_snapshot and market_context_snapshot.generated_at %}
+        <span class="mono">Generated {{ market_context_snapshot.generated_at }}</span>
+        {% else %}
+        <span>No generated Market Context snapshot yet</span>
+        {% endif %}
+        {% if market_context_snapshot and market_context_snapshot.provider %}
+        <span class="mono">· {{ market_context_snapshot.provider }}/{{ market_context_snapshot.model_name }}</span>
+        {% endif %}
+        {% if market_context_snapshot and market_context_snapshot.generation_status %}
+        <span class="mono">· {{ market_context_snapshot.generation_status|upper }}</span>
+        {% endif %}
+      </div>
+    </div>
+    <div class="flex items-center gap-2">
+      <button
+        onclick="refreshMarketContext('{{ city.city_slug }}', '{{ today_et }}', this)"
+        class="px-3 py-1.5 rounded-lg text-[10px] font-bold tracking-widest transition-all border"
+        style="{% if market_context_llm_ready %}background:var(--bg-panel);border-color:var(--cyan);color:var(--cyan){% else %}background:var(--bg-panel);border-color:var(--border);color:var(--text-muted);opacity:0.5;cursor:not-allowed{% endif %}"
+        {% if not market_context_llm_ready %}disabled title="Configure MARKET_CONTEXT_LLM_PROVIDER, MARKET_CONTEXT_LLM_MODEL, and API key to enable refresh"{% endif %}>
+        REFRESH
+      </button>
+    </div>
+  </div>
+
+  {% if not market_context_llm_ready %}
+  <div class="mb-4 p-3 rounded-lg text-[11px]" style="background:rgba(234,179,8,0.08);border:1px solid rgba(234,179,8,0.25);color:#FCD34D">
+    Market Context refresh is disabled until an LLM provider, model, and API key are configured on the server.
+  </div>
+  {% endif %}
+
+  {% if market_context_snapshot and market_context_snapshot.last_error %}
+  <div class="mb-4 p-3 rounded-lg text-[11px]" style="background:rgba(249,115,22,0.08);border:1px solid rgba(249,115,22,0.25);color:#FDBA74">
+    {% if market_context_snapshot.sections %}
+      Last refresh failed. Showing the last stored snapshot.
+    {% else %}
+      Market Context refresh failed and no prior snapshot is available.
+    {% endif %}
+    <span class="block mt-1 mono break-words opacity-80">{{ market_context_snapshot.last_error }}</span>
+  </div>
+  {% endif %}
+
+  {% if market_context_snapshot and market_context_snapshot.sections %}
+  <div class="space-y-4">
+    <div>
+      <h3 class="text-xs font-bold uppercase tracking-widest mb-1" style="color:var(--text-muted)">1. Current Observations:</h3>
+      <p class="text-sm leading-relaxed" style="color:var(--text-main)">{{ market_context_snapshot.sections.current_observations }}</p>
+    </div>
+    <div>
+      <h3 class="text-xs font-bold uppercase tracking-widest mb-1" style="color:var(--text-muted)">2. Short-Range Model Landscape:</h3>
+      <p class="text-sm leading-relaxed" style="color:var(--text-main)">{{ market_context_snapshot.sections.short_range_model_landscape }}</p>
+    </div>
+    <div>
+      <h3 class="text-xs font-bold uppercase tracking-widest mb-1" style="color:var(--text-muted)">3. Historical &amp; Climatology Perspective:</h3>
+      <p class="text-sm leading-relaxed" style="color:var(--text-main)">{{ market_context_snapshot.sections.historical_climatology_perspective }}</p>
+    </div>
+    <div>
+      <h3 class="text-xs font-bold uppercase tracking-widest mb-1" style="color:var(--text-muted)">4. Market Pricing Analysis:</h3>
+      <p class="text-sm leading-relaxed" style="color:var(--text-main)">{{ market_context_snapshot.sections.market_pricing_analysis }}</p>
+    </div>
+    <div>
+      <h3 class="text-xs font-bold uppercase tracking-widest mb-1" style="color:var(--text-muted)">5. Diagnostic Reasoning:</h3>
+      <p class="text-sm leading-relaxed" style="color:var(--text-main)">{{ market_context_snapshot.sections.diagnostic_reasoning }}</p>
+    </div>
+    <div>
+      <h3 class="text-xs font-bold uppercase tracking-widest mb-1" style="color:var(--text-muted)">6. Final, High-Stakes Selection:</h3>
+      <p class="text-sm leading-relaxed" style="color:var(--text-main)">{{ market_context_snapshot.sections.final_high_stakes_selection }}</p>
+    </div>
+  </div>
+  {% else %}
+  <div class="text-sm leading-relaxed" style="color:var(--text-muted)">
+    Market Context has not been generated for this city/date yet. Use <span class="mono">REFRESH</span> to synthesize the latest stored backend observations, forecast comparisons, pricing context, and deterministic final bucket call.
+  </div>
+  {% endif %}
+</div>
+
 <!-- ── STATION-TIME PREDICTIONS ────────────────────────────────────────────── -->
 {% if station_predictions %}
 <div class="card p-5 mb-6" x-data="{ showDetail: false }">
@@ -1408,6 +1497,43 @@ function quickTrade(city_slug, bucket_idx) {
     if (el && el._x_dataStack) {
       el._x_dataStack[0].selectBucket(bucket_idx);
     }
+  }
+}
+
+async function refreshMarketContext(citySlug, dateEt, buttonEl) {
+  if (!buttonEl || buttonEl.disabled) return;
+
+  const originalText = buttonEl.textContent;
+  buttonEl.disabled = true;
+  buttonEl.textContent = 'REFRESHING';
+
+  try {
+    const tok = getAdminToken() || promptForToken();
+    if (!tok) throw new Error('Admin token required');
+
+    const res = await fetch(`/api/market-context/${citySlug}/refresh?date=${encodeURIComponent(dateEt)}`, {
+      method: 'POST',
+      headers: {
+        'X-Admin-Token': tok,
+      },
+    });
+
+    let payload = null;
+    try {
+      payload = await res.json();
+    } catch (e) {
+      payload = null;
+    }
+
+    if (!res.ok) {
+      throw new Error((payload && payload.detail) || `HTTP ${res.status}`);
+    }
+
+    window.location.reload();
+  } catch (err) {
+    alert(`Market Context refresh failed: ${err.message}`);
+    buttonEl.disabled = false;
+    buttonEl.textContent = originalText;
   }
 }
 </script>

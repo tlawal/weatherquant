@@ -16,6 +16,7 @@ from fastapi.templating import Jinja2Templates
 
 from backend.config import Config
 from backend.city_registry import get_city_priority, CITY_REGISTRY_BY_SLUG
+from backend.market_context.service import serialize_market_context_snapshot
 from backend.tz_utils import city_local_date, city_local_now, city_local_tomorrow, et_today
 from backend.strategy.kelly import calculate_expected_value, calculate_kelly_fraction
 from backend.modeling.calibration_engine import get_reliability_metrics
@@ -137,6 +138,7 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
         get_latest_signal_for_bucket,
         get_latest_market_snapshot,
         get_daily_high_metar,
+        get_market_context_snapshot,
         get_station_profile,
         get_resolution_high_metar,
         get_avg_peak_timing,
@@ -192,6 +194,7 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
              primary_fc = await get_latest_forecast(sess, city.id, "open_meteo", target_date_et)
         
         event = await get_event(sess, city.id, target_date_et)
+        market_context_snapshot = await get_market_context_snapshot(sess, city.id, target_date_et)
 
     model = None
     buckets_with_signals = []
@@ -496,6 +499,8 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
             "station_predictions": station_predictions,
             "station_predictions_json": json.dumps(station_predictions),
             "adaptive_info": adaptive_info,
+            "market_context_snapshot": serialize_market_context_snapshot(market_context_snapshot),
+            "market_context_llm_ready": Config.market_context_llm_ready(),
         },
     )
 

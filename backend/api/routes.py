@@ -20,6 +20,12 @@ from backend.city_registry import CITY_REGISTRY_BY_SLUG
 from backend.tz_utils import city_local_date, et_today
 from backend.config import Config
 from backend.execution import arming as arming_mod
+from backend.market_context.adapter import MarketContextLLMError
+from backend.market_context.service import (
+    MarketContextBuildError,
+    get_market_context_snapshot_payload,
+    refresh_market_context_snapshot,
+)
 from backend.storage.db import get_session
 from backend.storage.repos import (
     append_audit,
@@ -406,6 +412,74 @@ async def get_city_state(city_slug: str):
         "settlement_verified": event.settlement_source_verified if event else False,
         "trading_enabled": event.trading_enabled if event else False,
     }
+
+
+# ─── Market Context ───────────────────────────────────────────────────────────
+
+@router.get("/api/market-context/{city_slug}")
+async def get_market_context(city_slug: str, date: Optional[str] = None):
+    async with get_session() as sess:
+        city = await _get_city_or_404(sess, city_slug)
+    target_date = date or city_local_date(city)
+
+    snapshot = await get_market_context_snapshot_payload(city_slug, target_date)
+    return {
+        "city_slug": city_slug,
+        "date_et": target_date,
+        "llm_ready": Config.market_context_llm_ready(),
+        "snapshot": snapshot,
+    }
+
+
+@router.post("/api/market-context/{city_slug}/refresh")
+async def refresh_market_context(
+    city_slug: str,
+    date: Optional[str] = None,
+    actor: str = Depends(require_admin),
+):
+    async with get_session() as sess:
+        city = await _get_city_or_404(sess, city_slug)
+    target_date = date or city_local_date(city)
+
+    try:
+        snapshot = await refresh_market_context_snapshot(city_slug, target_date)
+        async with get_session() as sess:
+            await append_audit(
+                sess,
+                actor=actor,
+                action="market_context_refresh",
+                payload={"city_slug": city_slug, "date_et": target_date, "status": snapshot.get("generation_status")},
+                ok=snapshot.get("generation_status") == "success",
+                error_msg=snapshot.get("last_error"),
+            )
+        return {
+            "ok": snapshot.get("generation_status") == "success",
+            "city_slug": city_slug,
+            "date_et": target_date,
+            "snapshot": snapshot,
+        }
+    except MarketContextLLMError as exc:
+        async with get_session() as sess:
+            await append_audit(
+                sess,
+                actor=actor,
+                action="market_context_refresh",
+                payload={"city_slug": city_slug, "date_et": target_date},
+                ok=False,
+                error_msg=str(exc),
+            )
+        raise HTTPException(status_code=503, detail=str(exc))
+    except MarketContextBuildError as exc:
+        async with get_session() as sess:
+            await append_audit(
+                sess,
+                actor=actor,
+                action="market_context_refresh",
+                payload={"city_slug": city_slug, "date_et": target_date},
+                ok=False,
+                error_msg=str(exc),
+            )
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 # ─── Markets ─────────────────────────────────────────────────────────────────

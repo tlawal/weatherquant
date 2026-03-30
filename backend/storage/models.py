@@ -62,6 +62,9 @@ class City(Base):
     calibration: Mapped[Optional["CalibrationParams"]] = relationship(
         "CalibrationParams", back_populates="city_ref", uselist=False
     )
+    market_context_snapshots: Mapped[list["MarketContextSnapshot"]] = relationship(
+        "MarketContextSnapshot", back_populates="city_ref", cascade="all, delete-orphan"
+    )
 
 
 # ─── Events & Buckets ─────────────────────────────────────────────────────────
@@ -261,6 +264,34 @@ class ModelSnapshot(Base):
     forecast_quality: Mapped[str] = mapped_column(String(16), default="ok")
 
     event: Mapped[Event] = relationship("Event", back_populates="model_snapshots")
+
+
+class MarketContextSnapshot(Base):
+    """Stored Market Context narrative and structured source payload for a city/date."""
+    __tablename__ = "market_context_snapshots"
+    __table_args__ = (
+        UniqueConstraint("city_id", "date_et", name="uq_market_context_city_date"),
+        Index("ix_market_context_city_date", "city_id", "date_et"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    city_id: Mapped[int] = mapped_column(Integer, ForeignKey("cities.id"), nullable=False)
+    date_et: Mapped[str] = mapped_column(String(10), nullable=False)
+    generation_status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False)
+    sections_json: Mapped[Optional[str]] = mapped_column(Text)
+    selection_json: Mapped[Optional[str]] = mapped_column(Text)
+    source_context_json: Mapped[Optional[str]] = mapped_column(Text)
+    provider: Mapped[Optional[str]] = mapped_column(String(32))
+    model_name: Mapped[Optional[str]] = mapped_column(String(128))
+    generated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    freshness_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[Optional[str]] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+    city_ref: Mapped[City] = relationship("City", back_populates="market_context_snapshots")
 
 
 # ─── Signals ──────────────────────────────────────────────────────────────────
