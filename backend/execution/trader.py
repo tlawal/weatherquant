@@ -225,7 +225,7 @@ async def execute_signal(
         clob_result = await clob.place_market_order(
             token_id=bucket.yes_token_id,
             side="BUY",
-            amount=shares * limit_price,
+            amount=max(shares * limit_price, 1.0),
         )
     else:
         clob_result = await clob.place_limit_order(
