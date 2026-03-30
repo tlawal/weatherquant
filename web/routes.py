@@ -338,6 +338,12 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                 obs_dicts.append(d)
 
             wu_peak_time = wu_hourly_raw.get("peak_hour")
+            # Fused forecast high for adaptive remaining-rise cap
+            _fc_vals = [
+                s.high_f for s in [primary_fc, wu_d, wu_h]
+                if s is not None and getattr(s, "high_f", None) is not None
+            ]
+            _adaptive_fc_high = sum(_fc_vals) / len(_fc_vals) if _fc_vals else None
             try:
                 adaptive = run_adaptive(
                     todays_obs=obs_dicts,
@@ -346,6 +352,12 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                     city_tz=city_tz_str,
                     wu_hourly_peak_time=wu_peak_time,
                     historical_peak_mins=None,
+                    forecast_high=_adaptive_fc_high,
+                    ml_features={
+                        "temp_slope_3h": 0.0,
+                        "avg_peak_timing_mins": 960.0,
+                        "day_of_year": now_local.timetuple().tm_yday,
+                    },
                 )
                 if adaptive:
                     for sp in adaptive.station_predictions:

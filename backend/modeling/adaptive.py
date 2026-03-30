@@ -282,6 +282,47 @@ def run_regression(
 
 
 # ---------------------------------------------------------------------------
+# Diurnal decay for extrapolation
+# ---------------------------------------------------------------------------
+
+def _diurnal_decay(minutes_ahead: float, now_hour: float, peak_hour: float) -> float:
+    """Decay factor [0, 1] that reduces extrapolation rate as we approach peak time.
+
+    Physical basis: the diurnal heating rate follows a half-sinusoid that
+    peaks mid-morning and decays to zero at peak temperature time (typically
+    2–4 PM).  A constant-rate linear extrapolation overestimates future
+    temperatures because it ignores this deceleration.
+
+    The decay factor approximates the ratio of actual integrated heating
+    to linearly-extrapolated heating over the interval [now, target]:
+
+      Before peak: rate declines quasi-linearly → avg multiplier ≈ 1 − f/2
+                   where f = fraction of remaining heating window consumed.
+      Past peak:   only apply the slope up to peak, then hold flat.
+
+    References:
+      - Parton & Nicholls (2012) J. Appl. Meteor. Climatol. 51, 612–630.
+      - Mayer & Groom (2002) J. Atmos. Sci. 59, 1413–1424.
+    """
+    if minutes_ahead <= 0:
+        return 1.0
+
+    target_hour = now_hour + minutes_ahead / 60.0
+
+    if target_hour > peak_hour:
+        # Past peak: heating only occurs in [now, peak], with average
+        # decay 0.5 over that window.  After peak, temperature is flat.
+        mins_to_peak = max(0.0, (peak_hour - now_hour) * 60.0)
+        return (mins_to_peak * 0.5) / minutes_ahead if minutes_ahead > 0 else 0.0
+
+    # Before peak: rate declines linearly toward zero at peak.
+    # Average multiplier over [now, target] ≈ 1 − f/2
+    # where f is the fraction of the remaining heating window consumed.
+    frac = (target_hour - now_hour) / (peak_hour - now_hour)
+    return max(0.0, 1.0 - frac / 2.0)
+
+
+# ---------------------------------------------------------------------------
 # Station-time predictions
 # ---------------------------------------------------------------------------
 
@@ -297,11 +338,18 @@ def compute_station_predictions(
     dt_key: str = "observed_at",
     temp_key: str = "temp_f",
     city_tz: str = "America/New_York",
+    estimated_peak_mins: Optional[float] = None,
+    remaining_rise: Optional[float] = None,
 ) -> list[StationTimePrediction]:
     """Compute predicted temps at each station observation time from start_hour through end_hour.
 
-    Blends Kalman trend with regression slope.  Past observation times are
-    filled with actual observed values.
+    Blends Kalman trend with regression slope, applying a diurnal decay
+    factor so that the extrapolated warming rate decelerates toward zero
+    at the estimated peak temperature time.  An optional remaining-rise
+    cap prevents predictions from exceeding the Kalman temperature plus
+    the ML-predicted remaining temperature rise.
+
+    Past observation times are filled with actual observed values.
     """
     tz = ZoneInfo(city_tz)
     today = now_local.date()
@@ -359,14 +407,30 @@ def compute_station_predictions(
                 else:
                     blended_slope = kalman.temp_trend_per_min
 
-                predicted = kalman.smoothed_temp + blended_slope * minutes_ahead
+                # Apply diurnal decay so the extrapolated warming rate
+                # decelerates toward zero at the estimated peak time,
+                # rather than projecting a constant rate indefinitely.
+                peak_hour = (estimated_peak_mins or 900) / 60.0   # default 3 PM
+                now_hour = now_local.hour + now_local.minute / 60.0
+                decay = _diurnal_decay(minutes_ahead, now_hour, peak_hour)
+                predicted = kalman.smoothed_temp + blended_slope * minutes_ahead * decay
+
+                # Cap: never exceed current temp + ML-predicted remaining rise
+                if remaining_rise is not None and remaining_rise >= 0:
+                    max_predicted = kalman.smoothed_temp + remaining_rise
+                    predicted = min(predicted, max_predicted)
+
+                # Floor: during warming hours, don't predict below current temp
+                target_hour = now_hour + minutes_ahead / 60.0
+                if blended_slope > 0 and minutes_ahead > 0 and target_hour < peak_hour:
+                    predicted = max(predicted, kalman.smoothed_temp)
 
                 # Uncertainty grows with time ahead
                 base_unc = kalman.uncertainty
                 time_unc = abs(minutes_ahead) * 0.015 * kalman.process_noise_factor
                 total_unc = math.sqrt(base_unc ** 2 + time_unc ** 2)
 
-                trend_per_hour = blended_slope * 60.0
+                trend_per_hour = blended_slope * 60.0 * decay
 
                 predictions.append(StationTimePrediction(
                     obs_time=obs_time,
@@ -538,6 +602,8 @@ def run_adaptive(
     city_tz: str = "America/New_York",
     wu_hourly_peak_time: Optional[str] = None,
     historical_peak_mins: Optional[float] = None,
+    forecast_high: Optional[float] = None,
+    ml_features: Optional[dict] = None,
 ) -> Optional[AdaptiveResult]:
     """Run the full adaptive prediction pipeline.
 
@@ -550,6 +616,9 @@ def run_adaptive(
         city_tz: IANA timezone string
         wu_hourly_peak_time: e.g. "3:00 PM ET" from WU forecast
         historical_peak_mins: average historical peak in minutes since midnight
+        forecast_high: fused NWS/WU daily high forecast (used for remaining-rise cap)
+        ml_features: dict with temp_slope_3h, avg_peak_timing_mins, day_of_year
+                     (used for ML remaining-rise prediction)
     """
     if not todays_obs or len(todays_obs) < 3:
         log.debug("adaptive: insufficient observations (%d)", len(todays_obs))
@@ -561,27 +630,8 @@ def run_adaptive(
     # 2. Rolling regression on recent window
     reg_slope, reg_r2, features_used = run_regression(todays_obs)
 
-    # 3. Station-time predictions
-    predictions = compute_station_predictions(
-        kalman=kalman,
-        regression_slope=reg_slope,
-        regression_r2=reg_r2,
-        observation_minutes=observation_minutes,
-        now_local=now_local,
-        todays_obs=todays_obs,
-        city_tz=city_tz,
-    )
-
-    # 4. Predicted daily high from station predictions
-    if predictions:
-        best_pred = max(predictions, key=lambda p: p.predicted_temp)
-        predicted_daily_high = best_pred.predicted_temp
-        predicted_high_time = best_pred.obs_time
-    else:
-        predicted_daily_high = kalman.smoothed_temp
-        predicted_high_time = None
-
-    # 5. Composite peak timing
+    # 3. Composite peak timing (computed before station predictions so
+    #    the estimated peak time is available for diurnal decay)
     peak_info = compute_peak_timing(
         wu_hourly_peak_time=wu_hourly_peak_time,
         historical_peak_mins=historical_peak_mins,
@@ -591,7 +641,44 @@ def run_adaptive(
         city_tz=city_tz,
     )
 
-    # 6. Sigma adjustment: if we have rich data, tighten uncertainty
+    # 4. ML remaining-rise cap (prevents runaway extrapolation)
+    _remaining_rise: Optional[float] = None
+    if ml_features is not None:
+        try:
+            from backend.modeling.residual_tracker import predict_remaining_rise
+            _remaining_rise = predict_remaining_rise(
+                hour_local=now_local.hour,
+                current_temp_f=kalman.smoothed_temp,
+                temp_slope_3h=ml_features.get("temp_slope_3h", 0.0),
+                avg_peak_timing_mins=ml_features.get("avg_peak_timing_mins", 960.0),
+                day_of_year=ml_features.get("day_of_year", now_local.timetuple().tm_yday),
+            )
+        except Exception:
+            log.debug("adaptive: remaining-rise prediction failed, skipping cap")
+
+    # 5. Station-time predictions (with diurnal decay + remaining-rise cap)
+    predictions = compute_station_predictions(
+        kalman=kalman,
+        regression_slope=reg_slope,
+        regression_r2=reg_r2,
+        observation_minutes=observation_minutes,
+        now_local=now_local,
+        todays_obs=todays_obs,
+        city_tz=city_tz,
+        estimated_peak_mins=peak_info.get("estimated_peak_mins"),
+        remaining_rise=_remaining_rise,
+    )
+
+    # 6. Predicted daily high from station predictions
+    if predictions:
+        best_pred = max(predictions, key=lambda p: p.predicted_temp)
+        predicted_daily_high = best_pred.predicted_temp
+        predicted_high_time = best_pred.obs_time
+    else:
+        predicted_daily_high = kalman.smoothed_temp
+        predicted_high_time = None
+
+    # 7. Sigma adjustment: if we have rich data, tighten uncertainty
     sigma_adj = 1.0
     if kalman.n_observations >= 20:
         sigma_adj *= 0.85

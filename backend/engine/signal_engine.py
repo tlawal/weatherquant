@@ -251,21 +251,30 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
                         d["cloud_cover"] = cover
                         cloud_map = {"CLR": 0, "SKC": 0, "FEW": 1, "SCT": 2, "BKN": 3, "OVC": 4}
                         d["cloud_cover_val"] = cloud_map.get((cover or "").upper(), None)
-                        # Humidity from dewpoint + temp (Magnus formula)
+                        # Humidity and dewpoint from raw METAR (Magnus formula)
                         dewp = raw.get("dewp")
                         temp_c = raw.get("temp")
                         if dewp is not None and temp_c is not None:
                             try:
                                 tc, dc = float(temp_c), float(dewp)
                                 d["humidity_pct"] = 100 * math.exp((17.625 * dc) / (243.04 + dc)) / math.exp((17.625 * tc) / (243.04 + tc))
+                                d["dewpoint_f"] = dc * 9.0 / 5.0 + 32.0
                             except Exception:
                                 pass
+                        d["wind_gust_kt"] = raw.get("wgst")
                         # Precipitation flag
                         wx = raw.get("wxString") or ""
                         d["precip_flag"] = any(tok in wx.upper() for tok in ("RA", "TS", "SH", "SN", "DZ"))
                 except Exception:
                     pass
             obs_dicts.append(d)
+
+        # Fused forecast high for adaptive remaining-rise cap
+        _fc_highs = [
+            s.high_f for s in [nws_obs, wu_daily_obs, wu_hourly_obs]
+            if s is not None and s.high_f is not None
+        ]
+        adaptive_forecast_high = sum(_fc_highs) / len(_fc_highs) if _fc_highs else None
 
         try:
             adaptive_result = run_adaptive(
@@ -275,9 +284,38 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
                 city_tz=city_tz_str,
                 wu_hourly_peak_time=wu_hourly_peak_time,
                 historical_peak_mins=avg_peak_mins,
+                forecast_high=adaptive_forecast_high,
+                ml_features={
+                    "temp_slope_3h": temp_slope_3h or 0.0,
+                    "avg_peak_timing_mins": avg_peak_mins or 960.0,
+                    "day_of_year": now_local.timetuple().tm_yday,
+                },
             )
         except Exception:
             log.exception("signal: %s — adaptive engine failed", city.city_slug)
+
+    # Build latest weather conditions dict for sigma adjustment
+    _latest_wx: Optional[dict] = None
+    if obs_dicts:
+        _lw = obs_dicts[-1]
+        _dp_spread = None
+        if metar and metar.temp_f is not None and _lw.get("dewpoint_f") is not None:
+            _dp_spread = max(0.0, metar.temp_f - _lw["dewpoint_f"])
+        # Pressure tendency: diff between first and last obs altimeter
+        _p_tendency = None
+        _p_first = next((o.get("altimeter_inhg") for o in obs_dicts if o.get("altimeter_inhg") is not None), None)
+        _p_last = _lw.get("altimeter_inhg")
+        if _p_first is not None and _p_last is not None:
+            _p_tendency = _p_last - _p_first
+        _latest_wx = {
+            "cloud_cover_val": _lw.get("cloud_cover_val"),
+            "humidity_pct": _lw.get("humidity_pct"),
+            "wind_speed_kt": _lw.get("wind_speed_kt"),
+            "wind_gust_kt": _lw.get("wind_gust_kt"),
+            "pressure_tendency": _p_tendency,
+            "has_precip": _lw.get("precip_flag", False),
+            "dewpoint_spread_f": _dp_spread,
+        }
 
     # Run temperature model
     model = compute_model(
@@ -298,6 +336,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
             "day_of_year": datetime.now(timezone.utc).timetuple().tm_yday,
         },
         adaptive=adaptive_result,
+        latest_weather=_latest_wx,
     )
 
     if model is None:

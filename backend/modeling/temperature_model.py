@@ -85,6 +85,77 @@ def _metar_weight(hour_local: int) -> float:
     return _interpolate_table(_METAR_WEIGHT_TABLE, hour_local)
 
 
+def weather_adjusted_sigma(
+    sigma_raw: float,
+    cloud_cover_val: Optional[int] = None,
+    humidity_pct: Optional[float] = None,
+    wind_speed_kt: Optional[float] = None,
+    wind_gust_kt: Optional[float] = None,
+    pressure_tendency: Optional[float] = None,
+    has_precip: bool = False,
+    dewpoint_spread_f: Optional[float] = None,
+) -> float:
+    """Adjust sigma (forecast uncertainty) based on current weather conditions.
+
+    Physical reasoning for each adjustment:
+      - Overcast skies block shortwave radiation, capping diurnal heating
+        → tighter temperature distribution.
+      - High humidity / small dewpoint spread → moist air has higher Cp
+        → smaller diurnal swing → lower uncertainty.
+      - Strong sustained wind → deep boundary-layer mixing → spatially
+        uniform temperatures → more predictable.
+      - Large gust spread → turbulent micro-scale variability → wider.
+      - Falling barometric pressure → approaching front / regime change
+        → much wider uncertainty.
+      - Active precipitation → evaporative cooling dominates the energy
+        budget → temperature locked near wet-bulb → tighter distribution.
+
+    Returns sigma_raw multiplied by a clamped factor in [0.5, 1.5].
+    """
+    factor = 1.0
+
+    # Cloud cover (strongest single predictor of diurnal range)
+    if cloud_cover_val is not None:
+        # CLR=0: 1.0, FEW=1: 0.925, SCT=2: 0.85, BKN=3: 0.775, OVC=4: 0.70
+        factor *= 1.0 - 0.075 * cloud_cover_val
+
+    # Humidity / dewpoint spread
+    if dewpoint_spread_f is not None:
+        if dewpoint_spread_f < 5:
+            factor *= 0.85
+        elif dewpoint_spread_f < 10:
+            factor *= 0.92
+    elif humidity_pct is not None:
+        if humidity_pct > 80:
+            factor *= 0.85
+        elif humidity_pct > 60:
+            factor *= 0.92
+
+    # Wind: sustained wind tightens, gusts widen
+    if wind_speed_kt is not None:
+        if wind_speed_kt > 15:
+            factor *= 0.90
+        elif wind_speed_kt > 8:
+            factor *= 0.95
+    if wind_gust_kt is not None and wind_speed_kt is not None:
+        gust_spread = wind_gust_kt - wind_speed_kt
+        if gust_spread > 10:
+            factor *= 1.10
+
+    # Pressure tendency (falling = front approaching = wider)
+    if pressure_tendency is not None:
+        if pressure_tendency < -0.06:
+            factor *= 1.25
+        elif pressure_tendency < -0.03:
+            factor *= 1.10
+
+    # Active precipitation constrains temps strongly
+    if has_precip:
+        factor *= 0.80
+
+    return sigma_raw * max(0.5, min(1.5, factor))
+
+
 def compute_model(
     nws_high: Optional[float],
     wu_daily_high: Optional[float],
@@ -99,6 +170,7 @@ def compute_model(
     observed_high: Optional[float] = None,
     ml_features: Optional[dict] = None,
     adaptive=None,
+    latest_weather: Optional[dict] = None,
 ) -> Optional[ModelResult]:
     """
     Fuse all forecast sources and compute temperature distribution + bucket probabilities.
@@ -165,6 +237,24 @@ def compute_model(
     else:
         # Only one source — use a conservative base uncertainty
         sigma_raw = 2.5 * unit_mult
+
+    # ── Weather-conditioned sigma adjustment ─────────────────────────────────
+    # Adjust base sigma using current weather conditions (cloud cover,
+    # humidity, wind, pressure tendency, precipitation).  This replaces
+    # the regime-agnostic forecast-spread-only sigma with a physically
+    # grounded heteroscedastic estimate.
+    if latest_weather:
+        wx = latest_weather
+        sigma_raw = weather_adjusted_sigma(
+            sigma_raw,
+            cloud_cover_val=wx.get("cloud_cover_val"),
+            humidity_pct=wx.get("humidity_pct"),
+            wind_speed_kt=wx.get("wind_speed_kt"),
+            wind_gust_kt=wx.get("wind_gust_kt"),
+            pressure_tendency=wx.get("pressure_tendency"),
+            has_precip=bool(wx.get("has_precip")),
+            dewpoint_spread_f=wx.get("dewpoint_spread_f"),
+        )
 
     # ── METAR intraday adjustment ──────────────────────────────────────────────
     w_metar = _metar_weight(hour_local)
