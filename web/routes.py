@@ -379,6 +379,19 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                             "trend_arrow": trend_arrow,
                             "is_predicted_high": (sp.predicted_temp == adaptive.predicted_daily_high),
                         })
+                    # Compute weather sigma factor for display
+                    _wx_sigma_factor = None
+                    if obs_dicts:
+                        _lw = obs_dicts[-1]
+                        from backend.modeling.temperature_model import weather_adjusted_sigma
+                        _wx_sigma_factor = round(weather_adjusted_sigma(
+                            1.0,  # pass 1.0 to get the raw factor
+                            cloud_cover_val=_lw.get("cloud_cover_val"),
+                            humidity_pct=_lw.get("humidity_pct"),
+                            wind_speed_kt=_lw.get("wind_speed_kt"),
+                            wind_gust_kt=_lw.get("wind_gust_kt"),
+                            has_precip=bool(_lw.get("precip_flag")),
+                        ), 2)
                     adaptive_info = {
                         "kalman_temp": round(adaptive.kalman.smoothed_temp, 1),
                         "kalman_trend_per_hr": round(adaptive.kalman.temp_trend_per_min * 60, 2),
@@ -393,6 +406,11 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                         "peak_already_passed": adaptive.peak_already_passed,
                         "composite_peak_timing": adaptive.composite_peak_timing,
                         "peak_timing_source": adaptive.peak_timing_source,
+                        "remaining_rise_cap": round(adaptive.remaining_rise_cap, 1) if adaptive.remaining_rise_cap is not None else None,
+                        "weather_sigma_factor": _wx_sigma_factor,
+                        "diurnal_fit_active": adaptive.diurnal_fit_active,
+                        "diurnal_fit_rmse": round(adaptive.diurnal_fit_rmse, 1) if adaptive.diurnal_fit_rmse is not None else None,
+                        "diurnal_peak_estimate": round(adaptive.diurnal_peak_estimate, 1) if adaptive.diurnal_peak_estimate is not None else None,
                     }
             except Exception as e:
                 log.warning("city_detail: adaptive engine failed for %s: %s", city_slug, e)

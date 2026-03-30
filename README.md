@@ -136,10 +136,26 @@ Polymarket's temperature markets resolve on **specific ASOS observation times** 
   Falls back to univariate (time-only) regression if extended fields unavailable. Uses numpy `lstsq` for OLS solution—no new dependencies.
 
 **Station-Time Predictions**:
-Given a station's observation minutes (e.g., [52] for KATL) and current local time, the engine computes predicted temperatures for all remaining observation times from 10:52 AM through 7:52 PM. Each prediction blends:
-1. **Kalman extrapolated trend**: Current smoothed temperature + (trend per minute × minutes ahead)
-2. **Regression extrapolated slope**: Regression slope applied over the extrapolation horizon
-3. **Weather adjustment**: Regression features (wind, clouds, precip) dampen or accelerate the warming trend
+Given a station's observation minutes (e.g., [52] for KATL) and current local time, the engine computes predicted temperatures for all remaining observation times from 6:52 AM through 7:52 PM. Each prediction blends:
+1. **Kalman extrapolated trend**: Current smoothed temperature + (trend per minute x minutes ahead x **diurnal decay**)
+2. **Regression extrapolated slope**: Regression slope applied over the extrapolation horizon, weighted by R^2
+3. **Diurnal decay factor**: A physically derived multiplier that reduces the warming rate toward zero as peak temperature time approaches (Parton & Nicholls 2012). Prevents unrealistic constant-rate extrapolation.
+4. **Parametric diurnal curve**: When ≥6 observations are available, a piecewise temperature curve (sin² rising + Gaussian falling) is fitted to the day's data via L-BFGS-B optimization, constrained by the forecast high and estimated peak timing. Near-term predictions (<2 hr) blend Kalman with the curve; far-term predictions (>2 hr) weight the physics-based curve more heavily. Falls back to decay-only when insufficient data or poor fit (RMSE > 3°).
+5. **Remaining-rise cap**: ML-predicted ceiling (GradientBoosting) limits predictions to `current_temp + remaining_rise`, preventing runaway values.
+6. **Weather adjustment**: Regression features (wind, clouds, precip) dampen or accelerate the warming trend
+
+**Weather-Conditioned Uncertainty (sigma)**:
+Forecast distribution uncertainty adjusts in real-time based on current conditions:
+
+| Condition | Physical Mechanism | Sigma Effect |
+|---|---|---|
+| Overcast (OVC) | Blocks shortwave radiation, caps heating | Tighten ~30% |
+| Humidity > 80% | Higher heat capacity, smaller diurnal swing | Tighten ~15% |
+| Dewpoint spread < 5F | Near saturation, fog/low clouds likely | Tighten ~15% |
+| Wind > 15 kt | Deep boundary layer mixing, uniform temps | Tighten ~10% |
+| Gust spread > 10 kt | Turbulent micro-scale variability | Widen ~10% |
+| Pressure falling fast | Frontal approach, regime change | Widen ~25% |
+| Active precipitation | Evaporative cooling dominates energy budget | Tighten ~20% |
 
 The final prediction and uncertainty bound are returned for each future observation time, enabling traders to evaluate risk at exact settlement times.
 
@@ -167,14 +183,23 @@ Rolling 60-min OLS Regression [run every signal cycle]
     - Features: time, wind, humidity, clouds, precip, pressure_tendency
     - Output: slope, R², feature importance
          ↓
-Station-Time Predictions [compute for 10:52 AM – 7:52 PM]
-    - Blend Kalman trend + regression slope
-    - Adjust for weather factors
-    - Return list: (obs_time, predicted_temp, uncertainty)
-         ↓
 Composite Peak Timing [fuse WU forecast + historical + Kalman]
     - Estimate when daily high occurs
     - Detect if peak already passed
+         ↓
+ML Remaining-Rise Cap [GradientBoosting prediction]
+    - Predict max additional temperature rise from current reading
+         ↓
+Parametric Diurnal Curve [fit when ≥6 obs + forecast_high]
+    - Piecewise: sin²(rising) + Gaussian(falling)
+    - Constrained by forecast high + peak timing
+    - Output: DiurnalFit (T_min, T_max, t_peak, RMSE)
+         ↓
+Station-Time Predictions [compute for 10:52 AM – 7:52 PM]
+    - Blend Kalman trend + regression slope + diurnal curve
+    - Near-term: Kalman-weighted; far-term: curve-weighted
+    - Apply diurnal decay + remaining-rise cap
+    - Return list: (obs_time, predicted_temp, uncertainty)
          ↓
 Signal Engine Integration
     - Blend adaptive predicted_daily_high into mu (capped at 0.4 weight)
@@ -184,17 +209,21 @@ Signal Engine Integration
 
 ### Implementation Details
 
-**New file**: `backend/modeling/adaptive.py`
-- Stateless design: re-initialized from scratch each signal cycle (every 60 seconds)
-- Uses full day of observations, not a trailing window
-- All functions are pure: no database writes, no side effects
+**Core files**:
+- `backend/modeling/adaptive.py` — Kalman filter, regression, station predictions, peak timing
+- `backend/modeling/diurnal_model.py` — Parametric diurnal curve fitting (sin² + Gaussian)
+- `backend/modeling/residual_tracker.py` — ML remaining-rise predictor (GradientBoosting)
+- `backend/modeling/temperature_model.py` — Forecast fusion + weather-conditioned sigma
+
+All modules are stateless: re-initialized from scratch each signal cycle (every 60 seconds). Uses full day of observations, not a trailing window. All functions are pure: no database writes, no side effects.
 
 **Key functions**:
 - `run_kalman(obs_dicts)` → `KalmanState` with smoothed temp, trend, uncertainty
 - `run_regression(obs_window, features_available)` → regression slope, R², feature list
-- `compute_station_predictions(kalman, regression, station_minutes, city_tz, current_local_time)` → list of `StationTimePrediction` with time, predicted temp, uncertainty
+- `compute_station_predictions(kalman, regression, station_minutes, city_tz, current_local_time, diurnal_model)` → list of `StationTimePrediction` with time, predicted temp, uncertainty
+- `fit_diurnal_curve(observations, forecast_high, peak_mins, city_tz)` → `DiurnalFit` with T_min, T_max, t_peak, RMSE
 - `compute_peak_timing(wu_hourly_peak, historical_avg, kalman_trend, current_hour)` → estimated peak time, source attribution
-- `run_adaptive(obs_dicts, wu_hourly_peak, historical_peak_timing, station_minutes, city_tz, city_local_now)` → complete `AdaptiveResult` dataclass
+- `run_adaptive(obs_dicts, wu_hourly_peak, historical_peak_timing, station_minutes, city_tz, city_local_now, forecast_high, ml_features)` → complete `AdaptiveResult` dataclass
 
 **Extended METAR Parsing**: New `MetarObsExtended` table (1:1 with `MetarObs`) stores parsed fields:
 - Dewpoint, humidity (via Magnus formula), wind, pressure, cloud cover, weather condition
@@ -280,3 +309,9 @@ The adaptive engine depends on accurate METAR data. Phase 1 addresses three root
 7. **Raftery et al. (2005)** "Using Bayesian Model Averaging to Calibrate Forecast Ensembles" — *Mon. Weather Rev.* 133(5). Future enhancement: could improve weighting in composite peak timing.
 
 8. **Wilson et al. (2010)** "Nowcasting Challenges During the Beijing Olympics" — *Weather and Forecasting* 25(6). High-frequency surface obs (5-min METAR) improve short-term temperature extreme prediction.
+
+9. **Parton & Nicholls (2012)** "Parameterisation of the diurnal cycle of temperature using a piecewise model" — *J. Appl. Meteor. Climatol.* 51, 612–630. Template for the diurnal decay factor: sin^2 rising phase + exponential decay. RMSE < 1C for clear-sky days.
+
+10. **Mayer & Groom (2002)** "Diurnal heating rate in the surface layer" — *J. Atmos. Sci.* 59, 1413–1424. Derives surface heating rate as f(net radiation, soil flux, BL depth). Heating rate peaks 2–3 hr after sunrise and decays quasi-linearly to zero at peak temperature time.
+
+11. **Hemri et al. (2014)** "Trends in the predictive performance of raw ensemble weather forecasts" — *Geophys. Res. Lett.* 41, 9197–9205. EMOS framework: heteroscedastic sigma depending on weather regime, not just forecast spread. Foundation for weather-conditioned sigma adjustment.

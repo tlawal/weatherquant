@@ -415,8 +415,10 @@
     <p><strong style="color:white">Data Source:</strong> All 5-minute METAR observations from api.weather.gov for {{ city.metar_station }} today{% if adaptive_info %} ({{ adaptive_info.kalman_n_obs }} readings since midnight){% endif %}.</p>
     <p><strong style="color:white">Kalman Filter:</strong> 2-state Kalman filter [temp, trend] updated on every 5-min observation.{% if adaptive_info %} Current smoothed temp: {{ adaptive_info.kalman_temp }}°{{ city.unit|default('F') }}, trend: {{ "%+.2f"|format(adaptive_info.kalman_trend_per_hr) }}°/hr.{% endif %}</p>
     <p><strong style="color:white">Regression:</strong>{% if adaptive_info %} 60-minute rolling OLS on {{ adaptive_info.kalman_n_obs }} recent points, slope: {{ "%+.2f"|format(adaptive_info.regression_slope_per_hr) }}°/hr, R²: {{ adaptive_info.regression_r2 }}. Features: {{ adaptive_info.regression_features|join(', ') }}.{% else %} 60-minute rolling OLS regression with weather features.{% endif %}</p>
-    <p><strong style="color:white">Prediction Method:</strong> Kalman trend + regression extrapolation blended by confidence, projected to each upcoming {% if observation_minutes %}:{{ observation_minutes|join(', :') }}{% endif %} observation time.</p>
-    <p><strong style="color:white">Weather Factors:</strong> Process noise adapts to wind speed, precipitation, cloud cover, and humidity — unstable conditions widen prediction uncertainty (Hacker & Rife 2007).</p>
+    <p><strong style="color:white">Prediction Method:</strong> Kalman trend + regression extrapolation blended by confidence, projected to each upcoming {% if observation_minutes %}:{{ observation_minutes|join(', :') }}{% endif %} observation time. A <em>diurnal decay factor</em> reduces the extrapolated warming rate toward zero as peak temperature time approaches (Parton &amp; Nicholls 2012), preventing unrealistic constant-rate projections.</p>
+    <p><strong style="color:white">Diurnal Curve:</strong> When &ge;6 observations are available, a parametric temperature curve (sin&sup2; rising + Gaussian falling) is fitted to the day's data, constrained by the forecast high. Near-term predictions (&lt;2 hr) blend Kalman (responsive to real-time) with the fitted curve; far-term predictions (&gt;2 hr) trust the physics-based curve more heavily.{% if adaptive_info and adaptive_info.diurnal_fit_active is defined %} Status: {% if adaptive_info.diurnal_fit_active %}<span style="color:#4ade80">Active</span>{% if adaptive_info.diurnal_fit_rmse is not none %} (RMSE {{ "%.1f"|format(adaptive_info.diurnal_fit_rmse) }}&deg;){% endif %}{% else %}<span style="color:#facc15">Inactive</span> (fallback to decay){% endif %}.{% endif %}</p>
+    <p><strong style="color:white">Remaining-Rise Cap:</strong> An ML-predicted ceiling (GradientBoosting trained on historical METAR) limits how much temperature can still rise above the current reading. This prevents runaway extrapolation even when the decay factor is insufficient.</p>
+    <p><strong style="color:white">Weather Factors:</strong> Process noise adapts to wind speed, precipitation, cloud cover, and humidity — unstable conditions widen prediction uncertainty (Hacker &amp; Rife 2007). Forecast uncertainty (&sigma;) also adjusts in real-time: overcast skies tighten ~30%, high humidity/dewpoint ~15%, active precipitation ~20%, while falling pressure widens ~25%.</p>
     <p style="color:var(--text-muted)"><em>Predictions recalculate every 60 seconds as new 5-minute observations arrive — always using the full day's data.</em></p>
   </div>
 
@@ -466,7 +468,7 @@
     </table>
   </div>
   {% if adaptive_info %}
-  <div class="mt-3 pt-3 border-t grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 text-[10px]" style="border-color:var(--border)">
+  <div class="mt-3 pt-3 border-t grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3 text-[10px]" style="border-color:var(--border)">
     <div>
       <span style="color:var(--text-muted)">Predicted High</span>
       <div class="mono font-bold" style="color:var(--cyan)">{{ adaptive_info.predicted_daily_high }}°{{ city.unit|default('F') }}{% if adaptive_info.predicted_high_time %} @ {{ adaptive_info.predicted_high_time }}{% endif %}</div>
@@ -483,6 +485,26 @@
       <span style="color:var(--text-muted)">Sigma Adj.</span>
       <div class="mono font-medium">{{ adaptive_info.sigma_adjustment }}x</div>
     </div>
+    {% if adaptive_info.remaining_rise_cap is not none %}
+    <div>
+      <span style="color:var(--text-muted)">Remaining Rise</span>
+      <div class="mono font-medium" style="color:#FBBF24">+{{ "%.1f"|format(adaptive_info.remaining_rise_cap) }}°</div>
+    </div>
+    {% endif %}
+    {% if adaptive_info.weather_sigma_factor is not none %}
+    <div>
+      <span style="color:var(--text-muted)">Weather &sigma;</span>
+      <div class="mono font-medium {% if adaptive_info.weather_sigma_factor < 0.85 %}text-green-400{% elif adaptive_info.weather_sigma_factor > 1.1 %}text-red-400{% else %}text-yellow-400{% endif %}">{{ "%.2f"|format(adaptive_info.weather_sigma_factor) }}x</div>
+    </div>
+    {% endif %}
+    {% if adaptive_info.diurnal_fit_active is defined %}
+    <div>
+      <span style="color:var(--text-muted)">Diurnal Curve</span>
+      <div class="mono font-medium {% if adaptive_info.diurnal_fit_active %}text-green-400{% else %}text-yellow-400{% endif %}">
+        {% if adaptive_info.diurnal_fit_active %}Active{% if adaptive_info.diurnal_fit_rmse is not none %} ({{ "%.1f"|format(adaptive_info.diurnal_fit_rmse) }}°){% endif %}{% else %}Off{% endif %}
+      </div>
+    </div>
+    {% endif %}
   </div>
   {% endif %}
 </div>

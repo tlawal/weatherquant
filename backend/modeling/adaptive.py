@@ -66,6 +66,10 @@ class AdaptiveResult:
     peak_already_passed: bool
     composite_peak_timing: Optional[str]   # e.g. "3:52 PM ET"
     peak_timing_source: Optional[str]      # e.g. "kalman_trend"
+    remaining_rise_cap: Optional[float] = None   # ML-predicted remaining rise (°)
+    diurnal_peak_estimate: Optional[float] = None  # T_max from fitted curve
+    diurnal_fit_rmse: Optional[float] = None       # goodness of fit (°)
+    diurnal_fit_active: bool = False                # whether curve was used
 
 
 # ---------------------------------------------------------------------------
@@ -340,6 +344,7 @@ def compute_station_predictions(
     city_tz: str = "America/New_York",
     estimated_peak_mins: Optional[float] = None,
     remaining_rise: Optional[float] = None,
+    diurnal_model: Optional["DiurnalFit"] = None,
 ) -> list[StationTimePrediction]:
     """Compute predicted temps at each station observation time from start_hour through end_hour.
 
@@ -413,7 +418,21 @@ def compute_station_predictions(
                 peak_hour = (estimated_peak_mins or 900) / 60.0   # default 3 PM
                 now_hour = now_local.hour + now_local.minute / 60.0
                 decay = _diurnal_decay(minutes_ahead, now_hour, peak_hour)
-                predicted = kalman.smoothed_temp + blended_slope * minutes_ahead * decay
+                kalman_pred = kalman.smoothed_temp + blended_slope * minutes_ahead * decay
+
+                # Blend with parametric diurnal curve when available
+                target_hour = now_hour + minutes_ahead / 60.0
+                if (diurnal_model is not None
+                        and diurnal_model.is_reliable
+                        and minutes_ahead > 0):
+                    curve_pred = diurnal_model.predict(target_hour)
+                    # Ramp: near-term trust Kalman, far-term trust curve
+                    curve_weight = min(1.0, minutes_ahead / 120.0)
+                    if diurnal_model.rmse > 2.0:
+                        curve_weight *= 0.7
+                    predicted = (1.0 - curve_weight) * kalman_pred + curve_weight * curve_pred
+                else:
+                    predicted = kalman_pred
 
                 # Cap: never exceed current temp + ML-predicted remaining rise
                 if remaining_rise is not None and remaining_rise >= 0:
@@ -421,7 +440,6 @@ def compute_station_predictions(
                     predicted = min(predicted, max_predicted)
 
                 # Floor: during warming hours, don't predict below current temp
-                target_hour = now_hour + minutes_ahead / 60.0
                 if blended_slope > 0 and minutes_ahead > 0 and target_hour < peak_hour:
                     predicted = max(predicted, kalman.smoothed_temp)
 
@@ -656,7 +674,29 @@ def run_adaptive(
         except Exception:
             log.debug("adaptive: remaining-rise prediction failed, skipping cap")
 
-    # 5. Station-time predictions (with diurnal decay + remaining-rise cap)
+    # 5. Fit parametric diurnal curve (Phase 2) for physically grounded
+    #    far-term predictions.  Requires >= 6 observations and a forecast high.
+    _diurnal_fit = None
+    if len(todays_obs) >= 6 and forecast_high is not None:
+        try:
+            from backend.modeling.diurnal_model import fit_diurnal_curve
+            _diurnal_fit = fit_diurnal_curve(
+                todays_obs,
+                forecast_high,
+                peak_mins=peak_info.get("estimated_peak_mins"),
+                city_tz=city_tz,
+            )
+            if _diurnal_fit is not None:
+                log.debug(
+                    "adaptive: diurnal fit T_max=%.1f peak=%.1fh rmse=%.2f n=%d reliable=%s",
+                    _diurnal_fit.T_max, _diurnal_fit.t_peak,
+                    _diurnal_fit.rmse, _diurnal_fit.n_obs_used,
+                    _diurnal_fit.is_reliable,
+                )
+        except Exception:
+            log.debug("adaptive: diurnal curve fit failed, using decay fallback")
+
+    # 6. Station-time predictions (diurnal curve + decay + remaining-rise cap)
     predictions = compute_station_predictions(
         kalman=kalman,
         regression_slope=reg_slope,
@@ -667,9 +707,10 @@ def run_adaptive(
         city_tz=city_tz,
         estimated_peak_mins=peak_info.get("estimated_peak_mins"),
         remaining_rise=_remaining_rise,
+        diurnal_model=_diurnal_fit,
     )
 
-    # 6. Predicted daily high from station predictions
+    # 7. Predicted daily high from station predictions
     if predictions:
         best_pred = max(predictions, key=lambda p: p.predicted_temp)
         predicted_daily_high = best_pred.predicted_temp
@@ -678,7 +719,7 @@ def run_adaptive(
         predicted_daily_high = kalman.smoothed_temp
         predicted_high_time = None
 
-    # 7. Sigma adjustment: if we have rich data, tighten uncertainty
+    # 8. Sigma adjustment: if we have rich data, tighten uncertainty
     sigma_adj = 1.0
     if kalman.n_observations >= 20:
         sigma_adj *= 0.85
@@ -700,4 +741,8 @@ def run_adaptive(
         peak_already_passed=peak_info["peak_already_passed"],
         composite_peak_timing=peak_info["estimated_peak_time"],
         peak_timing_source=peak_info["source"],
+        remaining_rise_cap=_remaining_rise,
+        diurnal_peak_estimate=_diurnal_fit.T_max if _diurnal_fit else None,
+        diurnal_fit_rmse=_diurnal_fit.rmse if _diurnal_fit else None,
+        diurnal_fit_active=(_diurnal_fit is not None and _diurnal_fit.is_reliable),
     )
