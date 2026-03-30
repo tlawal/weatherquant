@@ -335,7 +335,7 @@ class CLOBClient:
                 signed = account.sign_transaction(tx)
                 send_payload = {
                     "jsonrpc": "2.0", "id": 3, "method": "eth_sendRawTransaction",
-                    "params": [signed.raw_transaction.hex()],
+                    "params": ["0x" + signed.raw_transaction.hex()],
                 }
                 async with self.session.post(POLYGON_RPC, json=send_payload) as r:
                     send_result = await r.json()
