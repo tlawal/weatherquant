@@ -157,6 +157,28 @@ def _validate_buckets(buckets: list[dict]) -> list[str]:
     return errors
 
 
+def _bucket_sort_key(bucket: dict) -> tuple[int, float, float]:
+    """Sort open-ended buckets around ascending finite ranges."""
+    lo = bucket.get("low_f")
+    hi = bucket.get("high_f")
+
+    if lo is None and hi is not None:
+        return (0, float(hi), float(hi))
+    if lo is not None and hi is not None:
+        return (1, float(lo), float(hi))
+    if lo is not None and hi is None:
+        return (2, float(lo), float("inf"))
+    return (3, float("inf"), float("inf"))
+
+
+def _normalize_buckets(raw_buckets: list[dict]) -> list[dict]:
+    """Return buckets sorted by temperature boundaries with fresh indices."""
+    normalized: list[dict] = []
+    for idx, bucket in enumerate(sorted(raw_buckets, key=_bucket_sort_key)):
+        normalized.append({**bucket, "bucket_idx": idx})
+    return normalized
+
+
 async def fetch_gamma_all() -> None:
     """Discover/refresh today's events for all enabled cities."""
     from backend.tz_utils import city_local_date, et_today, city_local_now
@@ -336,7 +358,8 @@ async def _process_event_data(city, date_et: str, slug: str, event_data: dict) -
             }
         )
 
-    parse_errors = _validate_buckets(raw_buckets)
+    normalized_buckets = _normalize_buckets(raw_buckets)
+    parse_errors = _validate_buckets(normalized_buckets)
     if parse_errors:
         log.warning("gamma: %s bucket parse errors: %s", city.city_slug, parse_errors)
         status = "bad_buckets"
@@ -360,14 +383,14 @@ async def _process_event_data(city, date_et: str, slug: str, event_data: dict) -
             trading_enabled=trading_enabled,
         )
 
-        for b in raw_buckets:
+        for b in normalized_buckets:
             await upsert_bucket(sess, event_id=event.id, **b)
 
     log.info(
         "gamma: %s status=%s buckets=%d trading_enabled=%s",
         city.city_slug,
         status,
-        len(raw_buckets),
+        len(normalized_buckets),
         trading_enabled,
     )
 

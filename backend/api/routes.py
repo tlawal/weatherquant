@@ -47,6 +47,17 @@ router = APIRouter()
 _start_time = datetime.now(timezone.utc)
 
 
+def _age_seconds(dt_: Optional[datetime]) -> Optional[float]:
+    """Return rounded age in seconds, treating naive DB timestamps as UTC."""
+    if not dt_:
+        return None
+    if dt_.tzinfo is None:
+        dt_ = dt_.replace(tzinfo=timezone.utc)
+    else:
+        dt_ = dt_.astimezone(timezone.utc)
+    return round((datetime.now(timezone.utc) - dt_).total_seconds(), 0)
+
+
 # ─── Health ───────────────────────────────────────────────────────────────────
 
 @router.get("/health")
@@ -78,8 +89,7 @@ async def health():
     worker_age = None
     for hb in heartbeats:
         if hb.job_name == "scheduler_alive":
-            age = (datetime.now(timezone.utc) - hb.last_run_at).total_seconds()
-            worker_age = round(age, 1)
+            worker_age = _age_seconds(hb.last_run_at)
 
     return {
         "status": "ok",
@@ -321,9 +331,7 @@ async def list_cities():
             "enabled": city.enabled,
             "metar_temp_f": metar.temp_f if metar else None,
             "metar_daily_high_f": metar.daily_high_f if metar else None,
-            "metar_age_s": round(
-                (datetime.now(timezone.utc) - metar.fetched_at).total_seconds(), 0
-            ) if metar else None,
+            "metar_age_s": _age_seconds(metar.fetched_at) if metar else None,
             "nws_high_f": nws.high_f if nws else None,
             "wu_daily_high_f": wu_d.high_f if wu_d else None,
             "event_status": event.status if event else None,
@@ -350,11 +358,6 @@ async def get_city_state(city_slug: str):
         event = await get_event(sess, city.id, today_city)
         model = None if not event else await get_latest_model_snapshot(sess, event.id)
 
-    def _age_s(dt_):
-        if not dt_:
-            return None
-        return round((datetime.now(timezone.utc) - dt_).total_seconds(), 0)
-
     # Use WU History as ground truth if available; fallback to METAR daily high
     daily_high = wu_hist.high_f if wu_hist and wu_hist.high_f is not None else (metar.daily_high_f if metar else None)
 
@@ -368,21 +371,21 @@ async def get_city_state(city_slug: str):
         "current_temp_f": metar.temp_f if metar else None,
         "daily_high_f": daily_high,
         "metar_observed_at": metar.observed_at.isoformat() if metar else None,
-        "metar_age_s": _age_s(metar.fetched_at if metar else None),
+        "metar_age_s": _age_seconds(metar.fetched_at if metar else None),
         "forecasts": {
             "nws": {
                 "high_f": nws.high_f if nws else None,
-                "age_s": _age_s(nws.fetched_at if nws else None),
+                "age_s": _age_seconds(nws.fetched_at if nws else None),
                 "error": nws.parse_error if nws else None,
             },
             "wu_daily": {
                 "high_f": wu_d.high_f if wu_d else None,
-                "age_s": _age_s(wu_d.fetched_at if wu_d else None),
+                "age_s": _age_seconds(wu_d.fetched_at if wu_d else None),
                 "error": wu_d.parse_error if wu_d else None,
             },
             "wu_hourly": {
                 "high_f": wu_h.high_f if wu_h else None,
-                "age_s": _age_s(wu_h.fetched_at if wu_h else None),
+                "age_s": _age_seconds(wu_h.fetched_at if wu_h else None),
                 "error": wu_h.parse_error if wu_h else None,
             },
         },
