@@ -414,7 +414,7 @@
         onclick="refreshMarketContext('{{ city.city_slug }}', '{{ today_et }}', this)"
         class="px-3 py-1.5 rounded-lg text-[10px] font-bold tracking-widest transition-all border"
         style="{% if market_context_llm_ready %}background:var(--bg-panel);border-color:var(--cyan);color:var(--cyan){% else %}background:var(--bg-panel);border-color:var(--border);color:var(--text-muted);opacity:0.5;cursor:not-allowed{% endif %}"
-        {% if not market_context_llm_ready %}disabled title="Configure MARKET_CONTEXT_LLM_PROVIDER, MARKET_CONTEXT_LLM_MODEL, and API key to enable refresh"{% endif %}>
+        {% if not market_context_llm_ready %}disabled title="Set MARKET_CONTEXT_LLM_PROVIDER, MARKET_CONTEXT_LLM_MODEL, and MARKET_CONTEXT_LLM_API_KEY (or OPENAI_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY) to enable refresh"{% endif %}>
         REFRESH
       </button>
     </div>
@@ -422,7 +422,10 @@
 
   {% if not market_context_llm_ready %}
   <div class="mb-4 p-3 rounded-lg text-[11px]" style="background:rgba(234,179,8,0.08);border:1px solid rgba(234,179,8,0.25);color:#FCD34D">
-    Market Context refresh is disabled until an LLM provider, model, and API key are configured on the server.
+    Market Context refresh is disabled until the server has <span class="mono">MARKET_CONTEXT_LLM_PROVIDER</span>,
+    <span class="mono">MARKET_CONTEXT_LLM_MODEL</span>, and either <span class="mono">MARKET_CONTEXT_LLM_API_KEY</span>
+    or the provider-specific key (<span class="mono">OPENAI_API_KEY</span> / <span class="mono">ANTHROPIC_API_KEY</span> / <span class="mono">GEMINI_API_KEY</span>)
+    configured. Supported providers are <span class="mono">openai</span>, <span class="mono">anthropic</span>, and <span class="mono">gemini</span>.
   </div>
   {% endif %}
 

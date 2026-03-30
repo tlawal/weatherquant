@@ -24,6 +24,14 @@ The system uses SQLite (`state.db`) and local logs. On Railway, you **must** mou
 - `ADMIN_TOKEN`: Bearer token for dashboard trade execution.
 - `KELLY_FRACTION`: Default 0.10 (Conservative 1/10th Kelly).
 - `MAX_POSITION_PCT`: Max bankroll % per single trade (default 0.05).
+- `MARKET_CONTEXT_LLM_PROVIDER`: Optional. Enables admin-triggered Market Context refreshes when set to `openai`, `anthropic`, or `gemini`.
+- `MARKET_CONTEXT_LLM_MODEL`: Optional, but required when `MARKET_CONTEXT_LLM_PROVIDER` is set. Use the exact provider model ID.
+- `MARKET_CONTEXT_LLM_API_KEY`: Optional generic API key for Market Context generation. If omitted, the app falls back to `OPENAI_API_KEY` for `openai`, `ANTHROPIC_API_KEY` for `anthropic`, or `GEMINI_API_KEY` for `gemini`.
+- `OPENAI_API_KEY`: Optional provider-specific fallback when `MARKET_CONTEXT_LLM_PROVIDER=openai`.
+- `ANTHROPIC_API_KEY`: Optional provider-specific fallback when `MARKET_CONTEXT_LLM_PROVIDER=anthropic`.
+- `GEMINI_API_KEY`: Optional provider-specific fallback when `MARKET_CONTEXT_LLM_PROVIDER=gemini`.
+- `MARKET_CONTEXT_LLM_BASE_URL`: Optional base URL override for proxy or self-hosted provider endpoints.
+- `MARKET_CONTEXT_LLM_TIMEOUT_SECONDS`: Optional timeout for Market Context generation requests. Default `45`.
 
 ## 🛡️ Risk Management
 
@@ -40,10 +48,55 @@ The dashboard includes a **Reliability Diagram** (Calibration Curve).
 
 ## 🛠️ Local Development
 
-1. Install dependencies: `pip install -r requirements.txt`
-2. Initialize DB: `python -m backend.scripts.init_db`
-3. Run dev server: `python -m web.app`
-4. Run trading engine: `python -m backend.main`
+1. Copy env template: `cp .env.example .env`
+2. Install dependencies: `pip install -r requirements.txt`
+3. Initialize DB: `python -m backend.scripts.init_db`
+4. Run dev server: `python -m web.app`
+5. Run trading engine: `python -m backend.main`
+
+### Market Context Refresh Setup
+
+The Market Context card is cached and read-only by default. The manual **Refresh** action stays disabled until the server has all three of the following:
+
+- `MARKET_CONTEXT_LLM_PROVIDER`
+- `MARKET_CONTEXT_LLM_MODEL`
+- An API key: either `MARKET_CONTEXT_LLM_API_KEY` or the provider-specific fallback (`OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GEMINI_API_KEY`)
+
+If the UI shows:
+
+> Market Context refresh is disabled until an LLM provider, model, and API key are configured on the server.
+
+the server is missing one or more of those values.
+
+Example `.env` settings for OpenAI:
+
+```bash
+MARKET_CONTEXT_LLM_PROVIDER=openai
+MARKET_CONTEXT_LLM_MODEL=<your-openai-model-id>
+OPENAI_API_KEY=<your-openai-api-key>
+```
+
+Example `.env` settings for Anthropic:
+
+```bash
+MARKET_CONTEXT_LLM_PROVIDER=anthropic
+MARKET_CONTEXT_LLM_MODEL=<your-anthropic-model-id>
+ANTHROPIC_API_KEY=<your-anthropic-api-key>
+```
+
+Example `.env` settings for Gemini:
+
+```bash
+MARKET_CONTEXT_LLM_PROVIDER=gemini
+MARKET_CONTEXT_LLM_MODEL=<your-gemini-model-id>
+GEMINI_API_KEY=<your-gemini-api-key>
+```
+
+Notes:
+
+- `MARKET_CONTEXT_LLM_API_KEY` can be used instead of the provider-specific key variables if you prefer one app-specific secret.
+- `MARKET_CONTEXT_LLM_BASE_URL` is only needed if you are routing requests through a proxy or compatible gateway.
+- Refresh remains admin-triggered only; normal city-page loads render the latest stored Market Context snapshot and do not call the LLM.
 
 ---
 

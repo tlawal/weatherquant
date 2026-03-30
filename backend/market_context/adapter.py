@@ -32,6 +32,7 @@ class MarketContextLLMAdapter:
             Config.MARKET_CONTEXT_LLM_API_KEY
             or {
                 "anthropic": Config.MARKET_CONTEXT_LLM_API_KEY or os.environ.get("ANTHROPIC_API_KEY", ""),
+                "gemini": Config.MARKET_CONTEXT_LLM_API_KEY or os.environ.get("GEMINI_API_KEY", ""),
                 "openai": Config.MARKET_CONTEXT_LLM_API_KEY or os.environ.get("OPENAI_API_KEY", ""),
             }.get(self.provider, Config.MARKET_CONTEXT_LLM_API_KEY)
         )
@@ -47,6 +48,8 @@ class MarketContextLLMAdapter:
 
         if self.provider == "anthropic":
             text = await self._call_anthropic(system_prompt=system_prompt, user_prompt=user_prompt)
+        elif self.provider == "gemini":
+            text = await self._call_gemini(system_prompt=system_prompt, user_prompt=user_prompt)
         elif self.provider == "openai":
             text = await self._call_openai(system_prompt=system_prompt, user_prompt=user_prompt)
         else:
@@ -113,6 +116,42 @@ class MarketContextLLMAdapter:
             if text:
                 return text
         raise MarketContextLLMError("OpenAI response did not contain usable text content")
+
+    async def _call_gemini(self, *, system_prompt: str, user_prompt: str) -> str:
+        url = self.base_url or f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
+        payload = {
+            "systemInstruction": {
+                "parts": [{"text": system_prompt}],
+            },
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [{"text": user_prompt}],
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.2,
+                "responseMimeType": "application/json",
+            },
+        }
+        headers = {
+            "content-type": "application/json",
+            "x-goog-api-key": self.api_key,
+        }
+        body = await _post_json(url, payload, headers=headers)
+        candidates = body.get("candidates") or []
+        if not candidates:
+            raise MarketContextLLMError("Gemini response did not contain candidates")
+        content = candidates[0].get("content") or {}
+        parts = content.get("parts") or []
+        text = "\n".join(
+            part.get("text", "")
+            for part in parts
+            if isinstance(part, dict) and isinstance(part.get("text"), str)
+        ).strip()
+        if not text:
+            raise MarketContextLLMError("Gemini response did not contain usable text content")
+        return text
 
 
 async def _post_json(

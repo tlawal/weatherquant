@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 import backend.storage.db as storage_db
 from backend.config import Config
-from backend.market_context.adapter import MarketContextLLMError
+from backend.market_context.adapter import MarketContextLLMAdapter, MarketContextLLMError
 from backend.market_context.service import (
     _generate_market_context_output,
     build_market_context_input,
@@ -529,3 +529,79 @@ def test_city_page_renders_market_context_states(tmp_path, monkeypatch):
 
     client.close()
     _run(engine.dispose())
+
+
+def test_market_context_llm_ready_accepts_gemini_provider_key(monkeypatch):
+    monkeypatch.setattr(Config, "MARKET_CONTEXT_LLM_PROVIDER", "gemini", raising=False)
+    monkeypatch.setattr(Config, "MARKET_CONTEXT_LLM_MODEL", "gemini-test", raising=False)
+    monkeypatch.setattr(Config, "MARKET_CONTEXT_LLM_API_KEY", "", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-secret")
+
+    assert Config.market_context_llm_ready() is True
+
+
+def test_market_context_adapter_calls_gemini(monkeypatch):
+    monkeypatch.setattr(Config, "MARKET_CONTEXT_LLM_PROVIDER", "gemini", raising=False)
+    monkeypatch.setattr(Config, "MARKET_CONTEXT_LLM_MODEL", "gemini-2.5-flash", raising=False)
+    monkeypatch.setattr(Config, "MARKET_CONTEXT_LLM_API_KEY", "", raising=False)
+    monkeypatch.setattr(Config, "MARKET_CONTEXT_LLM_BASE_URL", "", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-secret")
+
+    captured = {}
+
+    async def fake_post_json(url, payload, *, headers):
+        captured["url"] = url
+        captured["payload"] = payload
+        captured["headers"] = headers
+        return {
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [
+                            {
+                                "text": json.dumps(
+                                    {
+                                        "sections": {key: f"gemini section for {key}" for key in SECTION_KEYS},
+                                        "final_selection": {
+                                            "bucket_id": 1,
+                                            "bucket_idx": 0,
+                                            "label": "72–74°",
+                                            "low_f": 72.0,
+                                            "high_f": 74.0,
+                                            "calibrated_prob": 0.55,
+                                            "raw_model_prob": 0.53,
+                                            "market_prob": 0.44,
+                                            "true_edge": 0.04,
+                                            "confidence_pct": 58,
+                                            "rationale": "Synthetic Gemini rationale",
+                                            "flip_signals": ["Cloud deck fails to break by 2 PM ET"],
+                                            "life_or_death_call": "If life depended on being correct, I would select 72–74° because synthetic Gemini data says so.",
+                                            "most_likely_peak_time": "4:10 PM ET",
+                                            "confidence_components": {"base_prob": 28.0},
+                                        },
+                                    }
+                                )
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr("backend.market_context.adapter._post_json", fake_post_json)
+
+    async def run_test():
+        adapter = MarketContextLLMAdapter()
+        payload = await adapter.generate_json(
+            system_prompt="system prompt",
+            user_prompt="user prompt",
+        )
+        assert payload["final_selection"]["label"] == "72–74°"
+
+    _run(run_test())
+
+    assert captured["url"] == "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+    assert captured["headers"]["x-goog-api-key"] == "gemini-secret"
+    assert captured["payload"]["generationConfig"]["responseMimeType"] == "application/json"
+    assert captured["payload"]["systemInstruction"]["parts"][0]["text"] == "system prompt"
+    assert captured["payload"]["contents"][0]["parts"][0]["text"] == "user prompt"
