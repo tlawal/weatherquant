@@ -157,6 +157,11 @@ async def job_fetch_metar_smart():
     await fetch_metar_smart()
 
 
+async def job_auto_redeem():
+    from backend.execution.redeemer import run_auto_redeem
+    await run_auto_redeem()
+
+
 async def job_heartbeat():
     """Write a heartbeat so API server can detect worker liveness."""
     from backend.storage.db import get_session
@@ -193,6 +198,7 @@ def create_scheduler() -> AsyncIOScheduler:
     add(job_discover_cities,     seconds=86400, name="discover_cities")  # 24h
     add(job_refresh_station_profiles, seconds=3600, name="refresh_station_profiles")  # 1h
     add(job_fetch_metar_smart,       seconds=30,    name="fetch_metar_smart")
+    add(job_auto_redeem,             seconds=300,   name="auto_redeem")  # 5 min
 
     return scheduler
 

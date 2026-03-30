@@ -33,6 +33,7 @@ from backend.storage.repos import (
     append_audit,
     get_all_positions,
     get_event,
+    get_position,
     insert_fill,
     insert_order,
     update_order_status,
@@ -50,6 +51,7 @@ async def execute_signal(
     manual: bool = False,
     qty_override: float | None = None,
     order_type: str = "limit",
+    side: str = "BUY",
 ) -> dict:
     """
     Attempt to execute a trade for the given signal.
@@ -121,13 +123,30 @@ async def execute_signal(
         return result
 
     # ── Compute position size ─────────────────────────────────────────────────
-    limit_price = signal.yes_ask or signal.yes_mid or 0.0
+    if side == "SELL":
+        limit_price = signal.yes_bid or signal.yes_mid or 0.0
+    else:
+        limit_price = signal.yes_ask or signal.yes_mid or 0.0
     if limit_price <= 0:
         result["status"] = "error"
-        result["error"] = "no valid ask price"
+        result["error"] = "no valid price"
         return result
 
-    if qty_override and qty_override > 0:
+    if side == "SELL":
+        # SELL: must specify qty, validate against held position
+        if not qty_override or qty_override <= 0:
+            result["status"] = "error"
+            result["error"] = "qty required for sell orders"
+            return result
+        async with get_session() as sess:
+            pos = await get_position(sess, signal.bucket_id)
+        if not pos or pos.net_qty < qty_override:
+            result["status"] = "error"
+            result["error"] = f"insufficient shares (held={pos.net_qty if pos else 0}, requested={qty_override})"
+            return result
+        shares = qty_override
+        cost = round(shares * limit_price, 2)
+    elif qty_override and qty_override > 0:
         # Manual trade — user specified their own quantity, skip auto-sizing
         shares = qty_override
         cost = round(shares * limit_price, 2)
@@ -199,7 +218,7 @@ async def execute_signal(
         order = await insert_order(
             sess,
             bucket_id=signal.bucket_id,
-            side="buy_yes",
+            side="sell_yes" if side == "SELL" else "buy_yes",
             qty=shares,
             limit_price=limit_price,
             status="pending" if not dry_run else "dry_run",
@@ -222,15 +241,19 @@ async def execute_signal(
         return result
 
     if order_type == "market":
+        if side == "SELL":
+            amount = shares  # SELL: amount is in shares
+        else:
+            amount = max(shares * limit_price, 1.0)  # BUY: amount is in dollars, min $1
         clob_result = await clob.place_market_order(
             token_id=bucket.yes_token_id,
-            side="BUY",
-            amount=max(shares * limit_price, 1.0),
+            side=side,
+            amount=amount,
         )
     else:
         clob_result = await clob.place_limit_order(
             token_id=bucket.yes_token_id,
-            side="BUY",
+            side=side,
             size=shares,
             price=limit_price,
         )
@@ -277,8 +300,8 @@ async def execute_signal(
                 sess,
                 bucket_id=signal.bucket_id,
                 side="yes",
-                net_qty=fill_result["qty"],
-                avg_cost=fill_result["price"],
+                fill_qty=fill_result["qty"] if side == "BUY" else -fill_result["qty"],
+                fill_price=fill_result["price"],
                 last_mkt_price=fill_result["price"],
             )
             await append_audit(

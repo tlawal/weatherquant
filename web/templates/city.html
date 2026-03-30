@@ -791,8 +791,8 @@
         </button>
       </div>
 
-      <!-- Yes / No Outcome Buttons -->
-      <div class="grid grid-cols-2 gap-3">
+      <!-- Yes / No Outcome Buttons (hidden when selling) -->
+      <div x-show="side !== 'sell'" class="grid grid-cols-2 gap-3">
         <button @click="outcome = 'yes'; limitPrice = yesPrice || limitPrice"
                 class="py-3 rounded-xl font-bold text-sm transition-all border-2"
                 :class="outcome === 'yes' ? 'border-green-500/80' : 'border-transparent'"
@@ -818,6 +818,9 @@
             <span class="text-xs font-medium" x-text="orderType === 'limit' ? 'Limit Price' : 'Market Order'"></span>
             <div class="text-[10px] mono" style="color:var(--text-muted)">
               Balance <span x-text="balance !== null ? '$' + balance.toFixed(2) : '—'" :style="balance !== null && balance < 1 ? 'color:var(--red)' : ''"></span>
+            </div>
+            <div x-show="heldShares > 0" class="text-[10px] mono" style="color:var(--green)">
+              Held <span x-text="Math.floor(heldShares) + ' shares @ ' + (heldAvgCost * 100).toFixed(1) + '¢'"></span>
             </div>
           </div>
           <!-- Limit price stepper (only for limit orders) -->
@@ -851,13 +854,26 @@
                  style="background:var(--bg-panel);border:1px solid var(--border);color:var(--text-main)"
                  placeholder="0">
         </div>
-        <div class="flex gap-2 mt-2">
+        <!-- Buy: +/- share adjustments -->
+        <div x-show="side === 'buy'" class="flex gap-2 mt-2">
           <template x-for="adj in [-100, -10, +10, +100]">
             <button @click="shares = Math.max(0, (shares || 0) + adj)"
                     class="flex-1 py-1.5 rounded-lg text-xs mono font-medium hover:bg-white/10 transition-colors"
                     style="background:var(--bg-panel);color:var(--text-muted)"
                     x-text="(adj > 0 ? '+' : '') + adj"></button>
           </template>
+        </div>
+        <!-- Sell: percentage buttons -->
+        <div x-show="side === 'sell'" class="flex gap-2 mt-2">
+          <template x-for="pct in [0.25, 0.50, 0.75, 1.0]">
+            <button @click="setSellPercent(pct)"
+                    class="flex-1 py-1.5 rounded-lg text-xs mono font-medium hover:bg-white/10 transition-colors"
+                    style="background:var(--bg-panel);color:var(--text-muted)"
+                    x-text="pct === 1.0 ? 'Max' : (pct * 100) + '%'"></button>
+          </template>
+        </div>
+        <div x-show="side === 'sell' && heldShares <= 0" class="text-[10px] text-center mt-1" style="color:var(--text-muted)">
+          No shares held for this bucket
         </div>
       </div>
 
@@ -1185,6 +1201,8 @@ function tradingPanel() {
     submitting: false,
     tradeResult: null,
     balance: null,
+    heldShares: 0,
+    heldAvgCost: 0,
 
     // Orderbook state
     obLoaded: false,
@@ -1242,8 +1260,24 @@ function tradingPanel() {
         document.getElementById('trading-panel-section')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
       });
 
-      // Fetch live orderbook
-      await this.fetchOrderbook(bucketIdx);
+      // Fetch live orderbook and position
+      await Promise.all([
+        this.fetchOrderbook(bucketIdx),
+        this.fetchPosition(bucketIdx),
+      ]);
+    },
+
+    async fetchPosition(bucketIdx) {
+      try {
+        const resp = await fetch(`/api/position/{{ city.city_slug }}/${bucketIdx}`);
+        if (!resp.ok) return;
+        const data = await resp.json();
+        this.heldShares = data.net_qty || 0;
+        this.heldAvgCost = data.avg_cost || 0;
+      } catch (e) {
+        this.heldShares = 0;
+        this.heldAvgCost = 0;
+      }
     },
 
     async fetchOrderbook(bucketIdx) {
@@ -1279,15 +1313,23 @@ function tradingPanel() {
     },
 
     setMaxShares() {
+      if (this.side === 'sell') {
+        this.shares = Math.max(0, Math.floor(this.heldShares));
+        return;
+      }
       if (this.limitPrice <= 0) return;
       let max = 9999;
       if (this.balance !== null && this.balance > 0) {
         max = Math.min(max, Math.floor(this.balance / this.limitPrice));
       }
-      if (this.side === 'buy' && this.obAskDepth > 0) {
+      if (this.obAskDepth > 0) {
         max = Math.min(max, Math.floor(this.obAskDepth));
       }
       this.shares = Math.max(0, max);
+    },
+
+    setSellPercent(pct) {
+      this.shares = Math.max(0, Math.floor(this.heldShares * pct));
     },
 
     closeTrade() {
@@ -1305,7 +1347,7 @@ function tradingPanel() {
         const payload = {
           city_slug: '{{ city.city_slug }}',
           bucket_idx: this.selectedBucketIdx,
-          side: this.side === 'buy' ? 'buy_yes' : 'buy_no',
+          side: this.side === 'sell' ? 'sell_yes' : (this.outcome === 'yes' ? 'buy_yes' : 'buy_no'),
           qty: this.shares,
           dry_run: this.dryRun,
           order_type: this.orderType,
@@ -1317,9 +1359,12 @@ function tradingPanel() {
         const result = await apiCall('/trade', 'POST', payload);
         this.tradeResult = result;
 
-        // Refresh balance after trade
-        if (result && result.status === 'filled') {
-          await this.fetchOrderbook(this.selectedBucketIdx);
+        // Refresh balance and position after trade
+        if (result && (result.status === 'filled' || result.status === 'order_placed')) {
+          await Promise.all([
+            this.fetchOrderbook(this.selectedBucketIdx),
+            this.fetchPosition(this.selectedBucketIdx),
+          ]);
         }
       } catch (e) {
         this.tradeResult = { status: 'error', error: e.message };

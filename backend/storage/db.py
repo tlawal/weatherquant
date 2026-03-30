@@ -130,6 +130,9 @@ async def init_db() -> None:
     await _run_ddl("ALTER TABLE events ADD COLUMN wu_scrape_error TEXT")
     await _run_ddl("ALTER TABLE events ADD COLUMN resolution_source_url TEXT")
     await _run_ddl("ALTER TABLE events ADD COLUMN resolution_station_id VARCHAR(16)")
+    await _run_ddl("ALTER TABLE events ADD COLUMN resolved_at TIMESTAMP WITH TIME ZONE")
+    await _run_ddl("ALTER TABLE events ADD COLUMN winning_bucket_idx INTEGER")
+    await _run_ddl("ALTER TABLE events ADD COLUMN redeemed_at TIMESTAMP WITH TIME ZONE")
 
     # forecast_obs
     await _run_ddl("ALTER TABLE forecast_obs ADD COLUMN raw_json TEXT")

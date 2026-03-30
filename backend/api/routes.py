@@ -568,6 +568,41 @@ async def get_positions():
     }
 
 
+@router.get("/api/position/{city_slug}/{bucket_idx}")
+async def get_bucket_position(city_slug: str, bucket_idx: int):
+    """Get current position for a specific bucket."""
+    from backend.storage.repos import get_position
+    async with get_session() as sess:
+        city = await _get_city_or_404(sess, city_slug)
+        from backend.tz_utils import city_local_now, city_local_tomorrow
+        now_local = city_local_now(city)
+        if now_local.hour >= 20:
+            active_date = city_local_tomorrow(city)
+        else:
+            active_date = city_local_date(city)
+        event = await get_event(sess, city.id, active_date)
+        if not event:
+            return {"net_qty": 0, "avg_cost": 0, "side": "yes", "unrealized_pnl": 0}
+        buckets = await get_buckets_for_event(sess, event.id)
+
+    bucket = next((b for b in buckets if b.bucket_idx == bucket_idx), None)
+    if not bucket:
+        return {"net_qty": 0, "avg_cost": 0, "side": "yes", "unrealized_pnl": 0}
+
+    async with get_session() as sess:
+        pos = await get_position(sess, bucket.id)
+
+    if not pos or pos.net_qty <= 0:
+        return {"net_qty": 0, "avg_cost": 0, "side": "yes", "unrealized_pnl": 0}
+    return {
+        "net_qty": pos.net_qty,
+        "avg_cost": round(pos.avg_cost, 4),
+        "side": pos.side,
+        "unrealized_pnl": round(pos.unrealized_pnl, 4),
+        "realized_pnl": round(pos.realized_pnl, 4),
+    }
+
+
 # ─── Orders ───────────────────────────────────────────────────────────────────
 
 @router.get("/orders")
@@ -816,7 +851,7 @@ async def get_orderbook(city_slug: str, bucket_idx: int):
 class ManualTradeRequest(BaseModel):
     city_slug: str
     bucket_idx: int
-    side: str  # "buy_yes" | "buy_no"
+    side: str  # "buy_yes" | "buy_no" | "sell_yes" | "sell_no"
     qty: Optional[float] = None  # None = auto-size
     limit_price: Optional[float] = None
     order_type: str = "limit"  # "limit" | "market"
@@ -861,7 +896,11 @@ async def manual_trade(
 
     model_prob = sig_row.model_prob if sig_row else 0.5
     mkt_prob = mkt_snap.yes_mid if mkt_snap else 0.5
-    yes_ask = body.limit_price or (mkt_snap.yes_ask if mkt_snap else None) or 0.5
+    is_sell = body.side.startswith("sell_")
+    if is_sell:
+        yes_ask = body.limit_price or (mkt_snap.yes_bid if mkt_snap else None) or 0.5
+    else:
+        yes_ask = body.limit_price or (mkt_snap.yes_ask if mkt_snap else None) or 0.5
     true_edge = sig_row.true_edge if sig_row else 0.0
 
     signal = BucketSignal(
@@ -895,7 +934,8 @@ async def manual_trade(
         if balance:
             bankroll = min(balance, Config.BANKROLL_CAP)
 
-    result = await execute_signal(signal, bankroll=bankroll, actor=actor, dry_run=body.dry_run, manual=True, qty_override=body.qty, order_type=body.order_type)
+    clob_side = "SELL" if is_sell else "BUY"
+    result = await execute_signal(signal, bankroll=bankroll, actor=actor, dry_run=body.dry_run, manual=True, qty_override=body.qty, order_type=body.order_type, side=clob_side)
     return result
 
 

@@ -688,16 +688,42 @@ async def get_position(
 
 
 async def upsert_position(
-    session: AsyncSession, bucket_id: int, **kwargs
+    session: AsyncSession,
+    bucket_id: int,
+    side: str,
+    fill_qty: float,
+    fill_price: float,
+    last_mkt_price: float | None = None,
 ) -> Position:
+    """Update position with a fill. fill_qty positive=buy, negative=sell."""
     pos = await get_position(session, bucket_id)
     if pos is None:
-        pos = Position(bucket_id=bucket_id, **kwargs)
+        pos = Position(
+            bucket_id=bucket_id,
+            side=side,
+            net_qty=max(fill_qty, 0),
+            avg_cost=fill_price if fill_qty > 0 else 0.0,
+            last_mkt_price=last_mkt_price or fill_price,
+        )
         session.add(pos)
     else:
-        for k, v in kwargs.items():
-            if hasattr(pos, k):
-                setattr(pos, k, v)
+        old_qty = pos.net_qty
+        new_qty = old_qty + fill_qty
+        if fill_qty > 0:
+            # BUY: weighted average cost
+            total_cost = old_qty * pos.avg_cost + fill_qty * fill_price
+            pos.avg_cost = total_cost / new_qty if new_qty > 0 else 0.0
+        else:
+            # SELL: realize PnL
+            sold = abs(fill_qty)
+            pos.realized_pnl += sold * (fill_price - pos.avg_cost)
+        pos.net_qty = max(new_qty, 0)
+        if last_mkt_price is not None:
+            pos.last_mkt_price = last_mkt_price
+        if pos.net_qty > 0 and pos.last_mkt_price:
+            pos.unrealized_pnl = pos.net_qty * (pos.last_mkt_price - pos.avg_cost)
+        else:
+            pos.unrealized_pnl = 0.0
     await session.commit()
     await session.refresh(pos)
     return pos
@@ -835,4 +861,31 @@ async def update_heartbeat(
 
 async def get_all_heartbeats(session: AsyncSession) -> list[WorkerHeartbeat]:
     result = await session.execute(select(WorkerHeartbeat))
+    return list(result.scalars().all())
+
+
+# ─── Resolution / Redemption ─────────────────────────────────────────────────
+
+async def get_unresolved_events_with_positions(session: AsyncSession) -> list[Event]:
+    """Events that have open positions but haven't been marked resolved."""
+    from sqlalchemy.orm import selectinload
+    result = await session.execute(
+        select(Event)
+        .join(Bucket, Bucket.event_id == Event.id)
+        .join(Position, Position.bucket_id == Bucket.id)
+        .where(Event.resolved_at.is_(None), Position.net_qty > 0)
+        .options(selectinload(Event.buckets))
+        .distinct()
+    )
+    return list(result.scalars().all())
+
+
+async def get_unredeemed_resolved_events(session: AsyncSession) -> list[Event]:
+    """Events that are resolved but not yet redeemed."""
+    from sqlalchemy.orm import selectinload
+    result = await session.execute(
+        select(Event)
+        .where(Event.resolved_at.isnot(None), Event.redeemed_at.is_(None))
+        .options(selectinload(Event.buckets))
+    )
     return list(result.scalars().all())

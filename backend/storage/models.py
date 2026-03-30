@@ -85,6 +85,9 @@ class Event(Base):
     forecast_quality: Mapped[str] = mapped_column(String(16), default="ok", nullable=False)
     wu_scrape_error: Mapped[Optional[str]] = mapped_column(Text)
     trading_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    winning_bucket_idx: Mapped[Optional[int]] = mapped_column(Integer)
+    redeemed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow

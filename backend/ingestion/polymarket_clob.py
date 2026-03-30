@@ -81,9 +81,10 @@ class CLOBClient:
         else:
             log.warning("clob: POLYMARKET_PRIVATE_KEY not set — read-only mode")
 
-        # Ensure USDC allowance after credentials are ready (non-fatal)
+        # Ensure USDC + conditional token allowances (non-fatal)
         if self.can_trade:
             await self.ensure_allowance()
+            await self.ensure_conditional_allowance()
 
     async def close(self) -> None:
         if self._session:
@@ -360,6 +361,86 @@ class CLOBClient:
             log.info("clob: allowance cache refreshed")
         except Exception as e:
             log.warning("clob: on-chain approve failed (non-fatal, trading may still work): %s", e)
+
+    async def ensure_conditional_allowance(self) -> None:
+        """Approve conditional token transfers for SELL orders (ERC1155 setApprovalForAll)."""
+        if not self.can_trade:
+            return
+
+        from py_clob_client.config import get_contract_config
+
+        chain_id = Config.CHAIN_ID
+        cfg = get_contract_config(chain_id, neg_risk=False)
+        conditional_token = cfg.conditional_tokens
+
+        # Check if already approved by trying a small call — for now just send approvals
+        # (setApprovalForAll is idempotent, safe to re-send)
+        spenders = [cfg.exchange]
+        cfg_neg = get_contract_config(chain_id, neg_risk=True)
+        spenders.append(cfg_neg.exchange)
+        NEG_RISK_ADAPTER = {137: "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"}
+        if chain_id in NEG_RISK_ADAPTER:
+            spenders.append(NEG_RISK_ADAPTER[chain_id])
+
+        try:
+            from eth_account import Account
+            account = Account.from_key(Config.POLYMARKET_PRIVATE_KEY)
+            sender = account.address
+
+            nonce_payload = {
+                "jsonrpc": "2.0", "id": 1, "method": "eth_getTransactionCount",
+                "params": [sender, "latest"],
+            }
+            gas_payload = {
+                "jsonrpc": "2.0", "id": 2, "method": "eth_gasPrice", "params": [],
+            }
+            async with self.session.post(POLYGON_RPC, json=nonce_payload) as r:
+                nonce_result = await r.json()
+            if "error" in nonce_result:
+                log.error("clob: conditional approve RPC nonce error: %s", nonce_result["error"])
+                return
+            nonce = int(nonce_result["result"], 16)
+
+            async with self.session.post(POLYGON_RPC, json=gas_payload) as r:
+                gas_result = await r.json()
+            if "error" in gas_result:
+                log.error("clob: conditional approve RPC gasPrice error: %s", gas_result["error"])
+                return
+            gas_price = int(gas_result["result"], 16)
+
+            # ERC1155 setApprovalForAll(address,bool) selector = 0xa22cb465
+            for spender in spenders:
+                calldata = (
+                    bytes.fromhex("a22cb465")
+                    + bytes.fromhex(spender[2:].lower().zfill(64))
+                    + (1).to_bytes(32, "big")  # true
+                )
+                tx = {
+                    "to": conditional_token,
+                    "value": 0,
+                    "gas": 60_000,
+                    "gasPrice": gas_price,
+                    "nonce": nonce,
+                    "chainId": chain_id,
+                    "data": calldata,
+                }
+                signed = account.sign_transaction(tx)
+                send_payload = {
+                    "jsonrpc": "2.0", "id": 3, "method": "eth_sendRawTransaction",
+                    "params": ["0x" + signed.raw_transaction.hex()],
+                }
+                async with self.session.post(POLYGON_RPC, json=send_payload) as r:
+                    send_result = await r.json()
+
+                if "error" in send_result:
+                    log.error("clob: conditional approve tx failed for %s: %s", spender, send_result["error"])
+                else:
+                    tx_hash = send_result.get("result")
+                    log.info("clob: conditional approve tx sent for %s: %s", spender, tx_hash)
+                nonce += 1
+
+        except Exception as e:
+            log.warning("clob: conditional token approve failed (non-fatal): %s", e)
 
 
 async def fetch_clob_orderbooks(clob: CLOBClient) -> None:
