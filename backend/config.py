@@ -52,7 +52,7 @@ class Config:
     )
     CHAIN_ID: int = _int("CHAIN_ID", 137)
     POLYGON_RPC_URL: str = os.environ.get(
-        "POLYGON_RPC_URL", "https://rpc.ankr.com/polygon"
+        "POLYGON_RPC_URL", "https://polygon-bor-rpc.publicnode.com"
     )
 
     # ── Security ──────────────────────────────────────────────────────────────
