@@ -51,6 +51,9 @@ class Config:
         "POLYMARKET_HOST", "https://clob.polymarket.com"
     )
     CHAIN_ID: int = _int("CHAIN_ID", 137)
+    POLYGON_RPC_URL: str = os.environ.get(
+        "POLYGON_RPC_URL", "https://rpc.ankr.com/polygon"
+    )
 
     # ── Security ──────────────────────────────────────────────────────────────
     ADMIN_TOKEN: str = os.environ.get("ADMIN_TOKEN", "")

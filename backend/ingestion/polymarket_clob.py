@@ -28,7 +28,7 @@ log = logging.getLogger(__name__)
 
 CLOB_HOST = Config.POLYMARKET_HOST
 GAMMA_API = "https://gamma-api.polymarket.com"
-POLYGON_RPC = "https://polygon-rpc.com"
+POLYGON_RPC = Config.POLYGON_RPC_URL
 _TIMEOUT = aiohttp.ClientTimeout(total=10)
 _HEADERS = {"User-Agent": "WeatherQuant/1.0 (contact@weatherquant.local)"}
 
