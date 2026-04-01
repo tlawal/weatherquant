@@ -719,6 +719,72 @@ async def redeem_event(event_id: int, force: bool = False, actor: str = Depends(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/api/redeem-by-condition")
+async def redeem_by_condition(condition_id: str, actor: str = Depends(require_admin)):
+    """Redeem positions directly by condition ID (no DB event needed). For manual trades."""
+    import aiohttp
+    from eth_account import Account
+
+    if not Config.POLYMARKET_PRIVATE_KEY:
+        raise HTTPException(status_code=500, detail="No private key configured")
+
+    account = Account.from_key(Config.POLYMARKET_PRIVATE_KEY)
+    sender = account.address
+
+    NEG_RISK_ADAPTER = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"
+    REDEEM_SELECTOR = bytes.fromhex("dbeccb23")
+    INDEX_SETS = [1, 2]
+
+    cid_bytes = bytes.fromhex(condition_id.replace("0x", ""))
+    calldata = (
+        REDEEM_SELECTOR
+        + cid_bytes.rjust(32, b"\x00")
+        + (64).to_bytes(32, "big")
+        + len(INDEX_SETS).to_bytes(32, "big")
+        + b"".join(i.to_bytes(32, "big") for i in INDEX_SETS)
+    )
+
+    POLYGON_RPC = Config.POLYGON_RPC_URL
+    timeout = aiohttp.ClientTimeout(total=15)
+    async with aiohttp.ClientSession(timeout=timeout) as http:
+        nonce_resp = await (await http.post(POLYGON_RPC, json={
+            "jsonrpc": "2.0", "id": 1, "method": "eth_getTransactionCount",
+            "params": [sender, "latest"],
+        })).json()
+        gas_resp = await (await http.post(POLYGON_RPC, json={
+            "jsonrpc": "2.0", "id": 2, "method": "eth_gasPrice", "params": [],
+        })).json()
+
+        nonce = int(nonce_resp["result"], 16)
+        gas_price = int(gas_resp["result"], 16)
+
+        tx = {
+            "to": NEG_RISK_ADAPTER,
+            "value": 0,
+            "gas": 300_000,
+            "gasPrice": gas_price,
+            "nonce": nonce,
+            "chainId": Config.CHAIN_ID,
+            "data": calldata,
+        }
+        signed = account.sign_transaction(tx)
+        send_resp = await (await http.post(POLYGON_RPC, json={
+            "jsonrpc": "2.0", "id": 3, "method": "eth_sendRawTransaction",
+            "params": ["0x" + signed.raw_transaction.hex()],
+        })).json()
+
+    if "error" in send_resp:
+        raise HTTPException(status_code=500, detail=f"TX failed: {send_resp['error']}")
+
+    return {
+        "ok": True,
+        "tx_hash": send_resp.get("result"),
+        "sender": sender,
+        "condition_id": condition_id,
+        "to": NEG_RISK_ADAPTER,
+    }
+
+
 @router.get("/api/redeem-diag")
 async def redeem_diagnostics(actor: str = Depends(require_admin)):
     """Show address configuration for debugging redemption issues."""
