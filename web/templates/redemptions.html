@@ -1,0 +1,216 @@
+{% extends "base.html" %}
+{% block title %}WeatherQuant — Redemptions{% endblock %}
+
+{% block content %}
+<div class="mb-5 flex items-center justify-between">
+  <h1 class="text-xl font-semibold">Redemptions</h1>
+  <div class="flex gap-2">
+    <button id="btn-check" onclick="checkResolved(this)"
+      class="px-3 py-1.5 rounded text-sm transition-colors"
+      style="background:var(--bg-panel);border:1px solid var(--border);color:var(--text-muted)">
+      Check for resolved markets
+    </button>
+    <button onclick="loadEvents()" class="px-3 py-1.5 rounded text-sm transition-colors"
+      style="background:var(--bg-panel);border:1px solid var(--border);color:var(--text-muted)">
+      Refresh
+    </button>
+  </div>
+</div>
+
+<!-- Schedule info -->
+<div class="text-xs mb-4" style="color:var(--text-muted)">
+  Auto-check resolution: every 5 min &middot; Auto-redeem: every 12h
+</div>
+
+<!-- Loading state -->
+<div id="loading" class="card p-8 text-center" style="color:var(--text-muted)">Loading...</div>
+
+<!-- Events table -->
+<div id="events-container" class="hidden space-y-3"></div>
+
+<!-- Empty state -->
+<div id="empty" class="card p-8 text-center hidden" style="color:var(--text-muted)">
+  No events with positions found.
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const STATUS_LABELS = {
+  redeemed:                 {text: 'Redeemed',              color: 'var(--text-muted)', bg: 'var(--bg-panel)'},
+  redeemable:               {text: 'Redeemable',            color: '#000',              bg: 'var(--green)'},
+  resolved_not_determined:  {text: 'Awaiting On-Chain',     color: 'var(--yellow)',      bg: 'transparent'},
+  open:                     {text: 'Open',                  color: 'var(--cyan)',        bg: 'transparent'},
+};
+
+async function apiCall(path, method='POST', body=null) {
+  const tok = getAdminToken() || promptForToken();
+  if (!tok) return null;
+  const res = await fetch(path, {
+    method,
+    headers: {'Content-Type':'application/json','X-Admin-Token': tok},
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  return res.json();
+}
+
+function badge(status) {
+  const s = STATUS_LABELS[status] || {text: status, color: 'var(--text-muted)', bg: 'transparent'};
+  const border = s.bg === 'transparent' ? `border:1px solid ${s.color}` : '';
+  return `<span class="text-xs px-2 py-0.5 rounded font-mono" style="background:${s.bg};color:${s.color};${border}">${s.text}</span>`;
+}
+
+function renderEvent(evt) {
+  const positionBuckets = evt.buckets.filter(b => b.net_qty > 0);
+  const allBuckets = evt.buckets;
+
+  let bucketsHtml = '';
+  for (const b of allBuckets) {
+    const hasPos = b.net_qty > 0;
+    const detIcon = b.on_chain_determined === true ? '&#9745;' :
+                    b.on_chain_determined === false ? '&#9744;' : '?';
+    const detColor = b.on_chain_determined ? 'var(--green)' : 'var(--text-muted)';
+    const winTag = b.is_winner ? '<span class="text-xs ml-1" style="color:var(--green)">WIN</span>' : '';
+    const qtyStr = hasPos ? `<span class="mono text-sm">${b.net_qty.toFixed(3)}</span> @ <span class="mono text-sm">$${b.avg_cost.toFixed(3)}</span>` : '<span style="color:var(--text-muted)">-</span>';
+
+    bucketsHtml += `
+      <tr class="${hasPos ? '' : 'opacity-40'}">
+        <td class="py-1 px-2 text-sm">${b.label || 'Bucket ' + b.bucket_idx}${winTag}</td>
+        <td class="py-1 px-2 text-sm">${qtyStr}</td>
+        <td class="py-1 px-2 text-sm text-center" style="color:${detColor}">${detIcon}</td>
+        <td class="py-1 px-2 text-xs mono truncate max-w-[140px]" style="color:var(--text-muted)" title="${b.condition_id || ''}">${b.condition_id ? b.condition_id.substring(0, 10) + '...' : '-'}</td>
+      </tr>`;
+  }
+
+  const redeemBtn = evt.status === 'redeemable'
+    ? `<button onclick="redeemEvent(${evt.event_id}, this)" class="px-3 py-1 rounded text-sm font-semibold" style="background:var(--green);color:#000">Redeem</button>`
+    : evt.status === 'redeemed'
+    ? `<button onclick="retryRedeem(${evt.event_id}, this)" class="px-2 py-1 rounded text-xs" style="border:1px solid var(--border);color:var(--text-muted)">Retry</button>`
+    : evt.status === 'resolved_not_determined'
+    ? `<span class="text-xs" style="color:var(--text-muted)">Waiting for Polymarket oracle</span>`
+    : '';
+
+  const resolvedStr = evt.resolved_at ? new Date(evt.resolved_at).toLocaleDateString() : '-';
+  const redeemedStr = evt.redeemed_at ? new Date(evt.redeemed_at).toLocaleDateString() : '-';
+  const pmLink = evt.gamma_event_id ? `<a href="https://polymarket.com/event/${evt.gamma_event_id}" target="_blank" class="text-xs" style="color:var(--cyan)">PM</a>` : '';
+
+  return `
+    <div class="card overflow-hidden" id="evt-${evt.event_id}">
+      <div class="px-4 py-3 flex flex-wrap items-center justify-between gap-3" style="border-bottom:1px solid var(--border)">
+        <div class="flex items-center gap-3">
+          <span class="font-semibold">${evt.city_name}</span>
+          <span class="mono text-sm" style="color:var(--text-muted)">${evt.date_et}</span>
+          ${badge(evt.status)}
+          ${pmLink}
+        </div>
+        <div class="flex items-center gap-3">
+          <div class="text-xs" style="color:var(--text-muted)">
+            Resolved: ${resolvedStr} &middot; Redeemed: ${redeemedStr}
+          </div>
+          ${redeemBtn}
+        </div>
+      </div>
+      <table class="w-full text-left">
+        <thead>
+          <tr style="border-bottom:1px solid var(--border)">
+            <th class="py-1.5 px-2 text-xs font-medium uppercase tracking-wider" style="color:var(--text-muted)">Bucket</th>
+            <th class="py-1.5 px-2 text-xs font-medium uppercase tracking-wider" style="color:var(--text-muted)">Position</th>
+            <th class="py-1.5 px-2 text-xs font-medium uppercase tracking-wider text-center" style="color:var(--text-muted)">On-Chain</th>
+            <th class="py-1.5 px-2 text-xs font-medium uppercase tracking-wider" style="color:var(--text-muted)">Condition ID</th>
+          </tr>
+        </thead>
+        <tbody>${bucketsHtml}</tbody>
+      </table>
+    </div>`;
+}
+
+async function loadEvents() {
+  document.getElementById('loading').classList.remove('hidden');
+  document.getElementById('events-container').classList.add('hidden');
+  document.getElementById('empty').classList.add('hidden');
+
+  try {
+    const res = await fetch('/api/redemptions');
+    const data = await res.json();
+    const container = document.getElementById('events-container');
+
+    if (!data.events || data.events.length === 0) {
+      document.getElementById('loading').classList.add('hidden');
+      document.getElementById('empty').classList.remove('hidden');
+      return;
+    }
+
+    container.innerHTML = data.events.map(renderEvent).join('');
+    document.getElementById('loading').classList.add('hidden');
+    container.classList.remove('hidden');
+  } catch (e) {
+    document.getElementById('loading').innerHTML = 'Error loading: ' + e.message;
+  }
+}
+
+async function checkResolved(btn) {
+  btn.disabled = true;
+  btn.textContent = 'Checking...';
+  try {
+    const data = await apiCall('/api/check-resolved');
+    if (data && data.newly_resolved > 0) {
+      btn.textContent = `Found ${data.newly_resolved} resolved!`;
+      loadEvents();
+    } else {
+      btn.textContent = 'No new resolutions';
+    }
+    setTimeout(() => { btn.disabled = false; btn.textContent = 'Check for resolved markets'; }, 3000);
+  } catch (e) {
+    btn.textContent = 'Error';
+    setTimeout(() => { btn.disabled = false; btn.textContent = 'Check for resolved markets'; }, 3000);
+  }
+}
+
+async function redeemEvent(eventId, btn) {
+  btn.disabled = true;
+  btn.textContent = 'Redeeming...';
+  try {
+    const data = await apiCall(`/api/redeem/${eventId}`);
+    if (data && data.ok) {
+      btn.textContent = 'Sent!';
+      btn.style.background = 'var(--bg-panel)';
+      btn.style.color = 'var(--green)';
+      const hashes = (data.tx_hashes || []).map(h => h ? h.substring(0, 12) + '...' : '').join(', ');
+      if (hashes) btn.textContent = 'TX: ' + hashes;
+      setTimeout(loadEvents, 5000);
+    } else {
+      alert('Failed: ' + (data?.detail || JSON.stringify(data)));
+      btn.disabled = false;
+      btn.textContent = 'Redeem';
+    }
+  } catch (e) {
+    alert('Error: ' + e.message);
+    btn.disabled = false;
+    btn.textContent = 'Redeem';
+  }
+}
+
+async function retryRedeem(eventId, btn) {
+  btn.disabled = true;
+  btn.textContent = 'Retrying...';
+  try {
+    const data = await apiCall(`/api/redeem/${eventId}?force=true`);
+    if (data && data.ok) {
+      btn.textContent = 'Sent!';
+      setTimeout(loadEvents, 5000);
+    } else {
+      alert('Failed: ' + (data?.detail || JSON.stringify(data)));
+      btn.disabled = false;
+      btn.textContent = 'Retry';
+    }
+  } catch (e) {
+    alert('Error: ' + e.message);
+    btn.disabled = false;
+    btn.textContent = 'Retry';
+  }
+}
+
+// Load on page init
+loadEvents();
+</script>
+{% endblock %}

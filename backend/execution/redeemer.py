@@ -123,12 +123,11 @@ async def redeem_single_event(event_id: int, actor: str = "auto_redeemer", force
     sender = account.address
     chain_id = Config.CHAIN_ID
 
-    # CTF redeemPositions(address collateralToken, bytes32 parentCollectionId,
-    #                      bytes32 conditionId, uint256[] indexSets)
-    REDEEM_SELECTOR = bytes.fromhex("01b7037c")
+    # NegRiskAdapter redeemPositions(bytes32 conditionId, uint256[] indexSets)
+    REDEEM_SELECTOR = bytes.fromhex("dbeccb23")
     INDEX_SETS = [1, 2]
 
-    log.info("redeemer: sender=%s, target=CTF, event=%d", sender, event_id)
+    log.info("redeemer: sender=%s, target=NegRiskAdapter, event=%d", sender, event_id)
 
     # Redeem all buckets with condition_id — on-chain call redeems whatever tokens
     # the wallet holds, regardless of DB position state
@@ -170,21 +169,17 @@ async def redeem_single_event(event_id: int, actor: str = "auto_redeemer", force
         tx_hashes = []
         for bucket in buckets_to_redeem:
             condition_id = bytes.fromhex(bucket.condition_id.replace("0x", ""))
-            # CTF redeemPositions(address, bytes32, bytes32, uint256[])
-            collateral = bytes.fromhex(USDC_E[2:].zfill(64))
-            parent = b"\x00" * 32
+            # NegRiskAdapter redeemPositions(conditionId, indexSets)
             calldata = (
                 REDEEM_SELECTOR
-                + collateral
-                + parent
                 + condition_id.rjust(32, b"\x00")
-                + (128).to_bytes(32, "big")  # offset to dynamic array (4 * 32)
+                + (64).to_bytes(32, "big")  # offset to dynamic array
                 + len(INDEX_SETS).to_bytes(32, "big")
                 + b"".join(i.to_bytes(32, "big") for i in INDEX_SETS)
             )
 
             tx = {
-                "to": CTF_ADDRESS,
+                "to": NEG_RISK_ADAPTER,
                 "value": 0,
                 "gas": 300_000,
                 "gasPrice": gas_price,

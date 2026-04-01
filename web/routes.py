@@ -642,3 +642,9 @@ async def htmx_signals_table(request: Request):
 
     rows.sort(key=lambda r: (get_city_priority(r["city_slug"]), -r["true_edge"]))
     return templates.TemplateResponse("partials/signals_table.html", {"request": request, "signal_rows": rows})
+
+
+@dashboard_router.get("/redemptions", response_class=HTMLResponse)
+async def redemptions_page(request: Request):
+    """Full-page view of all events with positions and their redemption status."""
+    return templates.TemplateResponse("redemptions.html", {"request": request})

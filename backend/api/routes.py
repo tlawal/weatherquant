@@ -45,7 +45,9 @@ from backend.storage.repos import (
     get_latest_signals,
     get_position,
     get_recent_orders,
+    get_recently_redeemed_events,
     get_unredeemed_resolved_events,
+    get_unresolved_events_with_positions,
 )
 
 log = logging.getLogger(__name__)
@@ -731,21 +733,16 @@ async def redeem_by_condition(condition_id: str, actor: str = Depends(require_ad
     account = Account.from_key(Config.POLYMARKET_PRIVATE_KEY)
     sender = account.address
 
-    CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
-    USDC_E = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
-    # CTF redeemPositions(address, bytes32, bytes32, uint256[])
-    REDEEM_SELECTOR = bytes.fromhex("01b7037c")
+    NEG_RISK_ADAPTER = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"
+    # NegRiskAdapter redeemPositions(bytes32 conditionId, uint256[] indexSets)
+    REDEEM_SELECTOR = bytes.fromhex("dbeccb23")
     INDEX_SETS = [1, 2]
 
     cid_bytes = bytes.fromhex(condition_id.replace("0x", ""))
-    collateral = bytes.fromhex(USDC_E[2:].zfill(64))
-    parent = b"\x00" * 32
     calldata = (
         REDEEM_SELECTOR
-        + collateral
-        + parent
         + cid_bytes.rjust(32, b"\x00")
-        + (128).to_bytes(32, "big")  # offset to dynamic array (4 * 32)
+        + (64).to_bytes(32, "big")
         + len(INDEX_SETS).to_bytes(32, "big")
         + b"".join(i.to_bytes(32, "big") for i in INDEX_SETS)
     )
@@ -765,7 +762,7 @@ async def redeem_by_condition(condition_id: str, actor: str = Depends(require_ad
         gas_price = int(gas_resp["result"], 16)
 
         tx = {
-            "to": CTF_ADDRESS,
+            "to": NEG_RISK_ADAPTER,
             "value": 0,
             "gas": 300_000,
             "gasPrice": gas_price,
@@ -787,8 +784,107 @@ async def redeem_by_condition(condition_id: str, actor: str = Depends(require_ad
         "tx_hash": send_resp.get("result"),
         "sender": sender,
         "condition_id": condition_id,
-        "to": CTF_ADDRESS,
+        "to": NEG_RISK_ADAPTER,
     }
+
+
+@router.get("/api/redemptions")
+async def redemptions_list():
+    """All events that have positions, with resolution and on-chain status."""
+    import aiohttp
+
+    NEG_RISK_ADAPTER = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"
+    GET_DETERMINED_SEL = "7ae2e67b"  # getDetermined(bytes32)
+    POLYGON_RPC = Config.POLYGON_RPC_URL
+
+    # Gather all relevant events: unresolved with positions + resolved unredeemed + recently redeemed
+    async with get_session() as sess:
+        unresolved = await get_unresolved_events_with_positions(sess)
+        unredeemed = await get_unredeemed_resolved_events(sess)
+        redeemed = await get_recently_redeemed_events(sess, days=30)
+
+    all_events = {e.id: e for e in unresolved + unredeemed + redeemed}
+    events = sorted(all_events.values(), key=lambda e: e.date_et, reverse=True)
+
+    # Batch check on-chain determination for all condition_ids
+    condition_ids = set()
+    for evt in events:
+        for b in evt.buckets:
+            if b.condition_id:
+                condition_ids.add(b.condition_id)
+
+    determined_map = {}
+    if condition_ids:
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as http:
+            for cid in condition_ids:
+                try:
+                    cid_hex = cid.replace("0x", "")
+                    data = f"0x{GET_DETERMINED_SEL}{cid_hex.zfill(64)}"
+                    resp = await (await http.post(POLYGON_RPC, json={
+                        "jsonrpc": "2.0", "id": 1, "method": "eth_call",
+                        "params": [{"to": NEG_RISK_ADAPTER, "data": data}, "latest"],
+                    })).json()
+                    if "result" in resp:
+                        determined_map[cid] = int(resp["result"], 16) != 0
+                    else:
+                        determined_map[cid] = None
+                except Exception:
+                    determined_map[cid] = None
+
+    rows = []
+    for evt in events:
+        async with get_session() as sess:
+            from backend.storage.models import City
+            city = await sess.get(City, evt.city_id)
+            buckets_info = []
+            for bucket in evt.buckets:
+                if not bucket.condition_id:
+                    continue
+                pos = await get_position(sess, bucket.id)
+                is_winner = (
+                    evt.winning_bucket_idx is not None
+                    and bucket.bucket_idx == evt.winning_bucket_idx
+                )
+                buckets_info.append({
+                    "bucket_idx": bucket.bucket_idx,
+                    "label": bucket.label,
+                    "condition_id": bucket.condition_id,
+                    "net_qty": pos.net_qty if pos else 0,
+                    "avg_cost": pos.avg_cost if pos else 0,
+                    "is_winner": is_winner,
+                    "on_chain_determined": determined_map.get(bucket.condition_id),
+                })
+
+        # Overall on-chain status: determined if ANY bucket with position is determined
+        any_determined = any(
+            b["on_chain_determined"] for b in buckets_info
+            if b["net_qty"] > 0 and b["on_chain_determined"] is not None
+        )
+
+        if evt.redeemed_at:
+            status = "redeemed"
+        elif evt.resolved_at and any_determined:
+            status = "redeemable"
+        elif evt.resolved_at:
+            status = "resolved_not_determined"
+        else:
+            status = "open"
+
+        rows.append({
+            "event_id": evt.id,
+            "city_name": city.display_name if city else "?",
+            "city_slug": city.city_slug if city else "",
+            "date_et": evt.date_et,
+            "gamma_event_id": evt.gamma_event_id,
+            "status": status,
+            "resolved_at": evt.resolved_at.isoformat() if evt.resolved_at else None,
+            "redeemed_at": evt.redeemed_at.isoformat() if evt.redeemed_at else None,
+            "winning_bucket_idx": evt.winning_bucket_idx,
+            "buckets": buckets_info,
+        })
+
+    return {"events": rows}
 
 
 @router.get("/api/redeem-diag")
