@@ -20,6 +20,7 @@ from backend.storage.repos import (
     get_event_by_id,
     get_position,
     get_unredeemed_resolved_events,
+    get_unresolved_events_with_gamma_id,
     get_unresolved_events_with_positions,
     upsert_position,
 )
@@ -38,7 +39,7 @@ async def check_resolved_markets() -> int:
     Returns count of newly resolved events.
     """
     async with get_session() as sess:
-        events = await get_unresolved_events_with_positions(sess)
+        events = await get_unresolved_events_with_gamma_id(sess)
 
     if not events:
         return 0
@@ -122,14 +123,9 @@ async def redeem_single_event(event_id: int, actor: str = "auto_redeemer") -> di
     SELECTOR = bytes.fromhex("dbeccb23")
     INDEX_SETS = [1, 2]
 
-    # Only redeem buckets where we hold a position
-    buckets_to_redeem = []
-    async with get_session() as sess:
-        for bucket in event.buckets:
-            if bucket.condition_id:
-                pos = await get_position(sess, bucket.id)
-                if pos and pos.net_qty > 0:
-                    buckets_to_redeem.append(bucket)
+    # Redeem all buckets with condition_id — on-chain call redeems whatever tokens
+    # the wallet holds, regardless of DB position state
+    buckets_to_redeem = [b for b in event.buckets if b.condition_id]
 
     if not buckets_to_redeem:
         # No positions to redeem — just mark as redeemed

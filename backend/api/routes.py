@@ -658,27 +658,32 @@ async def unredeemed_wins():
         async with get_session() as sess:
             from backend.storage.models import City
             city = await sess.get(City, event.city_id)
-            winning_buckets = []
+            buckets_info = []
             total_payout = 0.0
+            has_conditions = False
             for bucket in event.buckets:
+                if not bucket.condition_id:
+                    continue
+                has_conditions = True
                 pos = await get_position(sess, bucket.id)
-                if pos and pos.net_qty > 0:
-                    is_winner = (
-                        event.winning_bucket_idx is not None
-                        and bucket.bucket_idx == event.winning_bucket_idx
-                    )
-                    payout = pos.net_qty * 1.0 if is_winner else 0.0
-                    winning_buckets.append({
-                        "bucket_idx": bucket.bucket_idx,
-                        "label": bucket.label,
-                        "net_qty": pos.net_qty,
-                        "avg_cost": pos.avg_cost,
-                        "is_winner": is_winner,
-                        "expected_payout": round(payout, 4),
-                    })
-                    total_payout += payout
+                is_winner = (
+                    event.winning_bucket_idx is not None
+                    and bucket.bucket_idx == event.winning_bucket_idx
+                )
+                net_qty = pos.net_qty if pos else 0.0
+                avg_cost = pos.avg_cost if pos else 0.0
+                payout = net_qty * 1.0 if is_winner else 0.0
+                buckets_info.append({
+                    "bucket_idx": bucket.bucket_idx,
+                    "label": bucket.label,
+                    "net_qty": net_qty,
+                    "avg_cost": avg_cost,
+                    "is_winner": is_winner,
+                    "expected_payout": round(payout, 4),
+                })
+                total_payout += payout
 
-        if winning_buckets:
+        if has_conditions:
             result.append({
                 "event_id": event.id,
                 "city_name": city.display_name if city else "Unknown",
@@ -686,7 +691,7 @@ async def unredeemed_wins():
                 "date_et": event.date_et,
                 "winning_bucket_idx": event.winning_bucket_idx,
                 "resolved_at": event.resolved_at.isoformat() if event.resolved_at else None,
-                "buckets": winning_buckets,
+                "buckets": buckets_info,
                 "total_expected_payout": round(total_payout, 4),
             })
 

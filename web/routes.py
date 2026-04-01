@@ -120,20 +120,21 @@ async def dashboard(request: Request):
         async with get_session() as sess:
             city = await sess.get(City, evt.city_id)
             total_payout = 0.0
-            has_positions = False
             winning_label = None
+            has_conditions = False
             for bucket in evt.buckets:
-                pos = await get_position(sess, bucket.id)
-                if pos and pos.net_qty > 0:
-                    has_positions = True
-                    is_winner = (
-                        evt.winning_bucket_idx is not None
-                        and bucket.bucket_idx == evt.winning_bucket_idx
-                    )
-                    if is_winner:
+                if bucket.condition_id:
+                    has_conditions = True
+                is_winner = (
+                    evt.winning_bucket_idx is not None
+                    and bucket.bucket_idx == evt.winning_bucket_idx
+                )
+                if is_winner:
+                    winning_label = bucket.label
+                    pos = await get_position(sess, bucket.id)
+                    if pos and pos.net_qty > 0:
                         total_payout += pos.net_qty * 1.0
-                        winning_label = bucket.label
-        if has_positions:
+        if has_conditions:
             unredeemed_wins.append({
                 "event_id": evt.id,
                 "city_name": city.display_name if city else "?",

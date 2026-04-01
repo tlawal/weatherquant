@@ -1028,6 +1028,17 @@ async def get_unresolved_events_with_positions(session: AsyncSession) -> list[Ev
     return list(result.scalars().all())
 
 
+async def get_unresolved_events_with_gamma_id(session: AsyncSession) -> list[Event]:
+    """All unresolved events that exist on Polymarket (have gamma_event_id)."""
+    from sqlalchemy.orm import selectinload
+    result = await session.execute(
+        select(Event)
+        .where(Event.resolved_at.is_(None), Event.gamma_event_id.isnot(None))
+        .options(selectinload(Event.buckets))
+    )
+    return list(result.scalars().all())
+
+
 async def get_unredeemed_resolved_events(session: AsyncSession) -> list[Event]:
     """Events that are resolved but not yet redeemed."""
     from sqlalchemy.orm import selectinload
