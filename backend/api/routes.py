@@ -723,7 +723,11 @@ async def redeem_event(event_id: int, force: bool = False, actor: str = Depends(
 
 @router.post("/api/redeem-by-condition")
 async def redeem_by_condition(condition_id: str, actor: str = Depends(require_admin)):
-    """Redeem positions directly by condition ID (no DB event needed). For manual trades."""
+    """Redeem positions directly by condition ID (no DB event needed). For manual trades.
+
+    Queries the Polymarket data API to find token IDs, then queries on-chain
+    ERC1155 balances and passes actual amounts to NegRiskAdapter.redeemPositions.
+    """
     import aiohttp
     from eth_account import Account
 
@@ -734,22 +738,61 @@ async def redeem_by_condition(condition_id: str, actor: str = Depends(require_ad
     sender = account.address
 
     NEG_RISK_ADAPTER = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"
-    # NegRiskAdapter redeemPositions(bytes32 conditionId, uint256[] indexSets)
     REDEEM_SELECTOR = bytes.fromhex("dbeccb23")
-    INDEX_SETS = [1, 2]
-
-    cid_bytes = bytes.fromhex(condition_id.replace("0x", ""))
-    calldata = (
-        REDEEM_SELECTOR
-        + cid_bytes.rjust(32, b"\x00")
-        + (64).to_bytes(32, "big")
-        + len(INDEX_SETS).to_bytes(32, "big")
-        + b"".join(i.to_bytes(32, "big") for i in INDEX_SETS)
-    )
-
+    BALANCE_OF_SEL = bytes.fromhex("00fdd58e")
     POLYGON_RPC = Config.POLYGON_RPC_URL
+
+    # Find YES/NO token IDs from Polymarket data API
+    addr = Config.FUNDER_ADDRESS or sender
     timeout = aiohttp.ClientTimeout(total=15)
     async with aiohttp.ClientSession(timeout=timeout) as http:
+        # Fetch positions to find token IDs for this condition
+        yes_token_id = None
+        no_token_id = None
+        try:
+            url = f"https://data-api.polymarket.com/positions?user={addr}"
+            async with http.get(url) as resp:
+                if resp.status == 200:
+                    positions = await resp.json()
+                    for pos in positions:
+                        if pos.get("conditionId") == condition_id:
+                            yes_token_id = pos.get("asset")
+                            no_token_id = pos.get("oppositeAsset")
+                            break
+        except Exception:
+            pass
+
+        if not yes_token_id:
+            raise HTTPException(status_code=400, detail="Could not find token IDs for this condition")
+
+        # Query on-chain ERC1155 balances
+        async def balance_of(token_id_str):
+            padded_owner = bytes.fromhex(sender.replace("0x", "").zfill(64))
+            padded_token = int(token_id_str).to_bytes(32, "big")
+            calldata = "0x" + (BALANCE_OF_SEL + padded_owner + padded_token).hex()
+            r = await (await http.post(POLYGON_RPC, json={
+                "jsonrpc": "2.0", "id": 1, "method": "eth_call",
+                "params": [{"to": NEG_RISK_ADAPTER, "data": calldata}, "latest"],
+            })).json()
+            return int(r["result"], 16) if "result" in r else 0
+
+        yes_bal = await balance_of(yes_token_id)
+        no_bal = await balance_of(no_token_id) if no_token_id else 0
+
+        if yes_bal == 0 and no_bal == 0:
+            raise HTTPException(status_code=400, detail=f"No token balance found (yes={yes_bal}, no={no_bal})")
+
+        # Build calldata: redeemPositions(conditionId, [yes_amount, no_amount])
+        cid_bytes = bytes.fromhex(condition_id.replace("0x", ""))
+        calldata = (
+            REDEEM_SELECTOR
+            + cid_bytes.rjust(32, b"\x00")
+            + (64).to_bytes(32, "big")
+            + (2).to_bytes(32, "big")
+            + yes_bal.to_bytes(32, "big")
+            + no_bal.to_bytes(32, "big")
+        )
+
         nonce_resp = await (await http.post(POLYGON_RPC, json={
             "jsonrpc": "2.0", "id": 1, "method": "eth_getTransactionCount",
             "params": [sender, "latest"],
@@ -784,6 +827,7 @@ async def redeem_by_condition(condition_id: str, actor: str = Depends(require_ad
         "tx_hash": send_resp.get("result"),
         "sender": sender,
         "condition_id": condition_id,
+        "amounts": [yes_bal, no_bal],
         "to": NEG_RISK_ADAPTER,
     }
 

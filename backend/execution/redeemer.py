@@ -33,6 +33,22 @@ NEG_RISK_ADAPTER = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"
 CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 USDC_E = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
 _TIMEOUT = aiohttp.ClientTimeout(total=15)
+BALANCE_OF_SEL = bytes.fromhex("00fdd58e")  # ERC1155 balanceOf(address,uint256)
+
+
+async def _erc1155_balance(http, contract: str, owner: str, token_id: str) -> int:
+    """Query ERC1155 balanceOf on-chain. Returns raw uint256."""
+    padded_owner = bytes.fromhex(owner.replace("0x", "").zfill(64))
+    token_int = int(token_id)
+    padded_token = token_int.to_bytes(32, "big")
+    calldata = "0x" + (BALANCE_OF_SEL + padded_owner + padded_token).hex()
+    resp = await (await http.post(POLYGON_RPC, json={
+        "jsonrpc": "2.0", "id": 1, "method": "eth_call",
+        "params": [{"to": contract, "data": calldata}, "latest"],
+    })).json()
+    if "result" in resp:
+        return int(resp["result"], 16)
+    return 0
 
 
 async def check_resolved_markets() -> int:
@@ -123,9 +139,8 @@ async def redeem_single_event(event_id: int, actor: str = "auto_redeemer", force
     sender = account.address
     chain_id = Config.CHAIN_ID
 
-    # NegRiskAdapter redeemPositions(bytes32 conditionId, uint256[] indexSets)
+    # NegRiskAdapter redeemPositions(bytes32 conditionId, uint256[] amounts)
     REDEEM_SELECTOR = bytes.fromhex("dbeccb23")
-    INDEX_SETS = [1, 2]
 
     log.info("redeemer: sender=%s, target=NegRiskAdapter, event=%d", sender, event_id)
 
@@ -169,14 +184,30 @@ async def redeem_single_event(event_id: int, actor: str = "auto_redeemer", force
         tx_hashes = []
         for bucket in buckets_to_redeem:
             condition_id = bytes.fromhex(bucket.condition_id.replace("0x", ""))
-            # NegRiskAdapter redeemPositions(conditionId, indexSets)
+
+            # Query on-chain ERC1155 balances for YES and NO tokens
+            yes_bal = 0
+            no_bal = 0
+            if bucket.yes_token_id:
+                yes_bal = await _erc1155_balance(http, NEG_RISK_ADAPTER, sender, bucket.yes_token_id)
+            if bucket.no_token_id:
+                no_bal = await _erc1155_balance(http, NEG_RISK_ADAPTER, sender, bucket.no_token_id)
+
+            if yes_bal == 0 and no_bal == 0:
+                log.info("redeemer: bucket %d has 0 balance, skipping", bucket.id)
+                continue
+
+            # NegRiskAdapter redeemPositions(conditionId, amounts)
+            amounts = [yes_bal, no_bal]
             calldata = (
                 REDEEM_SELECTOR
                 + condition_id.rjust(32, b"\x00")
                 + (64).to_bytes(32, "big")  # offset to dynamic array
-                + len(INDEX_SETS).to_bytes(32, "big")
-                + b"".join(i.to_bytes(32, "big") for i in INDEX_SETS)
+                + (2).to_bytes(32, "big")
+                + yes_bal.to_bytes(32, "big")
+                + no_bal.to_bytes(32, "big")
             )
+            log.info("redeemer: bucket %d amounts=[%d, %d]", bucket.id, yes_bal, no_bal)
 
             tx = {
                 "to": NEG_RISK_ADAPTER,
