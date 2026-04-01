@@ -884,6 +884,87 @@ async def redemptions_list():
             "buckets": buckets_info,
         })
 
+    # ── Fetch on-chain positions from Polymarket data API (catches manual trades) ──
+    db_condition_ids = set()
+    for r in rows:
+        for b in r["buckets"]:
+            if b["condition_id"]:
+                db_condition_ids.add(b["condition_id"])
+
+    addr = Config.FUNDER_ADDRESS
+    if not addr and Config.POLYMARKET_PRIVATE_KEY:
+        try:
+            from eth_account import Account
+            addr = Account.from_key(Config.POLYMARKET_PRIVATE_KEY).address
+        except Exception:
+            pass
+
+    if addr:
+        try:
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(timeout=timeout) as http:
+                url = f"https://data-api.polymarket.com/positions?user={addr}"
+                async with http.get(url) as resp:
+                    if resp.status == 200:
+                        api_positions = await resp.json()
+                    else:
+                        api_positions = []
+
+                for pos in api_positions:
+                    cid = pos.get("conditionId", "")
+                    if not cid or cid in db_condition_ids:
+                        continue
+                    size = float(pos.get("size", 0))
+                    if size <= 0:
+                        continue
+
+                    # Check on-chain determination
+                    determined = None
+                    try:
+                        cid_hex = cid.replace("0x", "")
+                        call_data = f"0x{GET_DETERMINED_SEL}{cid_hex.zfill(64)}"
+                        rpc_resp = await (await http.post(POLYGON_RPC, json={
+                            "jsonrpc": "2.0", "id": 1, "method": "eth_call",
+                            "params": [{"to": NEG_RISK_ADAPTER, "data": call_data}, "latest"],
+                        })).json()
+                        if "result" in rpc_resp:
+                            determined = int(rpc_resp["result"], 16) != 0
+                    except Exception:
+                        pass
+
+                    redeemable_api = pos.get("redeemable", False)
+                    if redeemable_api and determined:
+                        status = "redeemable"
+                    elif redeemable_api:
+                        status = "resolved_not_determined"
+                    else:
+                        status = "open"
+
+                    rows.append({
+                        "event_id": None,
+                        "source": "on_chain",
+                        "city_name": pos.get("title", "Manual Position"),
+                        "city_slug": "",
+                        "date_et": pos.get("endDate", ""),
+                        "gamma_event_id": pos.get("eventId"),
+                        "event_slug": pos.get("eventSlug", ""),
+                        "status": status,
+                        "resolved_at": None,
+                        "redeemed_at": None,
+                        "winning_bucket_idx": None,
+                        "buckets": [{
+                            "bucket_idx": 0,
+                            "label": f"{pos.get('outcome', 'YES')} — {pos.get('title', '')}",
+                            "condition_id": cid,
+                            "net_qty": size,
+                            "avg_cost": float(pos.get("avgPrice", 0)),
+                            "is_winner": pos.get("curPrice", 0) == 1,
+                            "on_chain_determined": determined,
+                        }],
+                    })
+        except Exception as e:
+            log.warning("redemptions: failed to fetch on-chain positions: %s", e)
+
     return {"events": rows}
 
 

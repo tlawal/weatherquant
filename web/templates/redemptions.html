@@ -82,17 +82,26 @@ function renderEvent(evt) {
       </tr>`;
   }
 
-  const redeemBtn = evt.status === 'redeemable'
-    ? `<button onclick="redeemEvent(${evt.event_id}, this)" class="px-3 py-1 rounded text-sm font-semibold" style="background:var(--green);color:#000">Redeem</button>`
-    : evt.status === 'redeemed'
-    ? `<button onclick="retryRedeem(${evt.event_id}, this)" class="px-2 py-1 rounded text-xs" style="border:1px solid var(--border);color:var(--text-muted)">Retry</button>`
-    : evt.status === 'resolved_not_determined'
-    ? `<span class="text-xs" style="color:var(--text-muted)">Waiting for Polymarket oracle</span>`
-    : '';
+  const isManual = evt.source === 'on_chain';
+  const conditionId = (evt.buckets[0] || {}).condition_id || '';
+  let redeemBtn = '';
+  if (evt.status === 'redeemable') {
+    if (isManual) {
+      redeemBtn = `<button onclick="redeemByCondition('${conditionId}', this)" class="px-3 py-1 rounded text-sm font-semibold" style="background:var(--green);color:#000">Redeem</button>`;
+    } else {
+      redeemBtn = `<button onclick="redeemEvent(${evt.event_id}, this)" class="px-3 py-1 rounded text-sm font-semibold" style="background:var(--green);color:#000">Redeem</button>`;
+    }
+  } else if (evt.status === 'redeemed') {
+    redeemBtn = `<button onclick="retryRedeem(${evt.event_id}, this)" class="px-2 py-1 rounded text-xs" style="border:1px solid var(--border);color:var(--text-muted)">Retry</button>`;
+  } else if (evt.status === 'resolved_not_determined') {
+    redeemBtn = `<span class="text-xs" style="color:var(--text-muted)">Waiting for Polymarket oracle</span>`;
+  }
 
   const resolvedStr = evt.resolved_at ? new Date(evt.resolved_at).toLocaleDateString() : '-';
   const redeemedStr = evt.redeemed_at ? new Date(evt.redeemed_at).toLocaleDateString() : '-';
-  const pmLink = evt.gamma_event_id ? `<a href="https://polymarket.com/event/${evt.gamma_event_id}" target="_blank" class="text-xs" style="color:var(--cyan)">PM</a>` : '';
+  const manualTag = isManual ? '<span class="text-xs px-1.5 py-0.5 rounded" style="background:var(--bg-panel);color:var(--text-muted);border:1px solid var(--border)">Manual</span>' : '';
+  const pmSlug = evt.event_slug || (evt.gamma_event_id ? evt.gamma_event_id : '');
+  const pmLink = pmSlug ? `<a href="https://polymarket.com/event/${pmSlug}" target="_blank" class="text-xs" style="color:var(--cyan)">PM</a>` : '';
 
   return `
     <div class="card overflow-hidden" id="evt-${evt.event_id}">
@@ -101,6 +110,7 @@ function renderEvent(evt) {
           <span class="font-semibold">${evt.city_name}</span>
           <span class="mono text-sm" style="color:var(--text-muted)">${evt.date_et}</span>
           ${badge(evt.status)}
+          ${manualTag}
           ${pmLink}
         </div>
         <div class="flex items-center gap-3">
@@ -207,6 +217,30 @@ async function retryRedeem(eventId, btn) {
     alert('Error: ' + e.message);
     btn.disabled = false;
     btn.textContent = 'Retry';
+  }
+}
+
+async function redeemByCondition(conditionId, btn) {
+  btn.disabled = true;
+  btn.textContent = 'Redeeming...';
+  try {
+    const data = await apiCall(`/api/redeem-by-condition?condition_id=${conditionId}`);
+    if (data && data.ok) {
+      btn.textContent = 'Sent!';
+      btn.style.background = 'var(--bg-panel)';
+      btn.style.color = 'var(--green)';
+      const hash = data.tx_hash ? data.tx_hash.substring(0, 12) + '...' : '';
+      if (hash) btn.textContent = 'TX: ' + hash;
+      setTimeout(loadEvents, 5000);
+    } else {
+      alert('Failed: ' + (data?.detail || JSON.stringify(data)));
+      btn.disabled = false;
+      btn.textContent = 'Redeem';
+    }
+  } catch (e) {
+    alert('Error: ' + e.message);
+    btn.disabled = false;
+    btn.textContent = 'Redeem';
   }
 }
 
