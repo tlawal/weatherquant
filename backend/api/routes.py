@@ -693,6 +693,14 @@ async def unredeemed_wins():
     return {"unredeemed": result}
 
 
+@router.post("/api/check-resolved")
+async def check_resolved(actor: str = Depends(require_admin)):
+    """Trigger resolution check against Gamma API for all unresolved events."""
+    from backend.execution.redeemer import check_resolved_markets
+    count = await check_resolved_markets()
+    return {"ok": True, "newly_resolved": count}
+
+
 @router.post("/api/redeem/{event_id}")
 async def redeem_event(event_id: int, actor: str = Depends(require_admin)):
     """Manually redeem positions for a single resolved event."""

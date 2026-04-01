@@ -123,6 +123,13 @@
     {% endfor %}
   </div>
 </div>
+{% else %}
+<div class="mb-5 flex justify-end">
+  <button onclick="checkResolved(this)" class="text-xs px-3 py-1.5 rounded transition-all hover:opacity-80"
+          style="color:var(--text-muted);border:1px solid var(--border)">
+    Check for resolved markets
+  </button>
+</div>
 {% endif %}
 
 <!-- ── SIGNALS TABLE ─────────────────────────────────────────────────────── -->
@@ -306,6 +313,25 @@ async function submitTrade() {
   const el = document.getElementById('trade-result');
   el.textContent = JSON.stringify(result, null, 2);
   el.classList.remove('hidden');
+}
+
+// Check for newly resolved markets
+async function checkResolved(btn) {
+  btn.disabled = true;
+  btn.textContent = 'Checking...';
+  try {
+    const data = await apiCall('/api/check-resolved');
+    if (data && data.newly_resolved > 0) {
+      window.location.reload();
+    } else {
+      btn.textContent = 'No new resolutions';
+      setTimeout(() => { btn.disabled = false; btn.textContent = 'Check for resolved markets'; }, 3000);
+    }
+  } catch (e) {
+    alert('Error: ' + e.message);
+    btn.disabled = false;
+    btn.textContent = 'Check for resolved markets';
+  }
 }
 
 // Claim unredeemed winnings

@@ -157,6 +157,11 @@ async def job_fetch_metar_smart():
     await fetch_metar_smart()
 
 
+async def job_check_resolved():
+    from backend.execution.redeemer import check_resolved_markets
+    await check_resolved_markets()
+
+
 async def job_auto_redeem():
     from backend.execution.redeemer import run_auto_redeem
     await run_auto_redeem()
@@ -198,6 +203,7 @@ def create_scheduler() -> AsyncIOScheduler:
     add(job_discover_cities,     seconds=86400, name="discover_cities")  # 24h
     add(job_refresh_station_profiles, seconds=3600, name="refresh_station_profiles")  # 1h
     add(job_fetch_metar_smart,       seconds=30,    name="fetch_metar_smart")
+    add(job_check_resolved,          seconds=300,   name="check_resolved")  # 5 min
     add(job_auto_redeem,             seconds=43200, name="auto_redeem")  # 12h
 
     return scheduler
