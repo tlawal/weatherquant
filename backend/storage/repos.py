@@ -1048,3 +1048,16 @@ async def get_unredeemed_resolved_events(session: AsyncSession) -> list[Event]:
         .options(selectinload(Event.buckets))
     )
     return list(result.scalars().all())
+
+
+async def get_recently_redeemed_events(session: AsyncSession, days: int = 7) -> list[Event]:
+    """Events redeemed within the last N days."""
+    from datetime import timedelta
+    from sqlalchemy.orm import selectinload
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    result = await session.execute(
+        select(Event)
+        .where(Event.redeemed_at.isnot(None), Event.redeemed_at >= cutoff)
+        .options(selectinload(Event.buckets))
+    )
+    return list(result.scalars().all())

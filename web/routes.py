@@ -41,6 +41,7 @@ async def dashboard(request: Request):
         get_all_positions,
         get_latest_signals,
         get_position,
+        get_recently_redeemed_events,
         get_unredeemed_resolved_events,
     )
     from backend.storage.models import Bucket, Event, City
@@ -143,6 +144,28 @@ async def dashboard(request: Request):
                 "total_payout": round(total_payout, 2),
             })
 
+    # Recently redeemed events (last 7 days) for history/retry
+    async with get_session() as sess:
+        redeemed_events = await get_recently_redeemed_events(sess, days=7)
+
+    recent_redeems = []
+    for evt in redeemed_events:
+        async with get_session() as sess:
+            city = await sess.get(City, evt.city_id)
+            winning_label = None
+            for bucket in evt.buckets:
+                if (evt.winning_bucket_idx is not None
+                        and bucket.bucket_idx == evt.winning_bucket_idx):
+                    winning_label = bucket.label
+                    break
+        recent_redeems.append({
+            "event_id": evt.id,
+            "city_name": city.display_name if city else "?",
+            "date_et": evt.date_et,
+            "winning_label": winning_label or "N/A",
+            "redeemed_at": evt.redeemed_at.strftime("%b %d %H:%M") if evt.redeemed_at else "",
+        })
+
     return templates.TemplateResponse(
         "dashboard.html",
         {
@@ -155,6 +178,7 @@ async def dashboard(request: Request):
             "cities": [c.city_slug for c in cities],
             "today_et": today_et,
             "unredeemed_wins": unredeemed_wins,
+            "recent_redeems": recent_redeems,
         },
     )
 

@@ -707,11 +707,11 @@ async def check_resolved(actor: str = Depends(require_admin)):
 
 
 @router.post("/api/redeem/{event_id}")
-async def redeem_event(event_id: int, actor: str = Depends(require_admin)):
-    """Manually redeem positions for a single resolved event."""
+async def redeem_event(event_id: int, force: bool = False, actor: str = Depends(require_admin)):
+    """Manually redeem positions for a single resolved event. Use ?force=true to retry."""
     from backend.execution.redeemer import redeem_single_event
     try:
-        result = await redeem_single_event(event_id, actor=f"admin:{actor}")
+        result = await redeem_single_event(event_id, actor=f"admin:{actor}", force=force)
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -890,6 +890,29 @@ async def get_wallet_balance():
     balance = None
     if clob and clob.can_trade:
         balance = await clob.get_balance()
+
+    # Fallback: Polymarket data API if CLOB balance unavailable
+    if balance is None:
+        addr = Config.FUNDER_ADDRESS
+        if not addr and Config.POLYMARKET_PRIVATE_KEY:
+            try:
+                from eth_account import Account
+                addr = Account.from_key(Config.POLYMARKET_PRIVATE_KEY).address
+            except Exception:
+                pass
+        if addr:
+            try:
+                import aiohttp
+                async with aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=5)
+                ) as http:
+                    url = f"https://data-api.polymarket.com/value?user={addr}"
+                    async with http.get(url) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            balance = float(data.get("value", 0))
+            except Exception:
+                pass
 
     async with get_session() as sess:
         positions = await get_all_positions(sess)

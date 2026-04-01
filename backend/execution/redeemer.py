@@ -97,11 +97,12 @@ async def check_resolved_markets() -> int:
     return resolved_count
 
 
-async def redeem_single_event(event_id: int, actor: str = "auto_redeemer") -> dict:
+async def redeem_single_event(event_id: int, actor: str = "auto_redeemer", force: bool = False) -> dict:
     """
     Redeem positions for a single resolved event.
     Returns {"ok": True, "tx_hashes": [...], "event_id": ...} on success.
     Raises ValueError for validation failures, RuntimeError for tx/config failures.
+    Use force=True to retry an event already marked as redeemed.
     """
     async with get_session() as sess:
         event = await get_event_by_id(sess, event_id)
@@ -110,7 +111,7 @@ async def redeem_single_event(event_id: int, actor: str = "auto_redeemer") -> di
         raise ValueError(f"Event {event_id} not found")
     if event.resolved_at is None:
         raise ValueError(f"Event {event_id} not yet resolved")
-    if event.redeemed_at is not None:
+    if event.redeemed_at is not None and not force:
         raise ValueError(f"Event {event_id} already redeemed")
     if not Config.POLYMARKET_PRIVATE_KEY:
         raise RuntimeError("No private key configured")

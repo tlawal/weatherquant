@@ -132,6 +132,34 @@
 </div>
 {% endif %}
 
+<!-- ── RECENTLY REDEEMED ───────────────────────────────────────────────── -->
+{% if recent_redeems %}
+<div class="card mb-5 overflow-hidden" style="opacity:0.8">
+  <div class="px-5 py-3 border-b flex items-center justify-between" style="border-color:var(--border)">
+    <h2 class="font-semibold text-sm" style="color:var(--text-muted)">Recently Redeemed (7d)</h2>
+  </div>
+  <div class="divide-y" style="border-color:var(--border)">
+    {% for r in recent_redeems %}
+    <div class="px-5 py-2.5 flex items-center justify-between" id="redeemed-row-{{ r.event_id }}">
+      <div class="flex items-center gap-3">
+        <span class="text-sm" style="color:var(--text-muted)">{{ r.city_name }}</span>
+        <span class="text-xs mono" style="color:var(--text-muted)">{{ r.date_et }}</span>
+        <span class="text-xs" style="color:var(--text-muted)">{{ r.winning_label }}</span>
+      </div>
+      <div class="flex items-center gap-3">
+        <span class="text-xs" style="color:var(--text-muted)">{{ r.redeemed_at }}</span>
+        <button onclick="retryRedeem({{ r.event_id }}, this)"
+                class="px-3 py-1 rounded text-[10px] font-semibold transition-all hover:opacity-80"
+                style="color:var(--text-muted);border:1px solid var(--border)">
+          Retry
+        </button>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
 <!-- ── SIGNALS TABLE ─────────────────────────────────────────────────────── -->
 <div class="card overflow-hidden">
   <div class="px-5 py-3 border-b flex items-center justify-between" style="border-color:var(--border)">
@@ -331,6 +359,31 @@ async function checkResolved(btn) {
     alert('Error: ' + e.message);
     btn.disabled = false;
     btn.textContent = 'Check for resolved markets';
+  }
+}
+
+// Retry redemption for already-redeemed event
+async function retryRedeem(eventId, btn) {
+  btn.disabled = true;
+  btn.textContent = 'Retrying...';
+  try {
+    const data = await apiCall(`/api/redeem/${eventId}?force=true`);
+    if (data && data.ok) {
+      const row = document.getElementById(`redeemed-row-${eventId}`);
+      if (row) {
+        row.innerHTML = `<div class="px-5 py-2.5 text-green-400 text-sm w-full">
+          Retry sent! TX: ${(data.tx_hashes || []).map(h => h ? h.substring(0, 16) + '...' : '').join(', ') || 'no tokens found'}
+        </div>`;
+      }
+    } else {
+      alert('Retry failed: ' + (data?.detail || JSON.stringify(data)));
+      btn.disabled = false;
+      btn.textContent = 'Retry';
+    }
+  } catch (e) {
+    alert('Error: ' + e.message);
+    btn.disabled = false;
+    btn.textContent = 'Retry';
   }
 }
 
