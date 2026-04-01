@@ -120,16 +120,24 @@ async def redeem_single_event(event_id: int, actor: str = "auto_redeemer", force
     account = Account.from_key(Config.POLYMARKET_PRIVATE_KEY)
     sender = account.address
     chain_id = Config.CHAIN_ID
+    proxy_addr = Config.FUNDER_ADDRESS  # Proxy wallet that holds tokens
 
-    SELECTOR = bytes.fromhex("dbeccb23")
+    # redeemPositions(bytes32 conditionId, uint256[] indexSets)
+    REDEEM_SELECTOR = bytes.fromhex("dbeccb23")
     INDEX_SETS = [1, 2]
+    # Proxy execute(address to, uint256 value, bytes data) selector
+    EXEC_SELECTOR = bytes.fromhex("b61d27f6")
+
+    log.info(
+        "redeemer: sender=%s, proxy=%s, event=%d",
+        sender, proxy_addr or "none (direct)", event_id,
+    )
 
     # Redeem all buckets with condition_id — on-chain call redeems whatever tokens
     # the wallet holds, regardless of DB position state
     buckets_to_redeem = [b for b in event.buckets if b.condition_id]
 
     if not buckets_to_redeem:
-        # No positions to redeem — just mark as redeemed
         async with get_session() as sess:
             from sqlalchemy import update as sql_update
             from backend.storage.models import Event as EventModel
@@ -142,7 +150,6 @@ async def redeem_single_event(event_id: int, actor: str = "auto_redeemer", force
         return {"ok": True, "tx_hashes": [], "event_id": event_id, "note": "no positions to redeem"}
 
     async with aiohttp.ClientSession(timeout=_TIMEOUT) as http:
-        # Get nonce and gas price
         nonce_payload = {
             "jsonrpc": "2.0", "id": 1, "method": "eth_getTransactionCount",
             "params": [sender, "latest"],
@@ -166,18 +173,43 @@ async def redeem_single_event(event_id: int, actor: str = "auto_redeemer", force
         tx_hashes = []
         for bucket in buckets_to_redeem:
             condition_id = bytes.fromhex(bucket.condition_id.replace("0x", ""))
-            calldata = (
-                SELECTOR
+            # Inner call: redeemPositions(conditionId, indexSets)
+            redeem_calldata = (
+                REDEEM_SELECTOR
                 + condition_id.rjust(32, b"\x00")
                 + (64).to_bytes(32, "big")
                 + len(INDEX_SETS).to_bytes(32, "big")
                 + b"".join(i.to_bytes(32, "big") for i in INDEX_SETS)
             )
 
+            if proxy_addr:
+                # Route through proxy: execute(address to, uint256 value, bytes data)
+                padded_target = bytes.fromhex(NEG_RISK_ADAPTER[2:].zfill(64))
+                value_bytes = (0).to_bytes(32, "big")
+                data_offset = (96).to_bytes(32, "big")  # offset to dynamic bytes
+                data_length = len(redeem_calldata).to_bytes(32, "big")
+                padding = b"\x00" * ((32 - len(redeem_calldata) % 32) % 32)
+                calldata = (
+                    EXEC_SELECTOR
+                    + padded_target
+                    + value_bytes
+                    + data_offset
+                    + data_length
+                    + redeem_calldata
+                    + padding
+                )
+                tx_to = proxy_addr
+                tx_gas = 300_000
+            else:
+                # Direct call to NegRiskAdapter (no proxy)
+                calldata = redeem_calldata
+                tx_to = NEG_RISK_ADAPTER
+                tx_gas = 200_000
+
             tx = {
-                "to": NEG_RISK_ADAPTER,
+                "to": tx_to,
                 "value": 0,
-                "gas": 200_000,
+                "gas": tx_gas,
                 "gasPrice": gas_price,
                 "nonce": nonce,
                 "chainId": chain_id,
@@ -193,15 +225,15 @@ async def redeem_single_event(event_id: int, actor: str = "auto_redeemer", force
 
             if "error" in send_result:
                 log.error(
-                    "redeemer: redeem tx failed for bucket %d: %s",
-                    bucket.id, send_result["error"],
+                    "redeemer: redeem tx failed for bucket %d (to=%s): %s",
+                    bucket.id, tx_to, send_result["error"],
                 )
                 continue
 
             tx_hash = send_result.get("result")
             tx_hashes.append(tx_hash)
             nonce += 1
-            log.info("redeemer: redeem tx sent for bucket %d: %s", bucket.id, tx_hash)
+            log.info("redeemer: redeem tx sent for bucket %d (to=%s): %s", bucket.id, tx_to, tx_hash)
 
     if not tx_hashes:
         raise RuntimeError("All redemption transactions failed")

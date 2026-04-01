@@ -719,6 +719,19 @@ async def redeem_event(event_id: int, force: bool = False, actor: str = Depends(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/api/redeem-diag")
+async def redeem_diagnostics(actor: str = Depends(require_admin)):
+    """Show address configuration for debugging redemption issues."""
+    from eth_account import Account
+    signer = Account.from_key(Config.POLYMARKET_PRIVATE_KEY).address if Config.POLYMARKET_PRIVATE_KEY else None
+    return {
+        "signer_eoa": signer,
+        "funder_proxy": Config.FUNDER_ADDRESS or None,
+        "redeem_from": Config.FUNDER_ADDRESS or signer,
+        "neg_risk_adapter": "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296",
+    }
+
+
 @router.get("/api/position/{city_slug}/{bucket_idx}")
 async def get_bucket_position(city_slug: str, bucket_idx: int):
     """Get current position for a specific bucket."""
