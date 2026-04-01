@@ -731,15 +731,21 @@ async def redeem_by_condition(condition_id: str, actor: str = Depends(require_ad
     account = Account.from_key(Config.POLYMARKET_PRIVATE_KEY)
     sender = account.address
 
-    NEG_RISK_ADAPTER = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"
-    REDEEM_SELECTOR = bytes.fromhex("dbeccb23")
+    CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+    USDC_E = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+    # CTF redeemPositions(address, bytes32, bytes32, uint256[])
+    REDEEM_SELECTOR = bytes.fromhex("01b7037c")
     INDEX_SETS = [1, 2]
 
     cid_bytes = bytes.fromhex(condition_id.replace("0x", ""))
+    collateral = bytes.fromhex(USDC_E[2:].zfill(64))
+    parent = b"\x00" * 32
     calldata = (
         REDEEM_SELECTOR
+        + collateral
+        + parent
         + cid_bytes.rjust(32, b"\x00")
-        + (64).to_bytes(32, "big")
+        + (128).to_bytes(32, "big")  # offset to dynamic array (4 * 32)
         + len(INDEX_SETS).to_bytes(32, "big")
         + b"".join(i.to_bytes(32, "big") for i in INDEX_SETS)
     )
@@ -759,7 +765,7 @@ async def redeem_by_condition(condition_id: str, actor: str = Depends(require_ad
         gas_price = int(gas_resp["result"], 16)
 
         tx = {
-            "to": NEG_RISK_ADAPTER,
+            "to": CTF_ADDRESS,
             "value": 0,
             "gas": 300_000,
             "gasPrice": gas_price,
@@ -781,7 +787,7 @@ async def redeem_by_condition(condition_id: str, actor: str = Depends(require_ad
         "tx_hash": send_resp.get("result"),
         "sender": sender,
         "condition_id": condition_id,
-        "to": NEG_RISK_ADAPTER,
+        "to": CTF_ADDRESS,
     }
 
 

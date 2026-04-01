@@ -30,6 +30,8 @@ log = logging.getLogger(__name__)
 GAMMA_API = "https://gamma-api.polymarket.com"
 POLYGON_RPC = Config.POLYGON_RPC_URL
 NEG_RISK_ADAPTER = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"
+CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+USDC_E = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
 _TIMEOUT = aiohttp.ClientTimeout(total=15)
 
 
@@ -120,18 +122,13 @@ async def redeem_single_event(event_id: int, actor: str = "auto_redeemer", force
     account = Account.from_key(Config.POLYMARKET_PRIVATE_KEY)
     sender = account.address
     chain_id = Config.CHAIN_ID
-    proxy_addr = Config.FUNDER_ADDRESS  # Proxy wallet that holds tokens
 
-    # redeemPositions(bytes32 conditionId, uint256[] indexSets)
-    REDEEM_SELECTOR = bytes.fromhex("dbeccb23")
+    # CTF redeemPositions(address collateralToken, bytes32 parentCollectionId,
+    #                      bytes32 conditionId, uint256[] indexSets)
+    REDEEM_SELECTOR = bytes.fromhex("01b7037c")
     INDEX_SETS = [1, 2]
-    # Proxy execute(address to, uint256 value, bytes data) selector
-    EXEC_SELECTOR = bytes.fromhex("b61d27f6")
 
-    log.info(
-        "redeemer: sender=%s, proxy=%s, event=%d",
-        sender, proxy_addr or "none (direct)", event_id,
-    )
+    log.info("redeemer: sender=%s, target=CTF, event=%d", sender, event_id)
 
     # Redeem all buckets with condition_id — on-chain call redeems whatever tokens
     # the wallet holds, regardless of DB position state
@@ -173,43 +170,23 @@ async def redeem_single_event(event_id: int, actor: str = "auto_redeemer", force
         tx_hashes = []
         for bucket in buckets_to_redeem:
             condition_id = bytes.fromhex(bucket.condition_id.replace("0x", ""))
-            # Inner call: redeemPositions(conditionId, indexSets)
-            redeem_calldata = (
+            # CTF redeemPositions(address, bytes32, bytes32, uint256[])
+            collateral = bytes.fromhex(USDC_E[2:].zfill(64))
+            parent = b"\x00" * 32
+            calldata = (
                 REDEEM_SELECTOR
+                + collateral
+                + parent
                 + condition_id.rjust(32, b"\x00")
-                + (64).to_bytes(32, "big")
+                + (128).to_bytes(32, "big")  # offset to dynamic array (4 * 32)
                 + len(INDEX_SETS).to_bytes(32, "big")
                 + b"".join(i.to_bytes(32, "big") for i in INDEX_SETS)
             )
 
-            if proxy_addr:
-                # Route through proxy: execute(address to, uint256 value, bytes data)
-                padded_target = bytes.fromhex(NEG_RISK_ADAPTER[2:].zfill(64))
-                value_bytes = (0).to_bytes(32, "big")
-                data_offset = (96).to_bytes(32, "big")  # offset to dynamic bytes
-                data_length = len(redeem_calldata).to_bytes(32, "big")
-                padding = b"\x00" * ((32 - len(redeem_calldata) % 32) % 32)
-                calldata = (
-                    EXEC_SELECTOR
-                    + padded_target
-                    + value_bytes
-                    + data_offset
-                    + data_length
-                    + redeem_calldata
-                    + padding
-                )
-                tx_to = proxy_addr
-                tx_gas = 300_000
-            else:
-                # Direct call to NegRiskAdapter (no proxy)
-                calldata = redeem_calldata
-                tx_to = NEG_RISK_ADAPTER
-                tx_gas = 200_000
-
             tx = {
-                "to": tx_to,
+                "to": CTF_ADDRESS,
                 "value": 0,
-                "gas": tx_gas,
+                "gas": 300_000,
                 "gasPrice": gas_price,
                 "nonce": nonce,
                 "chainId": chain_id,
@@ -225,15 +202,15 @@ async def redeem_single_event(event_id: int, actor: str = "auto_redeemer", force
 
             if "error" in send_result:
                 log.error(
-                    "redeemer: redeem tx failed for bucket %d (to=%s): %s",
-                    bucket.id, tx_to, send_result["error"],
+                    "redeemer: redeem tx failed for bucket %d: %s",
+                    bucket.id, send_result["error"],
                 )
                 continue
 
             tx_hash = send_result.get("result")
             tx_hashes.append(tx_hash)
             nonce += 1
-            log.info("redeemer: redeem tx sent for bucket %d (to=%s): %s", bucket.id, tx_to, tx_hash)
+            log.info("redeemer: redeem tx sent for bucket %d: %s", bucket.id, tx_hash)
 
     if not tx_hashes:
         raise RuntimeError("All redemption transactions failed")
