@@ -16,6 +16,8 @@ import aiohttp
 from backend.config import Config
 from backend.storage.db import get_session
 from backend.storage.repos import (
+    append_audit,
+    get_event_by_id,
     get_position,
     get_unredeemed_resolved_events,
     get_unresolved_events_with_positions,
@@ -94,10 +96,168 @@ async def check_resolved_markets() -> int:
     return resolved_count
 
 
+async def redeem_single_event(event_id: int, actor: str = "auto_redeemer") -> dict:
+    """
+    Redeem positions for a single resolved event.
+    Returns {"ok": True, "tx_hashes": [...], "event_id": ...} on success.
+    Raises ValueError for validation failures, RuntimeError for tx/config failures.
+    """
+    async with get_session() as sess:
+        event = await get_event_by_id(sess, event_id)
+
+    if not event:
+        raise ValueError(f"Event {event_id} not found")
+    if event.resolved_at is None:
+        raise ValueError(f"Event {event_id} not yet resolved")
+    if event.redeemed_at is not None:
+        raise ValueError(f"Event {event_id} already redeemed")
+    if not Config.POLYMARKET_PRIVATE_KEY:
+        raise RuntimeError("No private key configured")
+
+    from eth_account import Account
+    account = Account.from_key(Config.POLYMARKET_PRIVATE_KEY)
+    sender = account.address
+    chain_id = Config.CHAIN_ID
+
+    SELECTOR = bytes.fromhex("dbeccb23")
+    INDEX_SETS = [1, 2]
+
+    # Only redeem buckets where we hold a position
+    buckets_to_redeem = []
+    async with get_session() as sess:
+        for bucket in event.buckets:
+            if bucket.condition_id:
+                pos = await get_position(sess, bucket.id)
+                if pos and pos.net_qty > 0:
+                    buckets_to_redeem.append(bucket)
+
+    if not buckets_to_redeem:
+        # No positions to redeem — just mark as redeemed
+        async with get_session() as sess:
+            from sqlalchemy import update as sql_update
+            from backend.storage.models import Event as EventModel
+            await sess.execute(
+                sql_update(EventModel)
+                .where(EventModel.id == event.id)
+                .values(redeemed_at=datetime.now(timezone.utc))
+            )
+            await sess.commit()
+        return {"ok": True, "tx_hashes": [], "event_id": event_id, "note": "no positions to redeem"}
+
+    async with aiohttp.ClientSession(timeout=_TIMEOUT) as http:
+        # Get nonce and gas price
+        nonce_payload = {
+            "jsonrpc": "2.0", "id": 1, "method": "eth_getTransactionCount",
+            "params": [sender, "latest"],
+        }
+        gas_payload = {
+            "jsonrpc": "2.0", "id": 2, "method": "eth_gasPrice", "params": [],
+        }
+
+        async with http.post(POLYGON_RPC, json=nonce_payload) as r:
+            nonce_result = await r.json()
+        if "error" in nonce_result:
+            raise RuntimeError(f"nonce RPC error: {nonce_result['error']}")
+        nonce = int(nonce_result["result"], 16)
+
+        async with http.post(POLYGON_RPC, json=gas_payload) as r:
+            gas_result = await r.json()
+        if "error" in gas_result:
+            raise RuntimeError(f"gasPrice RPC error: {gas_result['error']}")
+        gas_price = int(gas_result["result"], 16)
+
+        tx_hashes = []
+        for bucket in buckets_to_redeem:
+            condition_id = bytes.fromhex(bucket.condition_id.replace("0x", ""))
+            calldata = (
+                SELECTOR
+                + condition_id.rjust(32, b"\x00")
+                + (64).to_bytes(32, "big")
+                + len(INDEX_SETS).to_bytes(32, "big")
+                + b"".join(i.to_bytes(32, "big") for i in INDEX_SETS)
+            )
+
+            tx = {
+                "to": NEG_RISK_ADAPTER,
+                "value": 0,
+                "gas": 200_000,
+                "gasPrice": gas_price,
+                "nonce": nonce,
+                "chainId": chain_id,
+                "data": calldata,
+            }
+            signed = account.sign_transaction(tx)
+            send_payload = {
+                "jsonrpc": "2.0", "id": 3, "method": "eth_sendRawTransaction",
+                "params": ["0x" + signed.raw_transaction.hex()],
+            }
+            async with http.post(POLYGON_RPC, json=send_payload) as r:
+                send_result = await r.json()
+
+            if "error" in send_result:
+                log.error(
+                    "redeemer: redeem tx failed for bucket %d: %s",
+                    bucket.id, send_result["error"],
+                )
+                continue
+
+            tx_hash = send_result.get("result")
+            tx_hashes.append(tx_hash)
+            nonce += 1
+            log.info("redeemer: redeem tx sent for bucket %d: %s", bucket.id, tx_hash)
+
+    if not tx_hashes:
+        raise RuntimeError("All redemption transactions failed")
+
+    # Mark event as redeemed and zero out positions
+    async with get_session() as sess:
+        from sqlalchemy import update as sql_update
+        from backend.storage.models import Event as EventModel
+        await sess.execute(
+            sql_update(EventModel)
+            .where(EventModel.id == event.id)
+            .values(redeemed_at=datetime.now(timezone.utc))
+        )
+
+        for bucket in event.buckets:
+            pos = await get_position(sess, bucket.id)
+            if pos and pos.net_qty > 0:
+                is_winner = (
+                    event.winning_bucket_idx is not None
+                    and bucket.bucket_idx == event.winning_bucket_idx
+                )
+                redeem_price = 1.0 if is_winner else 0.0
+                await upsert_position(
+                    sess,
+                    bucket_id=bucket.id,
+                    side="yes",
+                    fill_qty=-pos.net_qty,
+                    fill_price=redeem_price,
+                    last_mkt_price=redeem_price,
+                )
+
+        await sess.commit()
+
+    async with get_session() as sess:
+        await append_audit(
+            sess,
+            actor=actor,
+            action="positions_redeemed",
+            payload={
+                "event_id": event.id,
+                "date_et": event.date_et,
+                "tx_hashes": tx_hashes,
+                "winning_bucket_idx": event.winning_bucket_idx,
+            },
+        )
+
+    return {"ok": True, "tx_hashes": tx_hashes, "event_id": event_id}
+
+
 async def redeem_positions() -> int:
     """
-    Redeem winning positions for resolved events.
-    Calls redeemPositions(conditionId, indexSets) on NegRiskAdapter per bucket.
+    Redeem winning positions for all resolved events.
+    Calls redeem_single_event() for each unredeemed resolved event.
     Returns count of redeemed events.
     """
     async with get_session() as sess:
@@ -110,159 +270,14 @@ async def redeem_positions() -> int:
         log.warning("redeemer: no private key configured, skipping redemption")
         return 0
 
-    from eth_account import Account
-    account = Account.from_key(Config.POLYMARKET_PRIVATE_KEY)
-    sender = account.address
-    chain_id = Config.CHAIN_ID
-
-    # redeemPositions(bytes32 conditionId, uint256[] indexSets)
-    # selector = keccak256("redeemPositions(bytes32,uint256[])") = 0xdbeccb23
-    SELECTOR = bytes.fromhex("dbeccb23")
-    # indexSets: [1, 2] for binary YES/NO outcomes (2^0=YES, 2^1=NO)
-    INDEX_SETS = [1, 2]
-
     redeemed_count = 0
-    async with aiohttp.ClientSession(timeout=_TIMEOUT) as http:
-        for event in events:
-            try:
-                # Only redeem buckets where we hold a position
-                buckets_to_redeem = []
-                async with get_session() as sess:
-                    for bucket in event.buckets:
-                        if bucket.condition_id:
-                            pos = await get_position(sess, bucket.id)
-                            if pos and pos.net_qty > 0:
-                                buckets_to_redeem.append(bucket)
-
-                if not buckets_to_redeem:
-                    # No positions to redeem — just mark as redeemed
-                    async with get_session() as sess:
-                        from sqlalchemy import update as sql_update
-                        from backend.storage.models import Event as EventModel
-                        await sess.execute(
-                            sql_update(EventModel)
-                            .where(EventModel.id == event.id)
-                            .values(redeemed_at=datetime.now(timezone.utc))
-                        )
-                        await sess.commit()
-                    continue
-
-                # Get nonce and gas price once per event
-                nonce_payload = {
-                    "jsonrpc": "2.0", "id": 1, "method": "eth_getTransactionCount",
-                    "params": [sender, "latest"],
-                }
-                gas_payload = {
-                    "jsonrpc": "2.0", "id": 2, "method": "eth_gasPrice", "params": [],
-                }
-
-                async with http.post(POLYGON_RPC, json=nonce_payload) as r:
-                    nonce_result = await r.json()
-                if "error" in nonce_result:
-                    log.error("redeemer: nonce RPC error: %s", nonce_result["error"])
-                    continue
-                nonce = int(nonce_result["result"], 16)
-
-                async with http.post(POLYGON_RPC, json=gas_payload) as r:
-                    gas_result = await r.json()
-                if "error" in gas_result:
-                    log.error("redeemer: gasPrice RPC error: %s", gas_result["error"])
-                    continue
-                gas_price = int(gas_result["result"], 16)
-
-                tx_hashes = []
-                for bucket in buckets_to_redeem:
-                    condition_id = bytes.fromhex(bucket.condition_id.replace("0x", ""))
-                    # ABI encode: conditionId (bytes32), offset to indexSets (64),
-                    # length of indexSets, then each uint256
-                    calldata = (
-                        SELECTOR
-                        + condition_id.rjust(32, b"\x00")
-                        + (64).to_bytes(32, "big")  # offset to dynamic array
-                        + len(INDEX_SETS).to_bytes(32, "big")
-                        + b"".join(i.to_bytes(32, "big") for i in INDEX_SETS)
-                    )
-
-                    tx = {
-                        "to": NEG_RISK_ADAPTER,
-                        "value": 0,
-                        "gas": 200_000,
-                        "gasPrice": gas_price,
-                        "nonce": nonce,
-                        "chainId": chain_id,
-                        "data": calldata,
-                    }
-                    signed = account.sign_transaction(tx)
-                    send_payload = {
-                        "jsonrpc": "2.0", "id": 3, "method": "eth_sendRawTransaction",
-                        "params": ["0x" + signed.raw_transaction.hex()],
-                    }
-                    async with http.post(POLYGON_RPC, json=send_payload) as r:
-                        send_result = await r.json()
-
-                    if "error" in send_result:
-                        log.error(
-                            "redeemer: redeem tx failed for bucket %d: %s",
-                            bucket.id, send_result["error"],
-                        )
-                        continue
-
-                    tx_hash = send_result.get("result")
-                    tx_hashes.append(tx_hash)
-                    nonce += 1
-                    log.info("redeemer: redeem tx sent for bucket %d: %s", bucket.id, tx_hash)
-
-                if not tx_hashes:
-                    continue
-
-                # Mark event as redeemed and zero out positions
-                async with get_session() as sess:
-                    from sqlalchemy import update as sql_update
-                    from backend.storage.models import Event as EventModel
-                    await sess.execute(
-                        sql_update(EventModel)
-                        .where(EventModel.id == event.id)
-                        .values(redeemed_at=datetime.now(timezone.utc))
-                    )
-
-                    # Zero out positions and realize PnL
-                    for bucket in event.buckets:
-                        pos = await get_position(sess, bucket.id)
-                        if pos and pos.net_qty > 0:
-                            is_winner = (
-                                event.winning_bucket_idx is not None
-                                and bucket.bucket_idx == event.winning_bucket_idx
-                            )
-                            # Winner redeems at $1.00, loser at $0.00
-                            redeem_price = 1.0 if is_winner else 0.0
-                            await upsert_position(
-                                sess,
-                                bucket_id=bucket.id,
-                                side="yes",
-                                fill_qty=-pos.net_qty,
-                                fill_price=redeem_price,
-                                last_mkt_price=redeem_price,
-                            )
-
-                    await sess.commit()
-
+    for event in events:
+        try:
+            result = await redeem_single_event(event.id, actor="auto_redeemer")
+            if result.get("tx_hashes"):
                 redeemed_count += 1
-                from backend.storage.repos import append_audit
-                async with get_session() as sess:
-                    await append_audit(
-                        sess,
-                        actor="auto_redeemer",
-                        action="positions_redeemed",
-                        payload={
-                            "event_id": event.id,
-                            "date_et": event.date_et,
-                            "tx_hashes": tx_hashes,
-                            "winning_bucket_idx": event.winning_bucket_idx,
-                        },
-                    )
-
-            except Exception as e:
-                log.error("redeemer: redeem event %d failed: %s", event.id, e, exc_info=True)
+        except Exception as e:
+            log.error("redeemer: redeem event %d failed: %s", event.id, e, exc_info=True)
 
     return redeemed_count
 

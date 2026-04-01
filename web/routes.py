@@ -40,6 +40,8 @@ async def dashboard(request: Request):
         get_daily_realized_pnl,
         get_all_positions,
         get_latest_signals,
+        get_position,
+        get_unredeemed_resolved_events,
     )
     from backend.storage.models import Bucket, Event, City
 
@@ -109,6 +111,37 @@ async def dashboard(request: Request):
 
     total_exposure = sum((p.net_qty * p.avg_cost) for p in positions if p.net_qty > 0)
 
+    # Unredeemed winning positions
+    async with get_session() as sess:
+        unredeemed_events = await get_unredeemed_resolved_events(sess)
+
+    unredeemed_wins = []
+    for evt in unredeemed_events:
+        async with get_session() as sess:
+            city = await sess.get(City, evt.city_id)
+            total_payout = 0.0
+            has_positions = False
+            winning_label = None
+            for bucket in evt.buckets:
+                pos = await get_position(sess, bucket.id)
+                if pos and pos.net_qty > 0:
+                    has_positions = True
+                    is_winner = (
+                        evt.winning_bucket_idx is not None
+                        and bucket.bucket_idx == evt.winning_bucket_idx
+                    )
+                    if is_winner:
+                        total_payout += pos.net_qty * 1.0
+                        winning_label = bucket.label
+        if has_positions:
+            unredeemed_wins.append({
+                "event_id": evt.id,
+                "city_name": city.display_name if city else "?",
+                "date_et": evt.date_et,
+                "winning_label": winning_label or "N/A",
+                "total_payout": round(total_payout, 2),
+            })
+
     return templates.TemplateResponse(
         "dashboard.html",
         {
@@ -120,6 +153,7 @@ async def dashboard(request: Request):
             "open_positions": len([p for p in positions if p.net_qty > 0]),
             "cities": [c.city_slug for c in cities],
             "today_et": today_et,
+            "unredeemed_wins": unredeemed_wins,
         },
     )
 

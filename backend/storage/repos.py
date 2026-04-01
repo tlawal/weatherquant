@@ -85,6 +85,16 @@ async def get_event(
     return result.scalar_one_or_none()
 
 
+async def get_event_by_id(session: AsyncSession, event_id: int) -> Optional[Event]:
+    from sqlalchemy.orm import selectinload
+    result = await session.execute(
+        select(Event)
+        .where(Event.id == event_id)
+        .options(selectinload(Event.buckets))
+    )
+    return result.scalar_one_or_none()
+
+
 async def upsert_event(session: AsyncSession, city_id: int, date_et: str, **kwargs) -> Event:
     event = await get_event(session, city_id, date_et)
     if event is None:

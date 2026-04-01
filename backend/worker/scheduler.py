@@ -198,7 +198,7 @@ def create_scheduler() -> AsyncIOScheduler:
     add(job_discover_cities,     seconds=86400, name="discover_cities")  # 24h
     add(job_refresh_station_profiles, seconds=3600, name="refresh_station_profiles")  # 1h
     add(job_fetch_metar_smart,       seconds=30,    name="fetch_metar_smart")
-    add(job_auto_redeem,             seconds=300,   name="auto_redeem")  # 5 min
+    add(job_auto_redeem,             seconds=43200, name="auto_redeem")  # 12h
 
     return scheduler
 

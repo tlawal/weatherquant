@@ -43,7 +43,9 @@ from backend.storage.repos import (
     get_latest_metar,
     get_latest_model_snapshot,
     get_latest_signals,
+    get_position,
     get_recent_orders,
+    get_unredeemed_resolved_events,
 )
 
 log = logging.getLogger(__name__)
@@ -643,6 +645,65 @@ async def get_positions():
         "daily_realized_pnl": round(daily_pnl, 4),
         "total_unrealized_pnl": round(sum(p.unrealized_pnl for p in positions), 4),
     }
+
+
+@router.get("/api/unredeemed-wins")
+async def unredeemed_wins():
+    """Unredeemed winning positions from resolved events."""
+    async with get_session() as sess:
+        events = await get_unredeemed_resolved_events(sess)
+
+    result = []
+    for event in events:
+        async with get_session() as sess:
+            from backend.storage.models import City
+            city = await sess.get(City, event.city_id)
+            winning_buckets = []
+            total_payout = 0.0
+            for bucket in event.buckets:
+                pos = await get_position(sess, bucket.id)
+                if pos and pos.net_qty > 0:
+                    is_winner = (
+                        event.winning_bucket_idx is not None
+                        and bucket.bucket_idx == event.winning_bucket_idx
+                    )
+                    payout = pos.net_qty * 1.0 if is_winner else 0.0
+                    winning_buckets.append({
+                        "bucket_idx": bucket.bucket_idx,
+                        "label": bucket.label,
+                        "net_qty": pos.net_qty,
+                        "avg_cost": pos.avg_cost,
+                        "is_winner": is_winner,
+                        "expected_payout": round(payout, 4),
+                    })
+                    total_payout += payout
+
+        if winning_buckets:
+            result.append({
+                "event_id": event.id,
+                "city_name": city.display_name if city else "Unknown",
+                "city_slug": city.city_slug if city else "",
+                "date_et": event.date_et,
+                "winning_bucket_idx": event.winning_bucket_idx,
+                "resolved_at": event.resolved_at.isoformat() if event.resolved_at else None,
+                "buckets": winning_buckets,
+                "total_expected_payout": round(total_payout, 4),
+            })
+
+    return {"unredeemed": result}
+
+
+@router.post("/api/redeem/{event_id}")
+async def redeem_event(event_id: int, actor: str = Depends(require_admin)):
+    """Manually redeem positions for a single resolved event."""
+    from backend.execution.redeemer import redeem_single_event
+    try:
+        result = await redeem_single_event(event_id, actor=f"admin:{actor}")
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/api/position/{city_slug}/{bucket_idx}")
