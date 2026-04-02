@@ -1074,6 +1074,9 @@
             <span class="px-2 py-0.5 rounded-full text-[10px] font-bold" style="background:rgba(239,68,68,0.2);color:#fca5a5" x-text="(tradeResult.status || 'ERROR').toUpperCase()"></span>
           </template>
         </div>
+        <template x-if="tradeResult && tradeResult.warning">
+          <div class="mt-1 px-2 py-1 rounded text-[10px] font-bold" style="background:rgba(234,179,8,0.2);color:#FDE047" x-text="tradeResult.warning"></div>
+        </template>
         <pre class="text-[10px] whitespace-pre-wrap" style="color:var(--text-muted)" x-text="JSON.stringify(tradeResult, null, 2)"></pre>
       </div>
 

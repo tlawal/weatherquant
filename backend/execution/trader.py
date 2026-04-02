@@ -213,6 +213,69 @@ async def execute_signal(
         result["error"] = "bucket or yes_token_id not found"
         return result
 
+    # ── For SELL: verify on-chain conditional token balance ────────────────────
+    if side == "SELL":
+        try:
+            import aiohttp
+            from backend.execution.chain_utils import (
+                erc1155_balance, get_wallet_address, CTF_ADDRESS,
+            )
+            wallet = get_wallet_address()
+            async with aiohttp.ClientSession() as _http:
+                onchain_raw = await erc1155_balance(
+                    _http, CTF_ADDRESS, wallet, bucket.yes_token_id,
+                )
+            onchain_shares = onchain_raw / 1_000_000
+
+            if onchain_shares <= 0:
+                result["status"] = "error"
+                result["error"] = (
+                    f"on-chain token balance is 0 "
+                    f"(DB shows {pos.net_qty if pos else 0} shares); "
+                    "position may have already been sold or transferred"
+                )
+                # Correct DB to match on-chain reality
+                async with get_session() as sess:
+                    pos_obj = await get_position(sess, signal.bucket_id)
+                    if pos_obj and pos_obj.net_qty > 0:
+                        pos_obj.net_qty = 0
+                        await sess.commit()
+                        log.warning(
+                            "sell: corrected DB position to 0 for bucket %d "
+                            "(was %.2f, on-chain=0)",
+                            signal.bucket_id, pos.net_qty,
+                        )
+                return result
+
+            if onchain_shares < shares:
+                log.warning(
+                    "sell: on-chain balance %.2f < requested %.2f for bucket %d; "
+                    "capping to on-chain",
+                    onchain_shares, shares, signal.bucket_id,
+                )
+                result["warning"] = (
+                    f"Capped sell from {shares:.0f} to {onchain_shares:.0f} shares "
+                    f"(on-chain balance < DB position)"
+                )
+                shares = onchain_shares
+                cost = round(shares * limit_price, 2)
+                result["shares"] = shares
+                result["estimated_cost"] = cost
+                # Correct DB position to match on-chain
+                async with get_session() as sess:
+                    pos_obj = await get_position(sess, signal.bucket_id)
+                    if pos_obj and pos_obj.net_qty != onchain_shares:
+                        pos_obj.net_qty = onchain_shares
+                        await sess.commit()
+                        log.info(
+                            "sell: corrected DB position to %.2f for bucket %d",
+                            onchain_shares, signal.bucket_id,
+                        )
+        except Exception as e:
+            log.warning(
+                "sell: on-chain balance check failed (proceeding anyway): %s", e
+            )
+
     # ── Persist order (pending) ───────────────────────────────────────────────
     async with get_session() as sess:
         order = await insert_order(

@@ -33,22 +33,8 @@ NEG_RISK_ADAPTER = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"
 CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 USDC_E = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
 _TIMEOUT = aiohttp.ClientTimeout(total=15)
-BALANCE_OF_SEL = bytes.fromhex("00fdd58e")  # ERC1155 balanceOf(address,uint256)
 
-
-async def _erc1155_balance(http, contract: str, owner: str, token_id: str) -> int:
-    """Query ERC1155 balanceOf on-chain. Returns raw uint256."""
-    padded_owner = bytes.fromhex(owner.replace("0x", "").zfill(64))
-    token_int = int(token_id)
-    padded_token = token_int.to_bytes(32, "big")
-    calldata = "0x" + (BALANCE_OF_SEL + padded_owner + padded_token).hex()
-    resp = await (await http.post(POLYGON_RPC, json={
-        "jsonrpc": "2.0", "id": 1, "method": "eth_call",
-        "params": [{"to": contract, "data": calldata}, "latest"],
-    })).json()
-    if "result" in resp:
-        return int(resp["result"], 16)
-    return 0
+from backend.execution.chain_utils import erc1155_balance as _erc1155_balance
 
 
 async def check_resolved_markets() -> int:
