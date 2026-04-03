@@ -151,7 +151,16 @@ async def redeem_single_event(event_id: int, actor: str = "auto_redeemer", force
             await sess.commit()
         return {"ok": True, "tx_hashes": [], "event_id": event_id, "note": "no positions to redeem"}
 
+    # Fetch Gamma event to get negRiskMarketID if applicable
+    neg_risk_market_id = None
     async with aiohttp.ClientSession(timeout=_TIMEOUT) as http:
+        if event.gamma_event_id:
+            url = f"{GAMMA_API}/events/{event.gamma_event_id}"
+            async with http.get(url) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    neg_risk_market_id = data.get("negRiskMarketID")
+        
         nonce_payload = {
             "jsonrpc": "2.0", "id": 1, "method": "eth_getTransactionCount",
             "params": [sender, "latest"],
@@ -177,8 +186,11 @@ async def redeem_single_event(event_id: int, actor: str = "auto_redeemer", force
             condition_id = bytes.fromhex(bucket.condition_id.replace("0x", ""))
 
             # Pre-flight check: ensure condition is getDetermined=true
-            GET_DETERMINED_SELECTOR = bytes.fromhex("ccb005ae")
-            get_det_data = "0x" + (GET_DETERMINED_SELECTOR + condition_id.rjust(32, b"\x00")).hex()
+            GET_DETERMINED_SELECTOR = bytes.fromhex("7ae2e67b")
+            
+            # Use negRiskMarketID if available, else condition_id
+            market_id_hex = neg_risk_market_id.replace("0x", "") if neg_risk_market_id else condition_id.hex()
+            get_det_data = "0x" + (GET_DETERMINED_SELECTOR + bytes.fromhex(market_id_hex).rjust(32, b"\x00")).hex()
             
             async with http.post(POLYGON_RPC, json={
                 "jsonrpc": "2.0", "id": 1, "method": "eth_call",
@@ -188,7 +200,7 @@ async def redeem_single_event(event_id: int, actor: str = "auto_redeemer", force
                 
             is_determined = bool(int(det_json.get("result", "0x0"), 16)) if det_json.get("result", "0x") != "0x" else False
             if not is_determined:
-                log.info("redeemer: bucket %d condition %s is GET_DETERMINED=false, delaying redemption", bucket.id, bucket.condition_id)
+                log.info("redeemer: bucket %d market_id %s is GET_DETERMINED=false, delaying redemption", bucket.id, market_id_hex)
                 continue
 
             # Query on-chain ERC1155 balances for YES and NO tokens

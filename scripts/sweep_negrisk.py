@@ -18,7 +18,7 @@ log = logging.getLogger(__name__)
 
 NEG_RISK_ADAPTER = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"
 REDEEM_SELECTOR = bytes.fromhex("dbeccb23")
-GET_DETERMINED_SELECTOR = bytes.fromhex("ccb005ae")
+GET_DETERMINED_SELECTOR = bytes.fromhex("7ae2e67b")
 
 async def erc1155_balance(http: aiohttp.ClientSession, contract: str, owner: str, token_id: str) -> int:
     padded_owner = bytes.fromhex(owner.replace("0x", "").zfill(64))
@@ -76,7 +76,7 @@ def build_safe_signature(account, proxy_wallet: str, to: str, value: int, data: 
     s = signed.s.to_bytes(32, byteorder='big')
     return r + s + bytes([signed.v])
 
-async def sweep_market(condition_id_hex: str, yes_token_id: str, no_token_id: str):
+async def sweep_market(condition_id_hex: str, market_id_hex: str, yes_token_id: str, no_token_id: str):
     """Diagnose, verify, and sweep the condition on NegRiskAdapter via Proxy."""
     if not Config.POLYMARKET_PRIVATE_KEY:
         print("Set POLYMARKET_PRIVATE_KEY in .env!")
@@ -89,6 +89,7 @@ async def sweep_market(condition_id_hex: str, yes_token_id: str, no_token_id: st
     chain_id = Config.CHAIN_ID
     
     print(f"--- Sweeping NegRisk ({condition_id_hex}) ---")
+    print(f"Parent Market ID: {market_id_hex}")
     print(f"EOA Sender:   {sender_eoa}")
     print(f"Proxy Wallet: {proxy_wallet}")
 
@@ -98,12 +99,16 @@ async def sweep_market(condition_id_hex: str, yes_token_id: str, no_token_id: st
             return (await r.json()).get("result")
 
     condition_id_bytes = bytes.fromhex(condition_id_hex.replace("0x", ""))
-
-    # 1. Check getDetermined
-    get_det_data = "0x" + (GET_DETERMINED_SELECTOR + condition_id_bytes).hex()
+    
+    # 1. Check getDetermined using the Market ID (NegRiskMarketID from Gamma API)
+    # If no market_id provided, fallback to condition_id (for standard CTF)
+    determined_check_id = market_id_hex if market_id_hex else condition_id_hex
+    determined_id_bytes = bytes.fromhex(determined_check_id.replace("0x", ""))
+    
+    get_det_data = "0x" + (GET_DETERMINED_SELECTOR + determined_id_bytes).hex()
     res_det = await _rpc("eth_call", [{"to": NEG_RISK_ADAPTER, "data": get_det_data}, "latest"])
     is_determined = bool(int(res_det, 16)) if res_det and res_det != "0x" else False
-    print(f"getDetermined: {is_determined}")
+    print(f"getDetermined ({determined_check_id}): {is_determined}")
 
     if not is_determined:
         print("ERROR: Market is not determined on the NegRiskAdapter yet.")
@@ -170,9 +175,10 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--condition-id", default="0xf407680f8a8aaeae83098a6e8f55e180592063e521f3597ccb36f22041de0511", help="Condition ID to redeem")
+    parser.add_argument("--market-id", default="0x91ac5e1269cdf591cac9969de234a2fdd40038f23d837bcdb052b3e6ed721300", help="NegRisk Parent Market ID from Gamma API")
     parser.add_argument("--yes", default="68464819232927294590340903739217335680789125025992638975000171096382629434455", help="Yes Token ID")
     parser.add_argument("--no", default="48881063161752679858635940589274673280694928305036466602881671880256012823733", help="No Token ID")
     args = parser.parse_args()
     
     logging.basicConfig(level=logging.INFO)
-    asyncio.run(sweep_market(args.condition_id, args.yes, args.no))
+    asyncio.run(sweep_market(args.condition_id, args.market_id, args.yes, args.no))
