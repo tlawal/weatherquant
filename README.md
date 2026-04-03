@@ -33,6 +33,16 @@ The system uses SQLite (`state.db`) and local logs. On Railway, you **must** mou
 - `MARKET_CONTEXT_LLM_BASE_URL`: Optional base URL override for proxy or self-hosted provider endpoints.
 - `MARKET_CONTEXT_LLM_TIMEOUT_SECONDS`: Optional timeout for Market Context generation requests. Default `45`.
 
+## 🧹 Manual Sweep / NegRisk Redemption Suite
+
+If you need to sweep a negative risk outcome that isn't cleanly resolving, or just want to manually extract winning position tokens directly from the Polymarket Safe proxy, use the included sweeper:
+
+```bash
+# Provide the condition ID to pull your winnings via Gnosis Safe proxy wrapping:
+.venv/bin/python scripts/sweep_negrisk.py --condition-id <0xcondition_id_here>
+```
+*Note*: Requires `.env` configuration for `POLYMARKET_PRIVATE_KEY` and `FUNDER_ADDRESS`.
+
 ## 🛡️ Risk Management
 
 - **Kelly Criterion**: Position sizes are scaled by `(Edge / Odds) * FractionalMult`.
