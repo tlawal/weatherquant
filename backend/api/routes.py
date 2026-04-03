@@ -1043,7 +1043,7 @@ async def redemptions_list():
 
 
 @router.get("/api/redeem-diag")
-async def redeem_diagnostics(condition_id: str = None, actor: str = Depends(require_admin)):
+async def redeem_diagnostics(condition_id: str = None):
     """Comprehensive redemption diagnostics. Pass ?condition_id= for per-market details."""
     import aiohttp
     from eth_account import Account
