@@ -121,14 +121,17 @@ async def redeem_single_event(event_id: int, actor: str = "auto_redeemer", force
         raise RuntimeError("No private key configured")
 
     from eth_account import Account
+    from backend.execution.chain_utils import get_wallet_address
+
     account = Account.from_key(Config.POLYMARKET_PRIVATE_KEY)
     sender = account.address
+    token_holder = get_wallet_address()  # proxy/funder wallet that holds tokens
     chain_id = Config.CHAIN_ID
 
     # NegRiskAdapter redeemPositions(bytes32 conditionId, uint256[] amounts)
     REDEEM_SELECTOR = bytes.fromhex("dbeccb23")
 
-    log.info("redeemer: sender=%s, target=NegRiskAdapter, event=%d", sender, event_id)
+    log.info("redeemer: sender=%s, token_holder=%s, event=%d", sender, token_holder, event_id)
 
     # Redeem all buckets with condition_id — on-chain call redeems whatever tokens
     # the wallet holds, regardless of DB position state
@@ -175,9 +178,9 @@ async def redeem_single_event(event_id: int, actor: str = "auto_redeemer", force
             yes_bal = 0
             no_bal = 0
             if bucket.yes_token_id:
-                yes_bal = await _erc1155_balance(http, NEG_RISK_ADAPTER, sender, bucket.yes_token_id)
+                yes_bal = await _erc1155_balance(http, NEG_RISK_ADAPTER, token_holder, bucket.yes_token_id)
             if bucket.no_token_id:
-                no_bal = await _erc1155_balance(http, NEG_RISK_ADAPTER, sender, bucket.no_token_id)
+                no_bal = await _erc1155_balance(http, NEG_RISK_ADAPTER, token_holder, bucket.no_token_id)
 
             if yes_bal == 0 and no_bal == 0:
                 log.info("redeemer: bucket %d has 0 balance, skipping", bucket.id)

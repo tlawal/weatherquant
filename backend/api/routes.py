@@ -765,9 +765,9 @@ async def redeem_by_condition(condition_id: str, actor: str = Depends(require_ad
         if not yes_token_id:
             raise HTTPException(status_code=400, detail="Could not find token IDs for this condition")
 
-        # Query on-chain ERC1155 balances
+        # Query on-chain ERC1155 balances (use addr = proxy/funder that holds tokens)
         async def balance_of(token_id_str):
-            padded_owner = bytes.fromhex(sender.replace("0x", "").zfill(64))
+            padded_owner = bytes.fromhex(addr.replace("0x", "").zfill(64))
             padded_token = int(token_id_str).to_bytes(32, "big")
             calldata = "0x" + (BALANCE_OF_SEL + padded_owner + padded_token).hex()
             r = await (await http.post(POLYGON_RPC, json={
@@ -858,13 +858,32 @@ async def redemptions_list():
                 condition_ids.add(b.condition_id)
 
     determined_map = {}
+    cid_to_qid = {}  # conditionId -> questionId mapping
     if condition_ids:
         timeout = aiohttp.ClientTimeout(total=10)
         async with aiohttp.ClientSession(timeout=timeout) as http:
+            # Step 1: fetch questionId for each conditionId from CLOB API
             for cid in condition_ids:
                 try:
-                    cid_hex = cid.replace("0x", "")
-                    data = f"0x{GET_DETERMINED_SEL}{cid_hex.zfill(64)}"
+                    url = f"https://clob.polymarket.com/markets/{cid}"
+                    async with http.get(url) as resp:
+                        if resp.status == 200:
+                            mkt = await resp.json()
+                            qid = mkt.get("question_id")
+                            if qid:
+                                cid_to_qid[cid] = qid
+                except Exception:
+                    pass
+
+            # Step 2: call getDetermined(questionId) — NOT conditionId
+            for cid in condition_ids:
+                qid = cid_to_qid.get(cid)
+                if not qid:
+                    determined_map[cid] = None
+                    continue
+                try:
+                    qid_hex = qid.replace("0x", "")
+                    data = f"0x{GET_DETERMINED_SEL}{qid_hex.zfill(64)}"
                     resp = await (await http.post(POLYGON_RPC, json={
                         "jsonrpc": "2.0", "id": 1, "method": "eth_call",
                         "params": [{"to": NEG_RISK_ADAPTER, "data": data}, "latest"],
@@ -962,17 +981,28 @@ async def redemptions_list():
                     if size <= 0:
                         continue
 
-                    # Check on-chain determination
+                    # Check on-chain determination — getDetermined takes questionId, not conditionId
                     determined = None
                     try:
-                        cid_hex = cid.replace("0x", "")
-                        call_data = f"0x{GET_DETERMINED_SEL}{cid_hex.zfill(64)}"
-                        rpc_resp = await (await http.post(POLYGON_RPC, json={
-                            "jsonrpc": "2.0", "id": 1, "method": "eth_call",
-                            "params": [{"to": NEG_RISK_ADAPTER, "data": call_data}, "latest"],
-                        })).json()
-                        if "result" in rpc_resp:
-                            determined = int(rpc_resp["result"], 16) != 0
+                        # Fetch questionId from CLOB API
+                        qid = cid_to_qid.get(cid)
+                        if not qid:
+                            mkt_url = f"https://clob.polymarket.com/markets/{cid}"
+                            async with http.get(mkt_url) as mkt_resp:
+                                if mkt_resp.status == 200:
+                                    mkt_data = await mkt_resp.json()
+                                    qid = mkt_data.get("question_id")
+                                    if qid:
+                                        cid_to_qid[cid] = qid
+                        if qid:
+                            qid_hex = qid.replace("0x", "")
+                            call_data = f"0x{GET_DETERMINED_SEL}{qid_hex.zfill(64)}"
+                            rpc_resp = await (await http.post(POLYGON_RPC, json={
+                                "jsonrpc": "2.0", "id": 1, "method": "eth_call",
+                                "params": [{"to": NEG_RISK_ADAPTER, "data": call_data}, "latest"],
+                            })).json()
+                            if "result" in rpc_resp:
+                                determined = int(rpc_resp["result"], 16) != 0
                     except Exception:
                         pass
 
@@ -1013,16 +1043,122 @@ async def redemptions_list():
 
 
 @router.get("/api/redeem-diag")
-async def redeem_diagnostics(actor: str = Depends(require_admin)):
-    """Show address configuration for debugging redemption issues."""
+async def redeem_diagnostics(condition_id: str = None, actor: str = Depends(require_admin)):
+    """Comprehensive redemption diagnostics. Pass ?condition_id= for per-market details."""
+    import aiohttp
     from eth_account import Account
+    from backend.execution.chain_utils import get_wallet_address
+
     signer = Account.from_key(Config.POLYMARKET_PRIVATE_KEY).address if Config.POLYMARKET_PRIVATE_KEY else None
-    return {
+    token_holder = get_wallet_address() if Config.POLYMARKET_PRIVATE_KEY else None
+
+    result = {
         "signer_eoa": signer,
         "funder_proxy": Config.FUNDER_ADDRESS or None,
-        "redeem_from": Config.FUNDER_ADDRESS or signer,
+        "token_holder": token_holder,
         "neg_risk_adapter": "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296",
     }
+
+    if not condition_id or not token_holder:
+        return result
+
+    NEG_RISK_ADAPTER = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"
+    BALANCE_OF_SEL = bytes.fromhex("00fdd58e")
+    GET_DETERMINED_SEL = "7ae2e67b"
+    POLYGON_RPC = Config.POLYGON_RPC_URL
+
+    timeout = aiohttp.ClientTimeout(total=15)
+    async with aiohttp.ClientSession(timeout=timeout) as http:
+        # Fetch market data from CLOB API for questionId and token IDs
+        question_id = None
+        yes_token_id = None
+        no_token_id = None
+        try:
+            url = f"https://clob.polymarket.com/markets/{condition_id}"
+            async with http.get(url) as resp:
+                if resp.status == 200:
+                    mkt = await resp.json()
+                    question_id = mkt.get("question_id")
+                    result["clob_market"] = {
+                        "question_id": question_id,
+                        "question": mkt.get("question"),
+                        "neg_risk": mkt.get("neg_risk"),
+                        "active": mkt.get("active"),
+                    }
+        except Exception as e:
+            result["clob_error"] = str(e)
+
+        # Also check data API for positions
+        try:
+            url = f"https://data-api.polymarket.com/positions?user={token_holder}"
+            async with http.get(url) as resp:
+                if resp.status == 200:
+                    positions = await resp.json()
+                    for pos in positions:
+                        if pos.get("conditionId") == condition_id:
+                            yes_token_id = pos.get("asset")
+                            no_token_id = pos.get("oppositeAsset")
+                            result["data_api_position"] = {
+                                "size": pos.get("size"),
+                                "redeemable": pos.get("redeemable"),
+                                "curPrice": pos.get("curPrice"),
+                                "outcome": pos.get("outcome"),
+                                "yes_token_id": yes_token_id,
+                                "no_token_id": no_token_id,
+                            }
+                            break
+        except Exception as e:
+            result["data_api_error"] = str(e)
+
+        # getDetermined(questionId)
+        if question_id:
+            try:
+                qid_hex = question_id.replace("0x", "")
+                call_data = f"0x{GET_DETERMINED_SEL}{qid_hex.zfill(64)}"
+                rpc_resp = await (await http.post(POLYGON_RPC, json={
+                    "jsonrpc": "2.0", "id": 1, "method": "eth_call",
+                    "params": [{"to": NEG_RISK_ADAPTER, "data": call_data}, "latest"],
+                })).json()
+                if "result" in rpc_resp:
+                    result["on_chain_determined"] = int(rpc_resp["result"], 16) != 0
+                else:
+                    result["on_chain_determined"] = None
+                    result["rpc_error"] = rpc_resp.get("error")
+            except Exception as e:
+                result["determined_error"] = str(e)
+
+        # ERC1155 balances
+        async def _bal(token_id_str):
+            padded_owner = bytes.fromhex(token_holder.replace("0x", "").zfill(64))
+            padded_token = int(token_id_str).to_bytes(32, "big")
+            cd = "0x" + (BALANCE_OF_SEL + padded_owner + padded_token).hex()
+            r = await (await http.post(POLYGON_RPC, json={
+                "jsonrpc": "2.0", "id": 1, "method": "eth_call",
+                "params": [{"to": NEG_RISK_ADAPTER, "data": cd}, "latest"],
+            })).json()
+            return int(r["result"], 16) if "result" in r else 0
+
+        if yes_token_id:
+            result["yes_balance_raw"] = await _bal(yes_token_id)
+            result["yes_balance_shares"] = result["yes_balance_raw"] / 1_000_000
+        if no_token_id:
+            result["no_balance_raw"] = await _bal(no_token_id)
+            result["no_balance_shares"] = result["no_balance_raw"] / 1_000_000
+
+        # Diagnosis
+        determined = result.get("on_chain_determined")
+        yes_bal = result.get("yes_balance_raw", 0)
+        no_bal = result.get("no_balance_raw", 0)
+        if determined and (yes_bal > 0 or no_bal > 0):
+            result["diagnosis"] = "Ready to redeem"
+        elif not determined:
+            result["diagnosis"] = "getDetermined=false — market not yet resolved on NegRiskAdapter"
+        elif yes_bal == 0 and no_bal == 0:
+            result["diagnosis"] = "Zero token balance — already redeemed or tokens not held by this address"
+        else:
+            result["diagnosis"] = "Unknown state"
+
+    return result
 
 
 @router.get("/api/position/{city_slug}/{bucket_idx}")
