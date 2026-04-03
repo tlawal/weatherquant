@@ -993,7 +993,21 @@ async def redemptions_list():
                     determined = None
                     try:
                         # Fetch Market ID from Event mapping
-                        mid = cid_to_market_id.get(cid, cid)
+                        mid = cid_to_market_id.get(cid)
+                        # If not in DB mapping, try to fetch directly from Gamma API
+                        gamma_event_id = pos.get("eventId")
+                        if not mid and gamma_event_id:
+                            url = f"https://gamma-api.polymarket.com/events/{gamma_event_id}"
+                            async with http.get(url) as resp:
+                                if resp.status == 200:
+                                    data = await resp.json()
+                                    if isinstance(data, list) and len(data) > 0:
+                                        data = data[0]
+                                    mid = data.get("negRiskMarketID")
+                        
+                        # Fallback to condition id if it's not NegRisk
+                        mid = mid or cid
+
                         if mid:
                             mid_hex = mid.replace("0x", "")
                             call_data = f"0x{GET_DETERMINED_SEL}{mid_hex.zfill(64)}"
