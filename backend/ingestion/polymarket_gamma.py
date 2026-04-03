@@ -50,8 +50,16 @@ _RANGE_PATTERNS = [
     re.compile(r"(\d+\.?\d*)\s*[-–—]\s*(\d+\.?\d*)\s*°?\s*[FCfc]?"),
     re.compile(r"(\d+\.?\d*)\s*[-–—]\s*(\d+\.?\d*)"),
 ]
-_ABOVE_PATTERN = re.compile(r"(?:above|higher than|over|≥|>=)\s*(\d+\.?\d*)", re.I)
-_BELOW_PATTERN = re.compile(r"(?:below|lower than|under|<)\s*(\d+\.?\d*)", re.I)
+_ABOVE_PATTERN = re.compile(
+    r"(?:(?:above|higher than|over|≥|>=)\s*(\d+\.?\d*)"
+    r"|(\d+\.?\d*)\s*°?\s*[FCfc]?\s*or\s*(?:higher|above|more))",
+    re.I,
+)
+_BELOW_PATTERN = re.compile(
+    r"(?:(?:below|lower than|under|<)\s*(\d+\.?\d*)"
+    r"|(\d+\.?\d*)\s*°?\s*[FCfc]?\s*or\s*(?:below|lower|under|less))",
+    re.I,
+)
 
 
 def _build_slugs(city_slug: str, target_date: date) -> list[str]:
@@ -113,15 +121,17 @@ def _parse_bucket_range(label: str, description: str = "") -> tuple[Optional[flo
     """Parse (low, high) from a bucket market label. None = open-ended."""
     text = f"{label} {description}"
 
-    # "above X"
+    # "above X" or "X or higher"
     m = _ABOVE_PATTERN.search(text)
     if m:
-        return float(m.group(1)), None
+        val = m.group(1) or m.group(2)
+        return float(val), None
 
-    # "below X"
+    # "below X" or "X or below"
     m = _BELOW_PATTERN.search(text)
     if m:
-        return None, float(m.group(1))
+        val = m.group(1) or m.group(2)
+        return None, float(val)
 
     # "X - Y"
     for patt in _RANGE_PATTERNS:
