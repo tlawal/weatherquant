@@ -15,6 +15,8 @@ import aiohttp
 
 from backend.config import Config
 from backend.storage.db import get_session
+from eth_abi import encode
+from eth_account.messages import encode_typed_data
 from backend.storage.repos import (
     append_audit,
     get_event_by_id,
@@ -174,6 +176,21 @@ async def redeem_single_event(event_id: int, actor: str = "auto_redeemer", force
         for bucket in buckets_to_redeem:
             condition_id = bytes.fromhex(bucket.condition_id.replace("0x", ""))
 
+            # Pre-flight check: ensure condition is getDetermined=true
+            GET_DETERMINED_SELECTOR = bytes.fromhex("ccb005ae")
+            get_det_data = "0x" + (GET_DETERMINED_SELECTOR + condition_id.rjust(32, b"\x00")).hex()
+            
+            async with http.post(POLYGON_RPC, json={
+                "jsonrpc": "2.0", "id": 1, "method": "eth_call",
+                "params": [{"to": NEG_RISK_ADAPTER, "data": get_det_data}, "latest"]
+            }) as det_resp:
+                det_json = await det_resp.json()
+                
+            is_determined = bool(int(det_json.get("result", "0x0"), 16)) if det_json.get("result", "0x") != "0x" else False
+            if not is_determined:
+                log.info("redeemer: bucket %d condition %s is GET_DETERMINED=false, delaying redemption", bucket.id, bucket.condition_id)
+                continue
+
             # Query on-chain ERC1155 balances for YES and NO tokens
             yes_bal = 0
             no_bal = 0
@@ -186,9 +203,8 @@ async def redeem_single_event(event_id: int, actor: str = "auto_redeemer", force
                 log.info("redeemer: bucket %d has 0 balance, skipping", bucket.id)
                 continue
 
-            # NegRiskAdapter redeemPositions(conditionId, amounts)
             amounts = [yes_bal, no_bal]
-            calldata = (
+            redeem_calldata = (
                 REDEEM_SELECTOR
                 + condition_id.rjust(32, b"\x00")
                 + (64).to_bytes(32, "big")  # offset to dynamic array
@@ -198,14 +214,56 @@ async def redeem_single_event(event_id: int, actor: str = "auto_redeemer", force
             )
             log.info("redeemer: bucket %d amounts=[%d, %d]", bucket.id, yes_bal, no_bal)
 
+            # --- BUILD SAFE EXECTRANSACTION ---
+            # 1. Fetch current safe nonce
+            async with http.post(POLYGON_RPC, json={
+                "jsonrpc": "2.0", "id": 1, "method": "eth_call",
+                "params": [{"to": token_holder, "data": "0xaffed0e0"}, "latest"]
+            }) as s_resp:
+                safe_nonce_hex = (await s_resp.json()).get("result", "0x0")
+            safe_nonce = int(safe_nonce_hex, 16) if safe_nonce_hex != "0x" else 0
+
+            domain = {"verifyingContract": token_holder, "chainId": chain_id}
+            types = {
+                "EIP712Domain": [{"name": "verifyingContract", "type": "address"}, {"name": "chainId", "type": "uint256"}],
+                "SafeTx": [
+                    {"name": "to", "type": "address"}, {"name": "value", "type": "uint256"},
+                    {"name": "data", "type": "bytes"}, {"name": "operation", "type": "uint8"},
+                    {"name": "safeTxGas", "type": "uint256"}, {"name": "baseGas", "type": "uint256"},
+                    {"name": "gasPrice", "type": "uint256"}, {"name": "gasToken", "type": "address"},
+                    {"name": "refundReceiver", "type": "address"}, {"name": "nonce", "type": "uint256"}
+                ]
+            }
+            message = {
+                "to": NEG_RISK_ADAPTER, "value": 0, "data": "0x" + redeem_calldata.hex(),
+                "operation": 0, "safeTxGas": 0, "baseGas": 0, "gasPrice": 0,
+                "gasToken": "0x0000000000000000000000000000000000000000",
+                "refundReceiver": "0x0000000000000000000000000000000000000000",
+                "nonce": safe_nonce
+            }
+            
+            signable = encode_typed_data(full_message={"types": types, "primaryType": "SafeTx", "domain": domain, "message": message})
+            signed_proxy = account.sign_message(signable)
+            r = signed_proxy.r.to_bytes(32, byteorder='big')
+            s = signed_proxy.s.to_bytes(32, byteorder='big')
+            signature_bytes = r + s + bytes([signed_proxy.v])
+
+            # 2. Encode ABI execTransaction 
+            EXEC_TX_SELECTOR = bytes.fromhex("6a761202")
+            encoded_args = encode(
+                ['address', 'uint256', 'bytes', 'uint8', 'uint256', 'uint256', 'uint256', 'address', 'address', 'bytes'],
+                [NEG_RISK_ADAPTER, 0, redeem_calldata, 0, 0, 0, 0, "0x0000000000000000000000000000000000000000", "0x0000000000000000000000000000000000000000", signature_bytes]
+            )
+            proxy_calldata = EXEC_TX_SELECTOR + encoded_args
+
             tx = {
-                "to": NEG_RISK_ADAPTER,
+                "to": token_holder,  # Send TO the Proxy Wallet instead of NegRiskAdapter!
                 "value": 0,
-                "gas": 300_000,
+                "gas": 400_000,
                 "gasPrice": gas_price,
                 "nonce": nonce,
                 "chainId": chain_id,
-                "data": calldata,
+                "data": proxy_calldata,
             }
             signed = account.sign_transaction(tx)
             send_payload = {
