@@ -858,32 +858,40 @@ async def redemptions_list():
                 condition_ids.add(b.condition_id)
 
     determined_map = {}
-    cid_to_qid = {}  # conditionId -> questionId mapping
     if condition_ids:
         timeout = aiohttp.ClientTimeout(total=10)
         async with aiohttp.ClientSession(timeout=timeout) as http:
-            # Step 1: fetch questionId for each conditionId from CLOB API
-            for cid in condition_ids:
+            # Step 1: fetch negRiskMarketID for each event from Gamma API (or default to condition ID if not NegRisk)
+            cid_to_market_id = {}
+            for evt in events:
+                if not evt.gamma_event_id:
+                    continue
                 try:
-                    url = f"https://clob.polymarket.com/markets/{cid}"
+                    url = f"https://gamma-api.polymarket.com/events/{evt.gamma_event_id}"
                     async with http.get(url) as resp:
                         if resp.status == 200:
-                            mkt = await resp.json()
-                            qid = mkt.get("question_id")
-                            if qid:
-                                cid_to_qid[cid] = qid
+                            data = await resp.json()
+                            if isinstance(data, list) and len(data) > 0:
+                                data = data[0]
+                            market_id = data.get("negRiskMarketID")
+                            
+                            # Map this market ID to all buckets in this event
+                            for b in evt.buckets:
+                                if b.condition_id and market_id:
+                                    cid_to_market_id[b.condition_id] = market_id
                 except Exception:
                     pass
 
-            # Step 2: call getDetermined(questionId) — NOT conditionId
+            # Step 2: call getDetermined(negRiskMarketID)
             for cid in condition_ids:
-                qid = cid_to_qid.get(cid)
-                if not qid:
+                # Fall back to checking the condition_id if negRiskMarketID is absent (standard CTF)
+                mid = cid_to_market_id.get(cid, cid)
+                if not mid:
                     determined_map[cid] = None
                     continue
                 try:
-                    qid_hex = qid.replace("0x", "")
-                    data = f"0x{GET_DETERMINED_SEL}{qid_hex.zfill(64)}"
+                    mid_hex = mid.replace("0x", "")
+                    data = f"0x{GET_DETERMINED_SEL}{mid_hex.zfill(64)}"
                     resp = await (await http.post(POLYGON_RPC, json={
                         "jsonrpc": "2.0", "id": 1, "method": "eth_call",
                         "params": [{"to": NEG_RISK_ADAPTER, "data": data}, "latest"],
@@ -981,22 +989,14 @@ async def redemptions_list():
                     if size <= 0:
                         continue
 
-                    # Check on-chain determination — getDetermined takes questionId, not conditionId
+                    # Check on-chain determination — getDetermined takes negRiskMarketID
                     determined = None
                     try:
-                        # Fetch questionId from CLOB API
-                        qid = cid_to_qid.get(cid)
-                        if not qid:
-                            mkt_url = f"https://clob.polymarket.com/markets/{cid}"
-                            async with http.get(mkt_url) as mkt_resp:
-                                if mkt_resp.status == 200:
-                                    mkt_data = await mkt_resp.json()
-                                    qid = mkt_data.get("question_id")
-                                    if qid:
-                                        cid_to_qid[cid] = qid
-                        if qid:
-                            qid_hex = qid.replace("0x", "")
-                            call_data = f"0x{GET_DETERMINED_SEL}{qid_hex.zfill(64)}"
+                        # Fetch Market ID from Event mapping
+                        mid = cid_to_market_id.get(cid, cid)
+                        if mid:
+                            mid_hex = mid.replace("0x", "")
+                            call_data = f"0x{GET_DETERMINED_SEL}{mid_hex.zfill(64)}"
                             rpc_resp = await (await http.post(POLYGON_RPC, json={
                                 "jsonrpc": "2.0", "id": 1, "method": "eth_call",
                                 "params": [{"to": NEG_RISK_ADAPTER, "data": call_data}, "latest"],
@@ -1110,11 +1110,24 @@ async def redeem_diagnostics(condition_id: str = None):
         except Exception as e:
             result["data_api_error"] = str(e)
 
-        # getDetermined(questionId)
-        if question_id:
+        # getDetermined(negRiskMarketID)
+        market_id = question_id  # Default to question_id as fallback
+        try:
+            # We can find the negRiskMarketID by querying the gamma API directly if we had gamma_id, 
+            # but since we only have clob question_id here, we can query gamma API via conditionId
+            url = f"https://gamma-api.polymarket.com/events?condition_id={condition_id}"
+            async with http.get(url) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if isinstance(data, list) and len(data) > 0:
+                        market_id = data[0].get("negRiskMarketID", question_id)
+        except Exception:
+            pass
+            
+        if market_id:
             try:
-                qid_hex = question_id.replace("0x", "")
-                call_data = f"0x{GET_DETERMINED_SEL}{qid_hex.zfill(64)}"
+                mid_hex = market_id.replace("0x", "")
+                call_data = f"0x{GET_DETERMINED_SEL}{mid_hex.zfill(64)}"
                 rpc_resp = await (await http.post(POLYGON_RPC, json={
                     "jsonrpc": "2.0", "id": 1, "method": "eth_call",
                     "params": [{"to": NEG_RISK_ADAPTER, "data": call_data}, "latest"],
