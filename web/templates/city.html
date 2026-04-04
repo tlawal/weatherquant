@@ -1656,6 +1656,7 @@ function tradingPanel() {
             this.fetchPosition(this.selectedBucketIdx),
             this.fetchActiveOrders(this.selectedBucketIdx),
           ]);
+          window.dispatchEvent(new CustomEvent('trade-completed'));
         }
       } catch (e) {
         this.tradeResult = { status: 'error', error: e.message };

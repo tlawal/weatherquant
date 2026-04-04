@@ -76,7 +76,7 @@ CITY_REGISTRY: list[dict] = [
     {"priority_order": 9, "cluster": "us_mountain", "utc_offset": -7,
      "city_slug": "denver", "display_name": "Denver",
      "nws_office": "BOU", "nws_grid_x": 75, "nws_grid_y": 66,
-     "lat": 39.8561, "lon": -104.6737, "metar_station": "KDEN",
+     "lat": 39.8561, "lon": -104.6737, "metar_station": "KBKF",
      "wu_state": "co", "wu_city": "denver",
      "enabled": 1, "is_us": 1, "unit": "F", "tz": "America/Denver"},
 

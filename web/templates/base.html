@@ -131,7 +131,8 @@
       <div class="flex items-center gap-3">
         <!-- Wallet Balance -->
         <div class="hidden md:flex items-center gap-3 px-3 py-1 rounded-lg" style="background:var(--bg-panel)"
-             x-data="walletBalance()" x-init="fetchBalance()">
+             x-data="walletBalance()" x-init="init()"
+             @trade-completed.window="refresh()">
           <div class="flex items-center gap-1.5">
             <span class="text-[10px] uppercase tracking-widest font-bold" style="color:var(--text-muted)">Cash</span>
             <span class="mono text-sm font-semibold" style="color:var(--cyan)"
@@ -218,7 +219,7 @@
         balance: null,
         exposure: 0,
         portfolio: 0,
-        async fetchBalance() {
+        async refresh() {
           try {
             const res = await fetch('/api/balance');
             if (res.ok) {
@@ -228,8 +229,10 @@
               this.portfolio = data.portfolio_value || 0;
             }
           } catch (e) { /* silent */ }
-          // Auto-refresh every 60s
-          setTimeout(() => this.fetchBalance(), 60000);
+        },
+        init() {
+          this.refresh();
+          setInterval(() => this.refresh(), 60000);
         }
       };
     }

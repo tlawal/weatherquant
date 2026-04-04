@@ -10,7 +10,7 @@ async def main():
             ("sf", "KSFO", "san-francisco", "ca", True),
             ("la", "KLAX", "los-angeles", "ca", True),
             ("austin", "KAUS", "austin", "tx", True),
-            ("denver", "KDEN", "denver", "co", True),
+            ("denver", "KBKF", "denver", "co", True),
             ("houston", "KIAH", "houston", "tx", True),
             ("taipei", "RCTP", "taipei", "tw", True),
             ("hong-kong", "VHHH", "hong-kong", "hk", True),
