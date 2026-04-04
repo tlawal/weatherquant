@@ -1611,12 +1611,8 @@ async def manual_trade(
 
     model_prob = sig_row.model_prob if sig_row else 0.5
     mkt_prob = mkt_snap.yes_mid if mkt_snap else 0.5
-    is_sell = body.side.startswith("sell_")
-    if is_sell:
-        yes_ask = body.limit_price or (mkt_snap.yes_bid if mkt_snap else None) or 0.5
-    else:
-        yes_ask = body.limit_price or (mkt_snap.yes_ask if mkt_snap else None) or 0.5
     true_edge = sig_row.true_edge if sig_row else 0.0
+    is_sell = body.side.startswith("sell_")
 
     signal = BucketSignal(
         city_slug=body.city_slug,
@@ -1634,7 +1630,7 @@ async def manual_trade(
         exec_cost=sig_row.exec_cost if sig_row else 0.02,
         true_edge=true_edge,
         yes_bid=mkt_snap.yes_bid if mkt_snap else None,
-        yes_ask=yes_ask,
+        yes_ask=mkt_snap.yes_ask if mkt_snap else None,
         yes_mid=mkt_prob,
         spread=mkt_snap.spread if mkt_snap else None,
         yes_ask_depth=mkt_snap.yes_ask_depth if mkt_snap else 0.0,
@@ -1650,7 +1646,17 @@ async def manual_trade(
             bankroll = min(balance, Config.BANKROLL_CAP)
 
     clob_side = "SELL" if is_sell else "BUY"
-    result = await execute_signal(signal, bankroll=bankroll, actor=actor, dry_run=body.dry_run, manual=True, qty_override=body.qty, order_type=body.order_type, side=clob_side)
+    result = await execute_signal(
+        signal,
+        bankroll=bankroll,
+        actor=actor,
+        dry_run=body.dry_run,
+        manual=True,
+        qty_override=body.qty,
+        order_type=body.order_type,
+        side=clob_side,
+        limit_price_override=body.limit_price
+    )
     return result
 
 

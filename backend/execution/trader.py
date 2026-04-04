@@ -52,6 +52,7 @@ async def execute_signal(
     qty_override: float | None = None,
     order_type: str = "limit",
     side: str = "BUY",
+    limit_price_override: float | None = None,
 ) -> dict:
     """
     Attempt to execute a trade for the given signal.
@@ -123,7 +124,9 @@ async def execute_signal(
         return result
 
     # ── Compute position size ─────────────────────────────────────────────────
-    if side == "SELL":
+    if limit_price_override is not None:
+        limit_price = limit_price_override
+    elif side == "SELL":
         limit_price = signal.yes_bid or signal.yes_mid or 0.0
     else:
         limit_price = signal.yes_ask or signal.yes_mid or 0.0
