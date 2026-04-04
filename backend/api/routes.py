@@ -1691,9 +1691,17 @@ async def get_active_orders(city_slug: str, actor: str = Depends(require_admin))
     
     token_to_idx = {b.yes_token_id: b.bucket_idx for b in buckets}
     enriched = []
+    
+    import logging
+    log = logging.getLogger("routes_active_orders")
+    log.info(f"token_to_idx keys: {list(token_to_idx.keys())}")
+    log.info(f"Open orders raw: {orders}")
+    
     for o in orders:
-        idx = token_to_idx.get(o.get('asset_id'))
+        asset_id = o.get('asset_id')
+        idx = token_to_idx.get(asset_id)
         if idx is None:
+            log.warning(f"Order has unknown asset_id: {asset_id}")
             continue
         try:
             enriched.append({
@@ -1705,9 +1713,11 @@ async def get_active_orders(city_slug: str, actor: str = Depends(require_admin))
                 "size_matched": float(o.get("size_matched", 0)),
                 "created_at": o.get("created_at"),
             })
-        except (ValueError, TypeError):
+        except (ValueError, TypeError) as e:
+            log.error(f"Error parsing order: {o}, {e}")
             continue
             
+    log.info(f"Enriched orders: {enriched}")
     return enriched
 
 

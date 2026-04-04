@@ -1453,7 +1453,12 @@ function tradingPanel() {
     async fetchActiveOrders(bucketIdx) {
       this.fetchingOrders = true;
       try {
-        const resp = await fetch(`/trade/orders/{{ city.city_slug }}`);
+        const tok = getAdminToken() || promptForToken();
+        if (!tok) return;
+
+        const resp = await fetch(`/trade/orders/{{ city.city_slug }}`, {
+          headers: { 'X-Admin-Token': tok }
+        });
         if (!resp.ok) return;
         const data = await resp.json();
         // Filter orders to only the currently selected bucket
