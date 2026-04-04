@@ -24,7 +24,7 @@ import aiohttp
 from bs4 import BeautifulSoup
 
 from backend.config import Config
-from backend.tz_utils import city_local_date
+from backend.tz_utils import city_local_date, city_local_now, city_local_tomorrow
 from backend.storage.db import get_session
 from backend.storage.models import City
 from backend.storage.repos import (
@@ -74,10 +74,14 @@ async def fetch_nws_all() -> None:
         if not (city.nws_office and city.nws_grid_x and city.nws_grid_y):
             continue
 
-        today_et = city_local_date(city)
+        now_local = city_local_now(city)
+        if now_local.hour >= 20:
+            active_date = city_local_tomorrow(city)
+        else:
+            active_date = city_local_date(city)
 
         try:
-            high_f = await _fetch_nws_high(city)
+            high_f = await _fetch_nws_high(city, active_date)
         except Exception as e:
             log.error("nws: %s failed: %s", city.city_slug, e)
             high_f = None
@@ -88,7 +92,7 @@ async def fetch_nws_all() -> None:
                 sess,
                 city_id=city.id,
                 source="nws",
-                date_et=today_et,
+                date_et=active_date,
                 high_f=high_f,
                 raw_payload_hash=hashlib.md5(raw.encode()).hexdigest(),
                 raw_json=raw,
@@ -109,7 +113,11 @@ async def fetch_open_meteo_all() -> None:
         if city.is_us:
             continue
 
-        city_date = city_local_date(city)
+        now_local = city_local_now(city)
+        if now_local.hour >= 20:
+            active_date = city_local_tomorrow(city)
+        else:
+            active_date = city_local_date(city)
 
         try:
             high_f = await _fetch_open_meteo_high(city)
@@ -123,7 +131,7 @@ async def fetch_open_meteo_all() -> None:
                 sess,
                 city_id=city.id,
                 source="open_meteo",  # always "open_meteo" so web route query works
-                date_et=city_date,
+                date_et=active_date,
                 high_f=high_f,
                 raw_payload_hash=hashlib.md5(raw.encode()).hexdigest(),
                 raw_json=raw,
@@ -132,7 +140,7 @@ async def fetch_open_meteo_all() -> None:
             await update_heartbeat(
                 sess, "fetch_open_meteo", success=(high_f is not None)
             )
-        log.info("open-meteo: %s high_f=%s (date=%s)", city.city_slug, high_f, city_date)
+        log.info("open-meteo: %s high_f=%s (date=%s)", city.city_slug, high_f, active_date)
 
 
 async def _fetch_open_meteo_high(city: City) -> Optional[float]:
@@ -178,7 +186,7 @@ async def _fetch_open_meteo_high(city: City) -> Optional[float]:
 
 
 
-async def _fetch_nws_high(city: City) -> Optional[float]:
+async def _fetch_nws_high(city: City, active_date_str: str) -> Optional[float]:
     """Fetch NWS gridpoint forecast and return today's daytime high (°F)."""
     if not city.is_us or not city.nws_office:
         return None
@@ -205,13 +213,12 @@ async def _fetch_nws_high(city: City) -> Optional[float]:
                     data = await resp.json(content_type=None)
 
             periods = (data.get("properties") or {}).get("periods") or []
-            # Find today's daytime period
-            today_et_str = city_local_date(city)
+            # Find active_date's daytime period
             for period in periods:
                 if not period.get("isDaytime", True):
                     continue
                 start = period.get("startTime", "")
-                if today_et_str in start:
+                if active_date_str in start:
                     temp = period.get("temperature")
                     unit = period.get("temperatureUnit", "F")
                     if temp is None:

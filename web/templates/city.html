@@ -899,7 +899,7 @@
                 :class="side === 'sell' ? 'text-white' : ''"
                 :style="side === 'sell' ? 'background:var(--bg-card);box-shadow:0 1px 3px rgba(0,0,0,0.3)' : 'color:var(--text-muted)'">Sell</button>
         <!-- Order Type Toggle -->
-        <button @click="orderType = orderType === 'limit' ? 'market' : 'limit'" class="ml-auto flex items-center gap-1 text-[10px] px-2 py-1 rounded-md hover:bg-white/10 transition-colors cursor-pointer" style="color:var(--text-muted)">
+        <button @click="orderType = orderType === 'limit' ? 'market' : 'limit'; if (orderType === 'market') limitPrice = yesPrice;" class="ml-auto flex items-center gap-1 text-[10px] px-2 py-1 rounded-md hover:bg-white/10 transition-colors cursor-pointer" style="color:var(--text-muted)">
           <span x-text="orderType === 'limit' ? 'Limit' : 'Market'" class="font-semibold"></span>
           <span class="opacity-50">▾</span>
         </button>
@@ -1434,12 +1434,16 @@ function tradingPanel() {
         this.shares = Math.max(0, Math.floor(this.heldShares));
         return;
       }
-      if (this.limitPrice <= 0) return;
+      if (this.orderType === 'limit' && this.limitPrice <= 0) return;
+      
+      const price = this.orderType === 'limit' ? this.limitPrice : this.yesPrice;
+      if (!price || price <= 0) return;
+
       let max = 9999;
-      if (this.balance !== null && this.balance > 0) {
-        max = Math.min(max, Math.floor(this.balance / this.limitPrice));
+      if (this.balance !== null) {
+        max = Math.min(max, Math.floor(this.balance / price));
       }
-      if (this.obAskDepth > 0) {
+      if (this.obAskDepth !== null) {
         max = Math.min(max, Math.floor(this.obAskDepth));
       }
       this.shares = Math.max(0, max);
@@ -1505,6 +1509,15 @@ function quickTrade(city_slug, bucket_idx) {
     }
   }
 }
+
+// Auto-open trading panel if ?trade=bucket_idx exists in URL
+document.addEventListener('DOMContentLoaded', () => {
+    const params = new URLSearchParams(window.location.search);
+    const tradeIdx = params.get('trade');
+    if (tradeIdx !== null) {
+        setTimeout(() => quickTrade('{{ city.city_slug }}', parseInt(tradeIdx)), 150);
+    }
+});
 
 async function refreshMarketContext(citySlug, dateEt, buttonEl) {
   if (!buttonEl || buttonEl.disabled) return;

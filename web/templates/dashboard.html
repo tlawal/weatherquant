@@ -246,43 +246,13 @@
 
     <!-- Manual trade link -->
     <div class="text-center">
-      <button onclick="showTradeModal()" class="text-xs underline" style="color:var(--text-muted)">
+      <button onclick="window.location.href='/city/{{ cities[0] }}'" class="text-xs underline" style="color:var(--text-muted)">
         Manual Trade
       </button>
     </div>
   </div>
 </div>
 
-<!-- ── TRADE MODAL ──────────────────────────────────────────────────────── -->
-<div id="trade-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center"
-     style="background:rgba(0,0,0,0.7)" onclick="if(event.target===this)hideTradeModal()">
-  <div class="card w-96 p-6 space-y-4 shadow-2xl" style="background:var(--bg-card)">
-    <h2 class="font-bold text-base" style="color:var(--cyan)">Manual Trade</h2>
-    <div class="space-y-2">
-      <select id="trade-city" class="w-full px-3 py-2 rounded text-sm"
-        style="background:var(--bg-panel);border:1px solid var(--border)">
-        {% for city_slug in cities %}
-        <option value="{{ city_slug }}">{{ city_slug|replace('-',' ')|title }}</option>
-        {% endfor %}
-      </select>
-      <input id="trade-bucket-idx" type="number" min="0" max="7" placeholder="Bucket index (0-7)"
-        class="w-full px-3 py-2 rounded text-sm"
-        style="background:var(--bg-panel);border:1px solid var(--border)">
-      <input id="trade-price" type="number" step="0.01" min="0.01" max="0.99" placeholder="Limit price (optional)"
-        class="w-full px-3 py-2 rounded text-sm"
-        style="background:var(--bg-panel);border:1px solid var(--border)">
-      <label class="flex items-center gap-2 text-sm">
-        <input id="trade-dry-run" type="checkbox" checked> Dry run (no real order)
-      </label>
-    </div>
-    <div class="flex gap-2">
-      <button onclick="submitTrade()" class="flex-1 py-2 rounded font-semibold text-sm"
-        style="background:var(--cyan);color:#000">Execute</button>
-      <button onclick="hideTradeModal()" class="flex-1 py-2 rounded text-sm"
-        style="background:var(--bg-panel);border:1px solid var(--border)">Cancel</button>
-    </div>
-    <pre id="trade-result" class="text-xs p-2 rounded hidden"
-      style="background:var(--bg-panel);max-height:120px;overflow:auto"></pre>
   </div>
 </div>
 {% endblock %}
@@ -329,19 +299,7 @@ async function killSwitch() {
   if (data) window.location.reload();
 }
 
-function showTradeModal() { document.getElementById('trade-modal').classList.remove('hidden'); }
-function hideTradeModal() { document.getElementById('trade-modal').classList.add('hidden'); }
 
-async function submitTrade() {
-  const city_slug = document.getElementById('trade-city').value;
-  const bucket_idx = parseInt(document.getElementById('trade-bucket-idx').value);
-  const limit_price = parseFloat(document.getElementById('trade-price').value) || null;
-  const dry_run = document.getElementById('trade-dry-run').checked;
-  const result = await apiCall('/trade', 'POST', {city_slug, bucket_idx, side:'buy_yes', limit_price, dry_run});
-  const el = document.getElementById('trade-result');
-  el.textContent = JSON.stringify(result, null, 2);
-  el.classList.remove('hidden');
-}
 
 // Check for newly resolved markets
 async function checkResolved(btn) {
@@ -422,9 +380,7 @@ async function claimWinnings(eventId, btn) {
 
 // Quick trade button from signal table
 function quickTrade(city_slug, bucket_idx) {
-  document.getElementById('trade-city').value = city_slug;
-  document.getElementById('trade-bucket-idx').value = bucket_idx;
-  showTradeModal();
+  window.location.href = `/city/${city_slug}?trade=${bucket_idx}`;
 }
 </script>
 {% endblock %}
