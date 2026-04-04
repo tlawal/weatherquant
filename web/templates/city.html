@@ -1026,20 +1026,41 @@
       </div>
 
       <!-- Totals -->
-      <div class="space-y-2 pt-2 border-t" style="border-color:var(--border)">
-        <div class="flex justify-between text-sm">
-          <span style="color:var(--text-muted)">Total</span>
-          <span class="mono font-bold" style="color:var(--cyan)" x-text="'$' + totalCost.toFixed(2)"></span>
-        </div>
-        <div class="flex justify-between text-sm">
-          <div class="flex items-center gap-1">
-            <span style="color:var(--text-muted)">To win</span>
-            <span class="text-[10px] opacity-40 cursor-help" title="Payout if outcome is correct = shares × $1 − cost">ⓘ</span>
+      <div class="space-y-2 pt-3 border-t" style="border-color:var(--border)">
+        <template x-if="side === 'buy'">
+          <div>
+            <div class="flex justify-between text-sm mb-2">
+              <span style="color:var(--text-muted)">Total</span>
+              <span class="mono font-bold" style="color:var(--cyan)" x-text="'$' + totalCost.toFixed(2)"></span>
+            </div>
+            <div class="flex justify-between text-sm">
+              <div class="flex items-center gap-1">
+                <span style="color:var(--text-muted)">To win</span>
+                <span class="text-[10px] opacity-40 cursor-help" title="Payout if outcome is correct = shares × $1 − cost">ⓘ</span>
+              </div>
+              <span class="mono font-bold flex items-center gap-1" style="color:var(--green)">
+                💵 <span x-text="'$' + toWin.toFixed(2)"></span>
+              </span>
+            </div>
           </div>
-          <span class="mono font-bold flex items-center gap-1" style="color:var(--green)">
-            💵 <span x-text="'$' + toWin.toFixed(2)"></span>
-          </span>
-        </div>
+        </template>
+        <template x-if="side === 'sell'">
+          <div>
+            <div class="flex justify-between items-center mb-1">
+              <div class="flex items-center gap-1.5 text-sm font-medium" style="color:var(--text-main)">
+                You'll receive <span class="text-green-500 text-base leading-none">💵</span>
+              </div>
+              <span class="mono font-bold text-xl" style="color:var(--green)" 
+                    x-text="'$' + (shares * (orderType === 'market' ? (obBid || 0) : limitPrice)).toFixed(2)"></span>
+            </div>
+            <div class="flex items-center gap-1">
+              <span class="text-xs" style="color:var(--text-muted)">Avg. Price</span>
+              <span class="text-xs mono" style="color:var(--text-muted)" 
+                    x-text="((orderType === 'market' ? (obBid || 0) : limitPrice) * 100).toFixed(1) + '¢'"></span>
+              <span class="text-[10px] opacity-40 cursor-help" title="Estimated execution price">ⓘ</span>
+            </div>
+          </div>
+        </template>
       </div>
 
       <!-- Submit Button -->
