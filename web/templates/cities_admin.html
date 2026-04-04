@@ -3,8 +3,14 @@
 
 {% block content %}
 <div class="flex items-center justify-between mb-5">
-  <h1 class="text-xl font-bold">City Registry</h1>
-  <span class="text-sm" style="color:var(--text-muted)">Enable/disable cities for trading</span>
+  <div>
+    <h1 class="text-xl font-bold">City Registry</h1>
+    <span class="text-sm" style="color:var(--text-muted)">Enable/disable cities for trading</span>
+  </div>
+  <button onclick="syncPositions()" class="px-4 py-2 font-semibold text-xs rounded transition-all hover:opacity-80"
+          style="background:var(--cyan);color:#000">
+    ↻ Sync Positions
+  </button>
 </div>
 
 <!-- Mobile: card list -->
@@ -129,6 +135,26 @@ async function toggleCity(city_slug) {
   const data = await res.json();
   if (data.city_slug) window.location.reload();
   else alert(JSON.stringify(data));
+}
+
+async function syncPositions() {
+  const tok = getAdminToken() || promptForToken();
+  if (!tok) return;
+  const btn = event.currentTarget;
+  const origTxt = btn.innerText;
+  btn.innerText = "Syncing...";
+  try {
+    const res = await fetch('/api/sync-positions', {
+      method: 'POST',
+      headers: {'X-Admin-Token': tok},
+    });
+    const data = await res.json();
+    alert(`Synced ${data.synced} positions successfully.\n\n` + JSON.stringify(data.corrections || data, null, 2));
+  } catch (e) {
+    alert("Sync failed: " + e.message);
+  } finally {
+    btn.innerText = origTxt;
+  }
 }
 </script>
 {% endblock %}

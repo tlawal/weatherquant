@@ -30,9 +30,11 @@ async def erc1155_balance(
 def get_wallet_address() -> str:
     """Return the wallet that holds Polymarket tokens.
 
-    Polymarket uses a proxy/funder wallet for token custody, so we must
-    prefer FUNDER_ADDRESS over the raw EOA derived from the private key.
+    Polymarket uses a proxy wallet for token custody, so we must
+    prefer PROXY_ADDRESS (or FUNDER_ADDRESS) over the raw EOA derived from the private key.
     """
+    if hasattr(Config, "PROXY_ADDRESS") and Config.PROXY_ADDRESS:
+        return Config.PROXY_ADDRESS
     if Config.FUNDER_ADDRESS:
         return Config.FUNDER_ADDRESS
     from eth_account import Account

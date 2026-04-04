@@ -46,6 +46,7 @@ class Config:
 
     # ── Polymarket CLOB ───────────────────────────────────────────────────────
     POLYMARKET_PRIVATE_KEY: str = os.environ.get("POLYMARKET_PRIVATE_KEY", "")
+    PROXY_ADDRESS: str = os.environ.get("PROXY_ADDRESS", "")  # Preferred over FUNDER_ADDRESS for on-chain queries
     FUNDER_ADDRESS: str = os.environ.get("FUNDER_ADDRESS", "")
     POLYMARKET_HOST: str = os.environ.get(
         "POLYMARKET_HOST", "https://clob.polymarket.com"
