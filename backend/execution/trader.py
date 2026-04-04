@@ -42,6 +42,27 @@ from backend.storage.repos import (
 
 log = logging.getLogger(__name__)
 
+import re as _re
+
+
+def _rewrite_balance_error(raw: str) -> str | None:
+    """If raw is a Polymarket insufficient-balance error, return a friendly message."""
+    m = _re.search(
+        r"balance:\s*(\d+).*?sum of active orders:\s*(\d+).*?order amount:\s*(\d+)",
+        raw, _re.DOTALL
+    )
+    if not m:
+        return None
+    bal    = int(m.group(1)) / 1_000_000
+    locked = int(m.group(2)) / 1_000_000
+    need   = int(m.group(3)) / 1_000_000
+    avail  = bal - locked
+    return (
+        f"Insufficient balance: need ${need:.2f} but only ${avail:.2f} available "
+        f"(${bal:.2f} total, ${locked:.2f} locked in active orders). "
+        f"Cancel active orders to free funds."
+    )
+
 
 async def execute_signal(
     signal: BucketSignal,
@@ -329,7 +350,8 @@ async def execute_signal(
         if not clob_result:
             result["error"] = "CLOB returned no result"
         else:
-            result["error"] = clob_result.get("error", "Unknown CLOB error")
+            raw_err = clob_result.get("error", "Unknown CLOB error")
+            result["error"] = _rewrite_balance_error(raw_err) or raw_err
             
         async with get_session() as sess:
             await update_order_status(sess, order.id, "rejected", cancel_reason=result["error"][:100])

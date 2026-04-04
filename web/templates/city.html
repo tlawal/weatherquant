@@ -946,7 +946,7 @@
                 :class="side === 'sell' ? 'text-white' : ''"
                 :style="side === 'sell' ? 'background:var(--bg-card);box-shadow:0 1px 3px rgba(0,0,0,0.3)' : 'color:var(--text-muted)'">Sell</button>
         <!-- Order Type Toggle -->
-        <button @click="orderType = orderType === 'limit' ? 'market' : 'limit'; if (orderType === 'market') limitPrice = yesPrice;" class="ml-auto flex items-center gap-1 text-[10px] px-2 py-1 rounded-md hover:bg-white/10 transition-colors cursor-pointer" style="color:var(--text-muted)">
+        <button @click="orderType = orderType === 'limit' ? 'market' : 'limit'; if (orderType === 'market') limitPrice = (outcome === 'no' ? noPrice : yesPrice) || yesPrice;" class="ml-auto flex items-center gap-1 text-[10px] px-2 py-1 rounded-md hover:bg-white/10 transition-colors cursor-pointer" style="color:var(--text-muted)">
           <span x-text="orderType === 'limit' ? 'Limit' : 'Market'" class="font-semibold"></span>
           <span class="opacity-50">▾</span>
         </button>
@@ -1599,7 +1599,7 @@ function tradingPanel() {
       }
       if (this.orderType === 'limit' && this.limitPrice <= 0) return;
       
-      const price = this.orderType === 'limit' ? this.limitPrice : this.yesPrice;
+      const price = this.orderType === 'limit' ? this.limitPrice : (this.outcome === 'no' ? this.noPrice : this.yesPrice);
       if (!price || price <= 0) return;
 
       let max = 9999;
