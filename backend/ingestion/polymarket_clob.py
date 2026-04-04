@@ -228,6 +228,25 @@ class CLOBClient:
             log.error("clob: cancel_order %s failed: %s", order_id, e)
             return False
 
+    async def get_open_orders(self, market: str) -> list[dict]:
+        """Fetch open orders for a specific market (condition ID)."""
+        await self._ensure_initialized()
+        if not self.can_trade:
+            return []
+        try:
+            from py_clob_client.clob_types import OpenOrderParams
+            loop = asyncio.get_event_loop()
+            params = OpenOrderParams(market=market)
+            return await asyncio.wait_for(
+                loop.run_in_executor(
+                    None, lambda: self._client.get_orders(params)
+                ),
+                timeout=10.0,
+            )
+        except Exception as e:
+            log.warning("clob: get_open_orders failed: %s", e)
+            return []
+
     async def get_balance(self) -> Optional[float]:
         """Fetch USDC collateral balance."""
         if not self.can_trade:

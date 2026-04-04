@@ -1660,6 +1660,72 @@ async def manual_trade(
     return result
 
 
+@router.get("/trade/orders/{city_slug}")
+async def get_active_orders(city_slug: str, actor: str = Depends(require_admin)):
+    """Get active Polymarket CLOB limit orders for the current city."""
+    from backend.ingestion.polymarket_clob import get_clob
+    from backend.tz_utils import city_local_now, city_local_date, city_local_tomorrow
+    from backend.storage.repos import get_buckets_for_event
+
+    async with get_session() as sess:
+        city = await _get_city_or_404(sess, city_slug)
+        now_local = city_local_now(city)
+        active_date = city_local_tomorrow(city) if now_local.hour >= 20 else city_local_date(city)
+        event = await get_event(sess, city.id, active_date)
+        if not event:
+            return []
+        
+        buckets = await get_buckets_for_event(sess, event.id)
+        if not buckets:
+            return []
+            
+    clob = get_clob()
+    if not clob:
+        return []
+        
+    condition_id = buckets[0].condition_id
+    if not condition_id:
+        return []
+        
+    orders = await clob.get_open_orders(market=condition_id)
+    
+    token_to_idx = {b.yes_token_id: b.bucket_idx for b in buckets}
+    enriched = []
+    for o in orders:
+        idx = token_to_idx.get(o.get('asset_id'))
+        if idx is None:
+            continue
+        try:
+            enriched.append({
+                "id": o.get("id"),
+                "bucket_idx": idx,
+                "side": o.get("side"),
+                "price": float(o.get("price", 0)),
+                "size": float(o.get("original_size", 0)),
+                "size_matched": float(o.get("size_matched", 0)),
+                "created_at": o.get("created_at"),
+            })
+        except (ValueError, TypeError):
+            continue
+            
+    return enriched
+
+
+@router.delete("/trade/orders/{order_id}")
+async def cancel_order(order_id: str, actor: str = Depends(require_admin)):
+    """Cancel an active Polymarket CLOB limit order."""
+    from backend.ingestion.polymarket_clob import get_clob
+    clob = get_clob()
+    if not clob:
+        raise HTTPException(500, "CLOB client unavailable")
+        
+    success = await clob.cancel_order(order_id)
+    if not success:
+        raise HTTPException(400, "Failed to cancel order or order already filled")
+        
+    return {"success": True}
+
+
 # ─── Config ──────────────────────────────────────────────────────────────────
 
 class ConfigUpdate(BaseModel):

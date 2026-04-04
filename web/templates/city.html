@@ -1341,6 +1341,9 @@ function tradingPanel() {
     balance: null,
     heldShares: 0,
     heldAvgCost: 0,
+    activeOrders: [],
+    fetchingOrders: false,
+    cancelingOrderId: null,
 
     // Orderbook state
     obLoaded: false,
@@ -1402,6 +1405,7 @@ function tradingPanel() {
       await Promise.all([
         this.fetchOrderbook(bucketIdx),
         this.fetchPosition(bucketIdx),
+        this.fetchActiveOrders(bucketIdx),
       ]);
     },
 
@@ -1443,6 +1447,54 @@ function tradingPanel() {
         this.obLoaded = true;
       } catch (e) {
         console.error('Failed to fetch orderbook:', e);
+      }
+    },
+
+    async fetchActiveOrders(bucketIdx) {
+      this.fetchingOrders = true;
+      try {
+        const resp = await fetch(`/api/trade/orders/{{ city.city_slug }}`);
+        if (!resp.ok) return;
+        const data = await resp.json();
+        // Filter orders to only the currently selected bucket
+        this.activeOrders = data.filter(o => o.bucket_idx === bucketIdx);
+      } catch (e) {
+        console.error('Failed to fetch active orders:', e);
+      } finally {
+        this.fetchingOrders = false;
+      }
+    },
+
+    async cancelOrder(orderId) {
+      if (this.cancelingOrderId) return;
+      this.cancelingOrderId = orderId;
+      try {
+        const tok = getAdminToken() || promptForToken();
+        if (!tok) return;
+
+        const resp = await fetch(`/api/trade/orders/${orderId}`, {
+          method: 'DELETE',
+          headers: { 'X-Admin-Token': tok }
+        });
+        
+        if (!resp.ok) {
+           const payload = await resp.json();
+           throw new Error(payload.detail || `HTTP ${resp.status}`);
+        }
+        
+        // Remove successfully cancelled order
+        this.activeOrders = this.activeOrders.filter(o => o.id !== orderId);
+        
+        // Refresh balance/position just in case
+        await Promise.all([
+          this.fetchOrderbook(this.selectedBucketIdx),
+          this.fetchPosition(this.selectedBucketIdx),
+        ]);
+        
+      } catch (e) {
+        alert("Failed to cancel order: " + e.message);
+      } finally {
+        this.cancelingOrderId = null;
       }
     },
 
@@ -1508,10 +1560,11 @@ function tradingPanel() {
         this.tradeResult = result;
 
         // Refresh balance and position after trade
-        if (result && (result.status === 'filled' || result.status === 'order_placed')) {
+        if (result && (result.status === 'filled' || result.status === 'order_placed' || result.status === 'ok')) {
           await Promise.all([
             this.fetchOrderbook(this.selectedBucketIdx),
             this.fetchPosition(this.selectedBucketIdx),
+            this.fetchActiveOrders(this.selectedBucketIdx),
           ]);
         }
       } catch (e) {
