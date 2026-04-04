@@ -793,11 +793,11 @@
           </thead>
           <tbody>
             {% for b in buckets %}
-            {% set surpassed = b.high_f is not none and obs_high_f is not none and obs_high_f >= b.high_f %}
+            {% set surpassed = b.high_f is not none and forecasts.wu_history.high_f is not none and forecasts.wu_history.high_f > b.high_f %}
             <tr class="border-b hover:bg-white/5 transition-colors
               {% if surpassed %}opacity-30 line-through{% elif b.actionable %}edge-hot{% elif b.ev and b.ev >= 0.10 %}edge-warm{% else %}edge-cold{% endif %}"
               style="border-color:rgba(26,58,107,0.4)"
-              {% if surpassed %}title="Surpassed: observed high {{ '%.1f'|format(obs_high_f) }}° ≥ bucket ceiling {{ '%.1f'|format(b.high_f) }}°"{% endif %}>
+              {% if surpassed %}title="Surpassed: WU Settlement High {{ '%.1f'|format(forecasts.wu_history.high_f) }}° > bucket ceiling {{ '%.1f'|format(b.high_f) }}°"{% endif %}>
               <td class="px-3 py-2.5 mono font-medium text-xs">
                 {% if b.low_f is not none and b.high_f is not none %}
                   {{ b.low_f|int }}–{{ b.high_f|int }}°

@@ -107,8 +107,8 @@ async def dashboard(request: Request):
             seen[key] = True
             deduped.append(row)
 
-    # Sort: timezone (east → west) then edge descending within each city
-    deduped.sort(key=lambda r: (get_city_priority(r["city_slug"]), -r["true_edge"]))
+    # Sort: timezone (east → west) then market probability descending within each city
+    deduped.sort(key=lambda r: (get_city_priority(r["city_slug"]), -(r.get("mkt_prob") if r.get("mkt_prob") is not None else -1.0)))
 
     total_exposure = sum((p.net_qty * p.avg_cost) for p in positions if p.net_qty > 0)
 
@@ -640,7 +640,7 @@ async def htmx_signals_table(request: Request):
             "resolution_mismatch": reason.get("resolution_mismatch"),
         })
 
-    rows.sort(key=lambda r: (get_city_priority(r["city_slug"]), -r["true_edge"]))
+    rows.sort(key=lambda r: (get_city_priority(r["city_slug"]), -(r.get("mkt_prob") if r.get("mkt_prob") is not None else -1.0)))
     return templates.TemplateResponse("partials/signals_table.html", {"request": request, "signal_rows": rows})
 
 

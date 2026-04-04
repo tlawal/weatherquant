@@ -575,7 +575,7 @@ async def get_all_signals():
             "computed_at": sig.computed_at.isoformat(),
         })
 
-    out.sort(key=lambda x: x["true_edge"], reverse=True)
+    out.sort(key=lambda x: x["mkt_prob"] if x.get("mkt_prob") is not None else -1.0, reverse=True)
     return out
 
 
@@ -612,7 +612,7 @@ async def get_city_signals(city_slug: str):
                 "computed_at": sig.computed_at.isoformat(),
             })
 
-    result.sort(key=lambda x: x["true_edge"], reverse=True)
+    result.sort(key=lambda x: x["mkt_prob"] if x.get("mkt_prob") is not None else -1.0, reverse=True)
     return result
 
 
