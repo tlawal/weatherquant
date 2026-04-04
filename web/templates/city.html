@@ -798,12 +798,59 @@
               {% if surpassed %}opacity-30 line-through{% elif b.actionable %}edge-hot{% elif b.ev and b.ev >= 0.10 %}edge-warm{% else %}edge-cold{% endif %}"
               style="border-color:rgba(26,58,107,0.4)"
               {% if surpassed %}title="Surpassed: WU Settlement High {{ '%.1f'|format(forecasts.wu_history.high_f) }}° > bucket ceiling {{ '%.1f'|format(b.high_f) }}°"{% endif %}>
-              <td class="px-3 py-2.5 mono font-medium text-xs">
+              <td class="px-3 py-2.5 mono font-medium text-xs relative" x-data="{ showCancel: false }">
+                <div class="mb-1">
                 {% if b.low_f is not none and b.high_f is not none %}
                   {{ b.low_f|int }}–{{ b.high_f|int }}°
                 {% elif b.low_f is not none %}≥{{ b.low_f|int }}°
                 {% elif b.high_f is not none %}&lt;{{ b.high_f|int }}°
                 {% else %}{{ b.label }}{% endif %}
+                </div>
+                
+                <!-- Open orders indicator -->
+                <template x-if="$store.globalOrders && $store.globalOrders.getForBucket({{ b.bucket_idx }}).length > 0">
+                  <div class="mt-1">
+                    <button @click.stop="showCancel = !showCancel"
+                            class="text-[9px] font-bold tracking-wide px-1.5 py-0.5 rounded transition-all cursor-pointer inline-flex items-center gap-1"
+                            style="background:rgba(234,179,8,0.15); color:#FBBF24; border:1px solid rgba(234,179,8,0.3)">
+                      <span x-text="$store.globalOrders.getForBucket({{ b.bucket_idx }}).length + ' OPEN ORDER' + ($store.globalOrders.getForBucket({{ b.bucket_idx }}).length > 1 ? 'S' : '')"></span>
+                    </button>
+                    <!-- Cancellation Popover -->
+                    <div x-show="showCancel" x-cloak @click.outside="showCancel = false"
+                         x-transition class="absolute left-3 top-10 z-50 p-4 rounded-xl shadow-2xl border min-w-[240px]"
+                         style="background:var(--bg-card); border-color:var(--border);">
+                      <div class="font-bold mb-1 text-sm tracking-tight" style="color:white">
+                        <span x-text="'Cancel ' + $store.globalOrders.getForBucket({{ b.bucket_idx }}).length + ' open order' + ($store.globalOrders.getForBucket({{ b.bucket_idx }}).length > 1 ? 's' : '')"></span>
+                      </div>
+                      <div class="text-[11px] mb-4 opacity-50 font-normal normal-case">This action cannot be undone.</div>
+                      
+                      <div class="space-y-1 mb-4">
+                        <template x-for="order in $store.globalOrders.getForBucket({{ b.bucket_idx }})" :key="order.id">
+                          <div class="flex items-center justify-between text-[10px] mono py-1 border-b opacity-80" style="border-color:rgba(255,255,255,0.05)">
+                            <span><span x-text="order.side" :class="order.side === 'BUY' ? 'text-green-400' : 'text-red-400'"></span> <span x-text="order.size"></span>x <span x-text="(order.price*100).toFixed(1)+'¢'"></span></span>
+                            <span class="opacity-50" x-text="new Date(order.created_at * 1000).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})"></span>
+                          </div>
+                        </template>
+                      </div>
+
+                      <div class="flex gap-2">
+                        <button @click.stop="showCancel = false"
+                                class="flex-1 py-1.5 rounded-lg text-xs font-bold border transition-all"
+                                style="background:var(--bg-panel); border-color:var(--border); color:var(--text-main)">
+                          Back
+                        </button>
+                        <button @click.stop="$store.globalOrders.cancelAllForBucket({{ b.bucket_idx }}); showCancel = false"
+                                class="flex-1 py-1.5 rounded-lg text-xs font-bold transition-all text-white shadow-lg"
+                                style="background:linear-gradient(135deg,#DC2626,#EF4444); display:flex; justify-content:center; align-items:center;">
+                          <span x-show="!$store.globalOrders.canceling">Cancel Order</span>
+                          <span x-show="$store.globalOrders.canceling" class="flex gap-1 items-center">
+                            <svg class="w-3 h-3 animate-spin" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" fill="none"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                          </span>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </template>
               </td>
               <td class="px-2 py-2.5 text-right mono" style="color:var(--text-muted)">
                 {% if b.mkt_prob is not none %}{{ "%.1f"|format(b.mkt_prob * 100) }}%{% else %}—{% endif %}
@@ -1640,6 +1687,13 @@ document.addEventListener('DOMContentLoaded', () => {
     if (tradeIdx !== null) {
         setTimeout(() => quickTrade('{{ city.city_slug }}', parseInt(tradeIdx)), 150);
     }
+    
+    // Auto-fetch global orders
+    if (window.Alpine) {
+        setTimeout(() => {
+           if(Alpine.store('globalOrders')) Alpine.store('globalOrders').fetchAll('{{ city.city_slug }}');
+        }, 100);
+    }
 });
 
 async function refreshMarketContext(citySlug, dateEt, buttonEl) {
@@ -1681,6 +1735,57 @@ async function refreshMarketContext(citySlug, dateEt, buttonEl) {
 </script>
 <script>
 document.addEventListener('alpine:init', () => {
+    Alpine.store('globalOrders', {
+        orders: [],
+        canceling: false,
+        async fetchAll(citySlug) {
+            const tok = getAdminToken();
+            if (!tok) return;
+            try {
+                const resp = await fetch(`/trade/orders/${citySlug}`, {
+                    headers: { 'X-Admin-Token': tok }
+                });
+                if (resp.ok) {
+                    this.orders = await resp.json();
+                }
+            } catch (e) {
+                console.error(e);
+            }
+        },
+        getForBucket(bucketIdx) {
+            return this.orders.filter(o => o.bucket_idx === bucketIdx);
+        },
+        async cancelAllForBucket(bucketIdx) {
+            if (this.canceling) return;
+            this.canceling = true;
+            const ordersToCancel = this.getForBucket(bucketIdx);
+            const tok = getAdminToken();
+            
+            try {
+                for (const o of ordersToCancel) {
+                    const resp = await fetch(`/trade/orders/${o.id}`, {
+                        method: 'DELETE',
+                        headers: { 'X-Admin-Token': tok }
+                    });
+                    if (resp.ok) {
+                        this.orders = this.orders.filter(item => item.id !== o.id);
+                    }
+                }
+                // Refresh balance/positions for the open panel if needed
+                const el = document.getElementById('trading-panel-section');
+                if (el && el._x_dataStack && el._x_dataStack[0].selectedBucketIdx === bucketIdx) {
+                   el._x_dataStack[0].fetchPosition(bucketIdx);
+                   el._x_dataStack[0].fetchOrderbook(bucketIdx);
+                   el._x_dataStack[0].activeOrders = this.getForBucket(bucketIdx); // sync UI
+                }
+            } catch (e) {
+                console.error(e);
+            } finally {
+                this.canceling = false;
+            }
+        }
+    });
+
     Alpine.data('currentTemp', (slug, unit, isUs) => ({
         showMeta: false,
         data: null,
