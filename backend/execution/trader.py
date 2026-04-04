@@ -321,18 +321,22 @@ async def execute_signal(
             price=limit_price,
         )
 
-    if not clob_result:
+    if not clob_result or "error" in clob_result:
         result["status"] = "order_failed"
-        result["error"] = "CLOB returned no result"
+        if not clob_result:
+            result["error"] = "CLOB returned no result"
+        else:
+            result["error"] = clob_result.get("error", "Unknown CLOB error")
+            
         async with get_session() as sess:
-            await update_order_status(sess, order.id, "rejected", cancel_reason="clob_returned_none")
+            await update_order_status(sess, order.id, "rejected", cancel_reason=result["error"][:100])
             await append_audit(
                 sess,
                 actor=actor,
                 action="trade_order_failed",
                 payload=result,
                 ok=False,
-                error_msg="CLOB returned no result",
+                error_msg=result["error"][:200],
             )
         return result
 

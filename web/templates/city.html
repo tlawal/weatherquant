@@ -1482,6 +1482,12 @@ function tradingPanel() {
 
     async submitTrade() {
       if (this.submitting || this.shares <= 0 || this.limitPrice <= 0) return;
+
+      if (this.orderType === 'limit' && this.shares < 5) {
+        alert("Polymarket limits require a minimum of 5 shares per limit order. Please increase your shares or switch to a Market Order.");
+        return;
+      }
+
       this.submitting = true;
       this.tradeResult = null;
 

@@ -164,10 +164,10 @@ class CLOBClient:
             return result
         except asyncio.TimeoutError:
             log.error("clob: place_limit_order timed out")
-            return None
+            return {"error": "Timeout connecting to Polymarket CLOB"}
         except Exception as e:
             log.error("clob: place_limit_order failed: %s", e)
-            return None
+            return {"error": str(e)}
 
     async def place_market_order(
         self,
@@ -204,10 +204,10 @@ class CLOBClient:
             return result
         except asyncio.TimeoutError:
             log.error("clob: place_market_order timed out")
-            return None
+            return {"error": "Timeout connecting to Polymarket CLOB"}
         except Exception as e:
             log.error("clob: place_market_order failed: %s", e)
-            return None
+            return {"error": str(e)}
 
     async def cancel_order(self, order_id: str) -> bool:
         """Cancel an open order by CLOB order ID."""
