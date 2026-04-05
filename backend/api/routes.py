@@ -6,6 +6,7 @@ Write endpoints: require X-Admin-Token header.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timezone
@@ -1683,25 +1684,36 @@ async def get_active_orders(city_slug: str, actor: str = Depends(require_admin))
     if not clob:
         return []
         
-    condition_id = buckets[0].condition_id
-    if not condition_id:
+    condition_ids = list({b.condition_id for b in buckets if b.condition_id})
+    if not condition_ids:
         return []
-        
-    orders = await clob.get_open_orders(market=condition_id)
-    
-    token_to_idx = {b.yes_token_id: b.bucket_idx for b in buckets}
-    enriched = []
-    
-    import logging
+
+    # NegRisk multi-outcome markets have a distinct condition_id per bucket.
+    # py_clob_client's OpenOrderParams filters to a single market, so fan out
+    # and merge the results.
+    results = await asyncio.gather(
+        *[clob.get_open_orders(market=cid) for cid in condition_ids],
+        return_exceptions=True,
+    )
+    orders: list[dict] = []
+    for r in results:
+        if isinstance(r, list):
+            orders.extend(r)
+
+    token_to_idx: dict[str, int] = {}
+    for b in buckets:
+        if b.yes_token_id:
+            token_to_idx[b.yes_token_id] = b.bucket_idx
+        if b.no_token_id:
+            token_to_idx[b.no_token_id] = b.bucket_idx
+
     log = logging.getLogger("routes_active_orders")
-    log.info(f"token_to_idx keys: {list(token_to_idx.keys())}")
-    log.info(f"Open orders raw: {orders}")
-    
+    enriched = []
     for o in orders:
         asset_id = o.get('asset_id')
         idx = token_to_idx.get(asset_id)
         if idx is None:
-            log.warning(f"Order has unknown asset_id: {asset_id}")
+            log.warning("Order has unknown asset_id: %s", asset_id)
             continue
         try:
             enriched.append({
@@ -1714,10 +1726,10 @@ async def get_active_orders(city_slug: str, actor: str = Depends(require_admin))
                 "created_at": o.get("created_at"),
             })
         except (ValueError, TypeError) as e:
-            log.error(f"Error parsing order: {o}, {e}")
+            log.error("Error parsing order: %s, %s", o, e)
             continue
-            
-    log.info(f"Enriched orders: {enriched}")
+
+    log.info("active orders: n_markets=%d n_orders=%d", len(condition_ids), len(enriched))
     return enriched
 
 
