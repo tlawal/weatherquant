@@ -230,7 +230,6 @@ class CLOBClient:
 
     async def get_open_orders(self, market: str) -> list[dict]:
         """Fetch open orders for a specific market (condition ID)."""
-        await self._ensure_initialized()
         if not self.can_trade:
             return []
         try:
