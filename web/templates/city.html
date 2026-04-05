@@ -1080,6 +1080,11 @@
               <span style="color:var(--text-muted)">Total</span>
               <span class="mono font-bold" style="color:var(--cyan)" x-text="'$' + totalCost.toFixed(2)"></span>
             </div>
+            <template x-if="orderType === 'market' && shares * limitPrice > 0 && shares * limitPrice < 1.0 && limitPrice > 0">
+              <div class="text-[10px] mb-2 px-2 py-1 rounded" style="background:rgba(234,179,8,0.1);color:#FDE047;border:1px solid rgba(234,179,8,0.3)">
+                Polymarket $1 minimum — will buy ~<span class="mono font-bold" x-text="Math.ceil(1.0 / limitPrice)"></span> shares for $1.00
+              </div>
+            </template>
             <div class="flex justify-between text-sm">
               <div class="flex items-center gap-1">
                 <span style="color:var(--text-muted)">To win</span>
@@ -1456,12 +1461,24 @@ function tradingPanel() {
     },
 
     get totalCost() {
-      return (this.shares || 0) * this.limitPrice;
+      const raw = (this.shares || 0) * this.limitPrice;
+      // Polymarket enforces a $1 minimum notional on market BUY orders;
+      // the backend will bump share count to clear the floor, so reflect
+      // that in the UI rather than showing an unrealistic sub-$1 total.
+      if (this.orderType === 'market' && this.side === 'buy' && raw > 0 && raw < 1.0 && this.limitPrice > 0) {
+        return Math.ceil(1.0 / this.limitPrice) * this.limitPrice;
+      }
+      return raw;
     },
 
     get toWin() {
       if (this.shares <= 0 || this.limitPrice <= 0) return 0;
-      return this.shares * (1 - this.limitPrice);
+      // Mirror the $1-minimum adjustment so "To win" is consistent with Total.
+      let effShares = this.shares;
+      if (this.orderType === 'market' && this.side === 'buy' && effShares * this.limitPrice < 1.0) {
+        effShares = Math.ceil(1.0 / this.limitPrice);
+      }
+      return effShares * (1 - this.limitPrice);
     },
 
     async selectBucket(bucketIdx) {
@@ -1628,6 +1645,14 @@ function tradingPanel() {
       if (this.orderType === 'limit' && this.shares < 5) {
         alert("Polymarket limits require a minimum of 5 shares per limit order. Please increase your shares or switch to a Market Order.");
         return;
+      }
+
+      // Pre-bump shares for market BUY orders under the Polymarket $1 minimum
+      // so the payload matches what the backend (and Polymarket) will actually
+      // do. Without this, tradeResult would show a surprising share count.
+      if (this.orderType === 'market' && this.side === 'buy' &&
+          this.shares * this.limitPrice < 1.0 && this.limitPrice > 0) {
+        this.shares = Math.ceil(1.0 / this.limitPrice);
       }
 
       this.submitting = true;
