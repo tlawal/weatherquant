@@ -981,7 +981,7 @@
               Balance <span x-text="balance !== null ? '$' + balance.toFixed(2) : '—'" :style="balance !== null && balance < 1 ? 'color:var(--red)' : ''"></span>
             </div>
             <div x-show="heldShares > 0" class="text-[10px] mono" style="color:var(--green)">
-              Held <span x-text="Math.floor(heldShares) + ' shares @ ' + (heldAvgCost * 100).toFixed(1) + '¢'"></span>
+              Held <span x-text="heldShares.toFixed(2) + ' shares @ ' + (heldAvgCost * 100).toFixed(1) + '¢'"></span>
             </div>
           </div>
           <!-- Limit price stepper (only for limit orders) -->
@@ -1010,7 +1010,7 @@
             <span class="text-xs font-medium">Shares</span>
             <div class="text-[10px] hover:underline cursor-pointer" style="color:var(--cyan)" @click="setMaxShares()">Max</div>
           </div>
-          <input type="number" min="0" step="1" x-model.number="shares"
+          <input type="number" min="0" step="any" x-model.number="shares"
                  class="w-28 h-9 px-3 rounded-lg mono text-sm text-right font-medium"
                  style="background:var(--bg-panel);border:1px solid var(--border);color:var(--text-main)"
                  placeholder="0">
@@ -1611,7 +1611,10 @@ function tradingPanel() {
 
     setMaxShares() {
       if (this.side === 'sell') {
-        this.shares = Math.max(0, Math.floor(this.heldShares));
+        // Preserve fractional shares (Polymarket stores 11.925 etc). Floor to
+        // 2 decimals so we never exceed heldShares (which would fail the
+        // backend net_qty check), while still getting most of the value.
+        this.shares = Math.max(0, Math.floor(this.heldShares * 100) / 100);
         return;
       }
       if (this.orderType === 'limit' && this.limitPrice <= 0) return;
@@ -1630,7 +1633,9 @@ function tradingPanel() {
     },
 
     setSellPercent(pct) {
-      this.shares = Math.max(0, Math.floor(this.heldShares * pct));
+      // Floor to 2 decimals to preserve fractional shares without rounding up
+      // past heldShares (which would fail the backend net_qty check).
+      this.shares = Math.max(0, Math.floor(this.heldShares * pct * 100) / 100);
     },
 
     closeTrade() {
