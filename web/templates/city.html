@@ -47,6 +47,50 @@
   </div>
 </div>
 
+{% if event %}
+<!-- ── OPEN LIMIT ORDERS STRIP ────────────────────────────────────────────── -->
+<div x-data x-show="$store.globalOrders && $store.globalOrders.orders.length > 0"
+     x-cloak x-transition class="card mb-5 overflow-hidden">
+  <div class="px-4 py-2.5 border-b flex items-center gap-3" style="border-color:var(--border)">
+    <h2 class="text-xs font-semibold tracking-wide uppercase" style="color:var(--text-muted)">Open Limit Orders</h2>
+    <span class="text-[10px] mono px-2 py-0.5 rounded font-bold"
+          style="background:rgba(234,179,8,0.15); color:#FBBF24; border:1px solid rgba(234,179,8,0.3)"
+          x-text="$store.globalOrders.orders.length"></span>
+    <span class="ml-auto text-[10px] mono opacity-50">auto-refresh 15s</span>
+  </div>
+  <div class="flex gap-2 overflow-x-auto p-3">
+    <template x-for="order in $store.globalOrders.orders" :key="order.id">
+      <div class="flex items-center gap-3 shrink-0 px-3 py-2 rounded-lg border"
+           style="background:var(--bg-panel); border-color:var(--border)">
+        <span class="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase mono"
+              :style="order.side === 'BUY' ? 'background:rgba(34,197,94,0.15);color:var(--green)' : 'background:rgba(239,68,68,0.15);color:var(--red)'"
+              x-text="order.side"></span>
+        <div class="flex flex-col leading-tight">
+          <span class="text-xs font-semibold mono" x-text="$store.globalOrders.labelFor(order.bucket_idx)"></span>
+          <span class="text-[10px] mono opacity-70">
+            <span x-text="(order.price * 100).toFixed(1) + '¢'"></span>
+            <span class="opacity-50"> × </span>
+            <span x-text="order.size"></span>
+            <template x-if="order.size_matched > 0">
+              <span class="ml-1" style="color:var(--green)">(<span x-text="order.size_matched"></span> filled)</span>
+            </template>
+          </span>
+        </div>
+        <button @click="$store.globalOrders.cancelOne(order.id)"
+                :disabled="$store.globalOrders.cancelingId === order.id"
+                class="ml-2 px-3 py-1 rounded-md text-[10px] font-bold border transition-all hover:bg-red-500/20"
+                style="background:rgba(239,68,68,0.1); border-color:rgba(239,68,68,0.3); color:var(--red); min-width:4.5rem">
+          <span x-show="$store.globalOrders.cancelingId !== order.id">Cancel</span>
+          <span x-show="$store.globalOrders.cancelingId === order.id" class="flex gap-1 items-center justify-center">
+            <svg class="w-3 h-3 animate-spin" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" fill="none"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+          </span>
+        </button>
+      </div>
+    </template>
+  </div>
+</div>
+{% endif %}
+
 <!-- ── TEMPERATURE SNAPSHOT ROW (4 key stats) ─────────────────────────────── -->
 <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
 
@@ -1565,6 +1609,11 @@ function tradingPanel() {
         const data = await resp.json();
         // Filter orders to only the currently selected bucket
         this.activeOrders = data.filter(o => o.bucket_idx === bucketIdx);
+        // Prime the shared store from the same response so the top strip
+        // and bucket-row badges update in lock-step with the panel.
+        if (Alpine.store('globalOrders')) {
+          Alpine.store('globalOrders').orders = data;
+        }
       } catch (e) {
         console.error('Failed to fetch active orders:', e);
       } finally {
@@ -1591,11 +1640,13 @@ function tradingPanel() {
         
         // Remove successfully cancelled order
         this.activeOrders = this.activeOrders.filter(o => o.id !== orderId);
-        
+
         // Refresh balance/position just in case
         await Promise.all([
           this.fetchOrderbook(this.selectedBucketIdx),
           this.fetchPosition(this.selectedBucketIdx),
+          // Keep the top-of-page strip + bucket badges in sync with this cancel.
+          Alpine.store('globalOrders').fetchAll('{{ city.city_slug }}'),
         ]);
         
       } catch (e) {
@@ -1685,6 +1736,9 @@ function tradingPanel() {
             this.fetchOrderbook(this.selectedBucketIdx),
             this.fetchPosition(this.selectedBucketIdx),
             this.fetchActiveOrders(this.selectedBucketIdx),
+            // Refresh the global open-orders store so the top strip + bucket
+            // badges reflect any newly placed resting limit order immediately.
+            Alpine.store('globalOrders').fetchAll('{{ city.city_slug }}'),
           ]);
           window.dispatchEvent(new CustomEvent('trade-completed'));
         }
@@ -1719,11 +1773,16 @@ document.addEventListener('DOMContentLoaded', () => {
         setTimeout(() => quickTrade('{{ city.city_slug }}', parseInt(tradeIdx)), 150);
     }
     
-    // Auto-fetch global orders
+    // Auto-fetch global orders + lightweight polling so open orders stay
+    // fresh without manual reloads (catches fills/cancels that happen outside
+    // this tab, e.g. via the Polymarket UI directly).
     if (window.Alpine) {
         setTimeout(() => {
            if(Alpine.store('globalOrders')) Alpine.store('globalOrders').fetchAll('{{ city.city_slug }}');
         }, 100);
+        setInterval(() => {
+           if(Alpine.store('globalOrders')) Alpine.store('globalOrders').fetchAll('{{ city.city_slug }}');
+        }, 15000);
     }
 });
 
@@ -1766,9 +1825,29 @@ async function refreshMarketContext(citySlug, dateEt, buttonEl) {
 </script>
 <script>
 document.addEventListener('alpine:init', () => {
+    // Pre-compute human-readable labels for each bucket_idx so the open-orders
+    // strip can show "70–71°" instead of "Bucket #1".
+    const __wqBuckets = {{ buckets|tojson }};
+    const __wqBucketLabels = {};
+    for (const b of __wqBuckets) {
+        let label;
+        if (b.low_f !== null && b.low_f !== undefined && b.high_f !== null && b.high_f !== undefined) {
+            label = `${Math.trunc(b.low_f)}–${Math.trunc(b.high_f)}°`;
+        } else if (b.low_f !== null && b.low_f !== undefined) {
+            label = `≥${Math.trunc(b.low_f)}°`;
+        } else if (b.high_f !== null && b.high_f !== undefined) {
+            label = `<${Math.trunc(b.high_f)}°`;
+        } else {
+            label = b.label || `Bucket #${b.bucket_idx}`;
+        }
+        __wqBucketLabels[b.bucket_idx] = label;
+    }
+
     Alpine.store('globalOrders', {
         orders: [],
-        canceling: false,
+        canceling: false,       // bulk-cancel spinner (bucket-row popover)
+        cancelingId: null,      // single-cancel spinner (top strip chips)
+        bucketLabels: __wqBucketLabels,
         async fetchAll(citySlug) {
             const tok = getAdminToken();
             if (!tok) return;
@@ -1786,12 +1865,47 @@ document.addEventListener('alpine:init', () => {
         getForBucket(bucketIdx) {
             return this.orders.filter(o => o.bucket_idx === bucketIdx);
         },
+        labelFor(bucketIdx) {
+            return this.bucketLabels[bucketIdx] || `Bucket #${bucketIdx}`;
+        },
+        async cancelOne(orderId) {
+            if (this.cancelingId) return;
+            this.cancelingId = orderId;
+            const tok = getAdminToken();
+            if (!tok) { this.cancelingId = null; return; }
+            try {
+                const resp = await fetch(`/trade/orders/${orderId}`, {
+                    method: 'DELETE',
+                    headers: { 'X-Admin-Token': tok }
+                });
+                if (!resp.ok) {
+                    let msg = `HTTP ${resp.status}`;
+                    try { const p = await resp.json(); msg = p.detail || msg; } catch(e) {}
+                    throw new Error(msg);
+                }
+                this.orders = this.orders.filter(o => o.id !== orderId);
+                // If the trading panel is open, keep its local activeOrders in sync.
+                const el = document.getElementById('trading-panel-section');
+                if (el && el._x_dataStack) {
+                    const panel = el._x_dataStack[0];
+                    panel.activeOrders = panel.activeOrders.filter(o => o.id !== orderId);
+                    if (panel.selectedBucketIdx !== null) {
+                        panel.fetchOrderbook(panel.selectedBucketIdx);
+                        panel.fetchPosition(panel.selectedBucketIdx);
+                    }
+                }
+            } catch (e) {
+                alert('Failed to cancel order: ' + e.message);
+            } finally {
+                this.cancelingId = null;
+            }
+        },
         async cancelAllForBucket(bucketIdx) {
             if (this.canceling) return;
             this.canceling = true;
             const ordersToCancel = this.getForBucket(bucketIdx);
             const tok = getAdminToken();
-            
+
             try {
                 for (const o of ordersToCancel) {
                     const resp = await fetch(`/trade/orders/${o.id}`, {
