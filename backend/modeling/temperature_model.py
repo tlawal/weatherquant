@@ -220,9 +220,9 @@ def compute_model(
     if wu_hourly_peak is not None:
         calibrated["wu_hourly"] = (wu_hourly_peak + bias_wuh, w_wuh)
     if hrrr_high is not None:
-        calibrated["hrrr"] = (hrrr_high + cal.get("bias_hrrr", 0.0), cal.get("weight_hrrr", 1/3))
+        calibrated["hrrr"] = (hrrr_high + cal.get("bias_hrrr", 0.0), cal.get("weight_hrrr", 0.5))
     if gfs_high is not None:
-        calibrated["gfs"] = (gfs_high + cal.get("bias_gfs", 0.0), cal.get("weight_gfs", 1/3))
+        calibrated["gfs"] = (gfs_high + cal.get("bias_gfs", 0.0), cal.get("weight_gfs", 0.2))
 
     if not calibrated:
         log.warning("model: no forecast sources available — cannot compute model")

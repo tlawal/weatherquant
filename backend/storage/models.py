@@ -441,8 +441,8 @@ class CalibrationParams(Base):
     weight_nws: Mapped[float] = mapped_column(Float, default=0.333)
     weight_wu_daily: Mapped[float] = mapped_column(Float, default=0.334)
     weight_wu_hourly: Mapped[float] = mapped_column(Float, default=0.333)
-    weight_hrrr: Mapped[Optional[float]] = mapped_column(Float, default=0.333)
-    weight_gfs: Mapped[Optional[float]] = mapped_column(Float, default=0.333)
+    weight_hrrr: Mapped[Optional[float]] = mapped_column(Float, default=0.5)
+    weight_gfs: Mapped[Optional[float]] = mapped_column(Float, default=0.2)
     # Metadata
     n_samples: Mapped[int] = mapped_column(Integer, default=0)
     last_realized_high: Mapped[Optional[float]] = mapped_column(Float)

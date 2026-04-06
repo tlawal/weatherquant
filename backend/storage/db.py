@@ -146,8 +146,11 @@ async def init_db() -> None:
     # calibration_params — HRRR/GFS support
     await _run_ddl("ALTER TABLE calibration_params ADD COLUMN bias_hrrr FLOAT DEFAULT 0.0")
     await _run_ddl("ALTER TABLE calibration_params ADD COLUMN bias_gfs FLOAT DEFAULT 0.0")
-    await _run_ddl("ALTER TABLE calibration_params ADD COLUMN weight_hrrr FLOAT DEFAULT 0.333")
-    await _run_ddl("ALTER TABLE calibration_params ADD COLUMN weight_gfs FLOAT DEFAULT 0.333")
+    await _run_ddl("ALTER TABLE calibration_params ADD COLUMN weight_hrrr FLOAT DEFAULT 0.5")
+    await _run_ddl("ALTER TABLE calibration_params ADD COLUMN weight_gfs FLOAT DEFAULT 0.2")
+    # Migrate existing rows from old 1/3 defaults to new differentiated weights
+    await _run_ddl("UPDATE calibration_params SET weight_hrrr = 0.5 WHERE weight_hrrr = 0.333")
+    await _run_ddl("UPDATE calibration_params SET weight_gfs = 0.2 WHERE weight_gfs = 0.333")
 
     # Step 3: seed initial data
     await _seed_initial_data()
