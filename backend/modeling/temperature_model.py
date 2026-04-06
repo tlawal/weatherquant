@@ -171,6 +171,8 @@ def compute_model(
     ml_features: Optional[dict] = None,
     adaptive=None,
     latest_weather: Optional[dict] = None,
+    hrrr_high: Optional[float] = None,
+    gfs_high: Optional[float] = None,
 ) -> Optional[ModelResult]:
     """
     Fuse all forecast sources and compute temperature distribution + bucket probabilities.
@@ -217,6 +219,10 @@ def compute_model(
         calibrated["wu_daily"] = (wu_daily_high + bias_wud, w_wud)
     if wu_hourly_peak is not None:
         calibrated["wu_hourly"] = (wu_hourly_peak + bias_wuh, w_wuh)
+    if hrrr_high is not None:
+        calibrated["hrrr"] = (hrrr_high + cal.get("bias_hrrr", 0.0), cal.get("weight_hrrr", 1/3))
+    if gfs_high is not None:
+        calibrated["gfs"] = (gfs_high + cal.get("bias_gfs", 0.0), cal.get("weight_gfs", 1/3))
 
     if not calibrated:
         log.warning("model: no forecast sources available — cannot compute model")
@@ -305,6 +311,26 @@ def compute_model(
             # Blend adaptive into projected_high: weight increases with data
             n_obs = adaptive.kalman.n_observations if adaptive.kalman else 0
             adaptive_w = min(0.4, n_obs * 0.02)  # caps at 0.4 with 20+ obs
+
+            # Time-of-day cap: before peak heating, adaptive has insufficient
+            # diurnal data and tends to under-predict the day's high.
+            if hour_local < 11:
+                adaptive_w = min(adaptive_w, 0.15)
+            elif hour_local < 13:
+                adaptive_w = min(adaptive_w, 0.25)
+
+            # Consensus-divergence dampening: when adaptive disagrees with
+            # the forecast consensus by more than sigma, reduce its influence.
+            divergence = abs(adaptive_high - mu_forecast)
+            divergence_threshold = max(2.0 * unit_mult, sigma_raw)
+            if divergence > divergence_threshold:
+                dampening = max(0.1, 1.0 - (divergence - divergence_threshold) / (3.0 * divergence_threshold))
+                log.info(
+                    "model: adaptive dampened %.2f -> %.2f (divergence=%.1f°, threshold=%.1f°)",
+                    adaptive_w, adaptive_w * dampening, divergence, divergence_threshold,
+                )
+                adaptive_w *= dampening
+
             projected_high = (1.0 - adaptive_w) * projected_high + adaptive_w * adaptive_high
 
     # Weighted combination
@@ -343,6 +369,8 @@ def compute_model(
         "nws_high": nws_high,
         "wu_daily_high": wu_daily_high,
         "wu_hourly_peak": wu_hourly_peak,
+        "hrrr_high": hrrr_high,
+        "gfs_high": gfs_high,
         "daily_high_metar": daily_high_metar,
         "current_temp_f": current_temp_f,
         "mu_forecast": float(mu_forecast),

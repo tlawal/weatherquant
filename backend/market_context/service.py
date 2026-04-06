@@ -196,6 +196,8 @@ async def build_market_context_input(city: City, date_et: str) -> MarketContextI
         wu_daily = await get_latest_successful_forecast(sess, city.id, "wu_daily", date_et)
         wu_hourly = await get_latest_successful_forecast(sess, city.id, "wu_hourly", date_et)
         wu_history = await get_latest_successful_forecast(sess, city.id, "wu_history", date_et)
+        hrrr_fc = await get_latest_successful_forecast(sess, city.id, "hrrr", date_et)
+        gfs_fc = await get_latest_successful_forecast(sess, city.id, "gfs", date_et)
         calibration = await get_calibration(sess, city.id)
         recent_events = await get_recent_events_for_city(sess, city.id, before_or_on_date_et=date_et, limit=16)
         avg_peak_timing = await get_avg_peak_timing(sess, city.id, days_back=7, et_tz=city_tz)
@@ -285,6 +287,8 @@ async def build_market_context_input(city: City, date_et: str) -> MarketContextI
         primary_fc=primary_fc,
         wu_daily=wu_daily,
         wu_hourly=wu_hourly,
+        hrrr_fc=hrrr_fc,
+        gfs_fc=gfs_fc,
         adaptive_inputs=adaptive_inputs,
         target_is_today=target_is_today,
         now_utc=now_utc,
@@ -312,7 +316,8 @@ async def build_market_context_input(city: City, date_et: str) -> MarketContextI
         "wu_history_available": wu_history is not None,
         "adaptive_available": bool(adaptive_inputs),
         "station_pattern_available": bool(observation_minutes),
-        "hrrr_available": False,
+        "hrrr_available": hrrr_fc is not None,
+        "gfs_available": gfs_fc is not None,
         "nam_available": False,
         "rap_available": False,
         "ecmwf_available": False,
@@ -361,7 +366,17 @@ async def build_market_context_input(city: City, date_et: str) -> MarketContextI
             "prob_new_high": _round_float(model_inputs.get("prob_new_high"), 4),
             "best_recent_source": _best_recent_source(error_summary),
             "recent_error_summary": error_summary,
-            "missing_external_models": ["HRRR", "NAM", "RAP", "ECMWF"],
+            "hrrr_high_f": _round_float(hrrr_fc.high_f) if hrrr_fc else None,
+            "gfs_high_f": _round_float(gfs_fc.high_f) if gfs_fc else None,
+            "missing_external_models": [
+                m for m, avail in [
+                    ("HRRR", hrrr_fc is not None),
+                    ("GFS", gfs_fc is not None),
+                    ("NAM", False),
+                    ("RAP", False),
+                    ("ECMWF", False),
+                ] if not avail
+            ],
         },
         historical_context={
             "avg_peak_time_local_7d": avg_peak_timing,
@@ -465,7 +480,8 @@ def _build_prompts(context: MarketContextInput) -> tuple[str, str]:
         "  6. Final, High-Stakes Selection\n"
         "- Cite concrete numbers throughout.\n"
         "- Explain causality, not just conditions.\n"
-        "- Mention missing unsupported feeds explicitly: HRRR/NAM/RAP/ECMWF and climatology/microclimate if unavailable.\n"
+        "- If the availability dict shows any external models as unavailable, briefly note which are missing. Do not mention models that are available as if they were missing.\n"
+        "- CRITICAL CONSISTENCY: Your projected high, probability assignments, and bucket selection MUST be mutually consistent. If your top bucket is 68-69F with 72% probability, your projected high MUST fall within or near that range. Never state a projected high that conflicts with your top bucket by more than 2 degrees.\n"
         "- The final selection is authoritative. Do not change it.\n"
         "- Return `final_selection` echoing the authoritative `bucket_idx`, `label`, `confidence_pct`, and `flip_signals`.\n\n"
         "Authoritative final selection:\n"
@@ -616,6 +632,8 @@ def _summarize_sources(
     primary_fc,
     wu_daily,
     wu_hourly,
+    hrrr_fc=None,
+    gfs_fc=None,
     adaptive_inputs: dict[str, Any],
     target_is_today: bool,
     now_utc: datetime,
@@ -640,6 +658,8 @@ def _summarize_sources(
         "primary": _build_source("primary", primary_fc, 3600),
         "wu_daily": _build_source("wu_daily", wu_daily, Config.WU_STALE_TTL_SECONDS),
         "wu_hourly": _build_source("wu_hourly", wu_hourly, Config.WU_STALE_TTL_SECONDS),
+        "hrrr": _build_source("hrrr", hrrr_fc, 3600),
+        "gfs": _build_source("gfs", gfs_fc, 3600),
         "adaptive": {
             "predicted_daily_high_f": _round_float(adaptive_inputs.get("predicted_daily_high")),
             "peak_time_local": adaptive_inputs.get("composite_peak_timing"),

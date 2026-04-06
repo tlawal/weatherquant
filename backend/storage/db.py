@@ -143,6 +143,12 @@ async def init_db() -> None:
     await _run_ddl("ALTER TABLE orders ADD COLUMN signal_id INTEGER")
     await _run_ddl("ALTER TABLE orders ADD COLUMN gates_json TEXT")
 
+    # calibration_params — HRRR/GFS support
+    await _run_ddl("ALTER TABLE calibration_params ADD COLUMN bias_hrrr FLOAT DEFAULT 0.0")
+    await _run_ddl("ALTER TABLE calibration_params ADD COLUMN bias_gfs FLOAT DEFAULT 0.0")
+    await _run_ddl("ALTER TABLE calibration_params ADD COLUMN weight_hrrr FLOAT DEFAULT 0.333")
+    await _run_ddl("ALTER TABLE calibration_params ADD COLUMN weight_gfs FLOAT DEFAULT 0.333")
+
     # Step 3: seed initial data
     await _seed_initial_data()
     log.info("db: init complete")

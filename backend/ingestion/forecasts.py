@@ -177,6 +177,87 @@ async def _fetch_open_meteo_high(city: City, date_et: str) -> Optional[float]:
         return None
 
 
+# ─── Open-Meteo Multi-Model (HRRR + GFS) ────────────────────────────────────
+
+_OM_MODELS = {
+    "hrrr": "hrrr_seamless",    # NA-only, high-resolution
+    "gfs": "gfs_seamless",       # global
+}
+
+
+async def fetch_open_meteo_models_all() -> None:
+    """Fetch HRRR and GFS forecasts via Open-Meteo for all enabled cities."""
+    async with get_session() as sess:
+        cities = await get_all_cities(sess, enabled_only=True)
+
+    for city in cities:
+        if city.lat is None or city.lon is None:
+            continue
+
+        for active_date in active_dates_for_city(city):
+            for source_key, om_model in _OM_MODELS.items():
+                try:
+                    high_f = await _fetch_open_meteo_model_high(city, active_date, om_model)
+                except Exception as e:
+                    log.error("om-%s: %s date=%s failed: %s", source_key, city.city_slug, active_date, e)
+                    high_f = None
+
+                async with get_session() as sess:
+                    raw = json.dumps({"source": source_key, "model": om_model, "high_f": high_f})
+                    await insert_forecast_obs(
+                        sess,
+                        city_id=city.id,
+                        source=source_key,
+                        date_et=active_date,
+                        high_f=high_f,
+                        raw_payload_hash=hashlib.md5(raw.encode()).hexdigest(),
+                        raw_json=raw,
+                        parse_error=None if high_f is not None else "parse_failed",
+                    )
+                if high_f is not None:
+                    log.info("om-%s: %s date=%s high_f=%s", source_key, city.city_slug, active_date, high_f)
+
+    async with get_session() as sess:
+        await update_heartbeat(sess, "fetch_om_models", success=True)
+
+
+async def _fetch_open_meteo_model_high(
+    city: City, date_et: str, om_model: str
+) -> Optional[float]:
+    """Fetch a specific Open-Meteo model and return the max temperature for *date_et*."""
+    unit = getattr(city, "unit", "F") or "F"
+    temp_unit = "fahrenheit" if unit == "F" else "celsius"
+
+    url = "https://api.open-meteo.com/v1/forecast"
+    params = {
+        "latitude": city.lat,
+        "longitude": city.lon,
+        "hourly": "temperature_2m",
+        "temperature_unit": temp_unit,
+        "forecast_days": 2,
+        "timezone": "auto",
+        "models": om_model,
+    }
+
+    async with aiohttp.ClientSession(timeout=_TIMEOUT) as http:
+        async with http.get(url, params=params) as resp:
+            if resp.status != 200:
+                log.error("om-%s: HTTP %d for %s", om_model, resp.status, city.city_slug)
+                return None
+            data = await resp.json()
+
+    hourly = data.get("hourly", {})
+    times = hourly.get("time", [])
+    temps = hourly.get("temperature_2m", [])
+    if not temps or not times:
+        return None
+
+    date_temps = [t for ts, t in zip(times, temps) if ts.startswith(date_et) and t is not None]
+    if not date_temps:
+        return None
+
+    return round(max(date_temps), 1)
+
 
 async def _fetch_nws_high(city: City, active_date_str: str) -> Optional[float]:
     """Fetch NWS gridpoint forecast and return today's daytime high (°F)."""
