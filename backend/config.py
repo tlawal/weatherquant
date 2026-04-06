@@ -121,6 +121,8 @@ class Config:
             return bool(cls.MARKET_CONTEXT_LLM_API_KEY or os.environ.get("GEMINI_API_KEY"))
         if provider == "openai":
             return bool(cls.MARKET_CONTEXT_LLM_API_KEY or os.environ.get("OPENAI_API_KEY"))
+        if provider == "openrouter":
+            return bool(cls.MARKET_CONTEXT_LLM_API_KEY or os.environ.get("OPENROUTER_API_KEY"))
         return bool(cls.MARKET_CONTEXT_LLM_API_KEY)
 
     @classmethod

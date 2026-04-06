@@ -34,6 +34,7 @@ class MarketContextLLMAdapter:
                 "anthropic": Config.MARKET_CONTEXT_LLM_API_KEY or os.environ.get("ANTHROPIC_API_KEY", ""),
                 "gemini": Config.MARKET_CONTEXT_LLM_API_KEY or os.environ.get("GEMINI_API_KEY", ""),
                 "openai": Config.MARKET_CONTEXT_LLM_API_KEY or os.environ.get("OPENAI_API_KEY", ""),
+                "openrouter": Config.MARKET_CONTEXT_LLM_API_KEY or os.environ.get("OPENROUTER_API_KEY", ""),
             }.get(self.provider, Config.MARKET_CONTEXT_LLM_API_KEY)
         )
 
@@ -52,6 +53,8 @@ class MarketContextLLMAdapter:
             text = await self._call_gemini(system_prompt=system_prompt, user_prompt=user_prompt)
         elif self.provider == "openai":
             text = await self._call_openai(system_prompt=system_prompt, user_prompt=user_prompt)
+        elif self.provider == "openrouter":
+            text = await self._call_openrouter(system_prompt=system_prompt, user_prompt=user_prompt)
         else:
             raise MarketContextLLMError(f"Unsupported Market Context provider: {self.provider or 'unset'}")
 
@@ -116,6 +119,49 @@ class MarketContextLLMAdapter:
             if text:
                 return text
         raise MarketContextLLMError("OpenAI response did not contain usable text content")
+
+    async def _call_openrouter(self, *, system_prompt: str, user_prompt: str) -> str:
+        url = self.base_url or "https://openrouter.ai/api/v1/chat/completions"
+        payload = {
+            "model": self.model,
+            "temperature": 0.2,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        }
+
+        headers = {
+            "content-type": "application/json",
+            "authorization": f"Bearer {self.api_key}",
+        }
+        http_referer = os.environ.get("OPENROUTER_HTTP_REFERER", "").strip()
+        app_title = os.environ.get("OPENROUTER_APP_TITLE", "").strip()
+        if http_referer:
+            headers["http-referer"] = http_referer
+        if app_title:
+            headers["x-title"] = app_title
+
+        body = await _post_json(url, payload, headers=headers)
+        choices = body.get("choices") or []
+        if not choices:
+            raise MarketContextLLMError("OpenRouter response did not contain choices")
+        message = choices[0].get("message") or {}
+        content = message.get("content")
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, dict):
+                    text = item.get("text")
+                    if isinstance(text, str):
+                        parts.append(text)
+            text = "\n".join(parts).strip()
+            if text:
+                return text
+        raise MarketContextLLMError("OpenRouter response did not contain usable text content")
 
     async def _call_gemini(self, *, system_prompt: str, user_prompt: str) -> str:
         url = self.base_url or f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"

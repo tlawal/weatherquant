@@ -540,6 +540,15 @@ def test_market_context_llm_ready_accepts_gemini_provider_key(monkeypatch):
     assert Config.market_context_llm_ready() is True
 
 
+def test_market_context_llm_ready_accepts_openrouter_provider_key(monkeypatch):
+    monkeypatch.setattr(Config, "MARKET_CONTEXT_LLM_PROVIDER", "openrouter", raising=False)
+    monkeypatch.setattr(Config, "MARKET_CONTEXT_LLM_MODEL", "openai/gpt-4o-mini", raising=False)
+    monkeypatch.setattr(Config, "MARKET_CONTEXT_LLM_API_KEY", "", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-secret")
+
+    assert Config.market_context_llm_ready() is True
+
+
 def test_market_context_adapter_calls_gemini(monkeypatch):
     monkeypatch.setattr(Config, "MARKET_CONTEXT_LLM_PROVIDER", "gemini", raising=False)
     monkeypatch.setattr(Config, "MARKET_CONTEXT_LLM_MODEL", "gemini-2.5-flash", raising=False)
@@ -605,3 +614,72 @@ def test_market_context_adapter_calls_gemini(monkeypatch):
     assert captured["payload"]["generationConfig"]["responseMimeType"] == "application/json"
     assert captured["payload"]["systemInstruction"]["parts"][0]["text"] == "system prompt"
     assert captured["payload"]["contents"][0]["parts"][0]["text"] == "user prompt"
+
+
+def test_market_context_adapter_calls_openrouter(monkeypatch):
+    monkeypatch.setattr(Config, "MARKET_CONTEXT_LLM_PROVIDER", "openrouter", raising=False)
+    monkeypatch.setattr(Config, "MARKET_CONTEXT_LLM_MODEL", "openai/gpt-4o-mini", raising=False)
+    monkeypatch.setattr(Config, "MARKET_CONTEXT_LLM_API_KEY", "", raising=False)
+    monkeypatch.setattr(Config, "MARKET_CONTEXT_LLM_BASE_URL", "", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-secret")
+    monkeypatch.setenv("OPENROUTER_HTTP_REFERER", "https://example.com")
+    monkeypatch.setenv("OPENROUTER_APP_TITLE", "WeatherQuant")
+
+    captured = {}
+
+    async def fake_post_json(url, payload, *, headers):
+        captured["url"] = url
+        captured["payload"] = payload
+        captured["headers"] = headers
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "sections": {key: f"openrouter section for {key}" for key in SECTION_KEYS},
+                                "final_selection": {
+                                    "bucket_id": 1,
+                                    "bucket_idx": 0,
+                                    "label": "72–74°",
+                                    "low_f": 72.0,
+                                    "high_f": 74.0,
+                                    "calibrated_prob": 0.55,
+                                    "raw_model_prob": 0.53,
+                                    "market_prob": 0.44,
+                                    "true_edge": 0.04,
+                                    "confidence_pct": 58,
+                                    "rationale": "Synthetic OpenRouter rationale",
+                                    "flip_signals": ["Cloud deck fails to break by 2 PM ET"],
+                                    "life_or_death_call": "If life depended on being correct, I would select 72–74° because synthetic OpenRouter data says so.",
+                                    "most_likely_peak_time": "4:10 PM ET",
+                                    "confidence_components": {"base_prob": 28.0},
+                                },
+                            }
+                        )
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr("backend.market_context.adapter._post_json", fake_post_json)
+
+    async def run_test():
+        adapter = MarketContextLLMAdapter()
+        payload = await adapter.generate_json(
+            system_prompt="system prompt",
+            user_prompt="user prompt",
+        )
+        assert payload["final_selection"]["label"] == "72–74°"
+
+    _run(run_test())
+
+    assert captured["url"] == "https://openrouter.ai/api/v1/chat/completions"
+    assert captured["headers"]["authorization"] == "Bearer openrouter-secret"
+    assert captured["headers"]["http-referer"] == "https://example.com"
+    assert captured["headers"]["x-title"] == "WeatherQuant"
+    assert captured["payload"]["response_format"]["type"] == "json_object"
+    assert captured["payload"]["messages"][0]["role"] == "system"
+    assert captured["payload"]["messages"][0]["content"] == "system prompt"
+    assert captured["payload"]["messages"][1]["role"] == "user"
+    assert captured["payload"]["messages"][1]["content"] == "user prompt"

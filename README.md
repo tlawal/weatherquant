@@ -24,12 +24,13 @@ The system uses SQLite (`state.db`) and local logs. On Railway, you **must** mou
 - `ADMIN_TOKEN`: Bearer token for dashboard trade execution.
 - `KELLY_FRACTION`: Default 0.10 (Conservative 1/10th Kelly).
 - `MAX_POSITION_PCT`: Max bankroll % per single trade (default 0.05).
-- `MARKET_CONTEXT_LLM_PROVIDER`: Optional. Enables admin-triggered Market Context refreshes when set to `openai`, `anthropic`, or `gemini`.
+- `MARKET_CONTEXT_LLM_PROVIDER`: Optional. Enables admin-triggered Market Context refreshes when set to `openai`, `anthropic`, `gemini`, or `openrouter`.
 - `MARKET_CONTEXT_LLM_MODEL`: Optional, but required when `MARKET_CONTEXT_LLM_PROVIDER` is set. Use the exact provider model ID.
-- `MARKET_CONTEXT_LLM_API_KEY`: Optional generic API key for Market Context generation. If omitted, the app falls back to `OPENAI_API_KEY` for `openai`, `ANTHROPIC_API_KEY` for `anthropic`, or `GEMINI_API_KEY` for `gemini`.
+- `MARKET_CONTEXT_LLM_API_KEY`: Optional generic API key for Market Context generation. If omitted, the app falls back to `OPENAI_API_KEY` for `openai`, `ANTHROPIC_API_KEY` for `anthropic`, `GEMINI_API_KEY` for `gemini`, or `OPENROUTER_API_KEY` for `openrouter`.
 - `OPENAI_API_KEY`: Optional provider-specific fallback when `MARKET_CONTEXT_LLM_PROVIDER=openai`.
 - `ANTHROPIC_API_KEY`: Optional provider-specific fallback when `MARKET_CONTEXT_LLM_PROVIDER=anthropic`.
 - `GEMINI_API_KEY`: Optional provider-specific fallback when `MARKET_CONTEXT_LLM_PROVIDER=gemini`.
+- `OPENROUTER_API_KEY`: Optional provider-specific fallback when `MARKET_CONTEXT_LLM_PROVIDER=openrouter`.
 - `MARKET_CONTEXT_LLM_BASE_URL`: Optional base URL override for proxy or self-hosted provider endpoints.
 - `MARKET_CONTEXT_LLM_TIMEOUT_SECONDS`: Optional timeout for Market Context generation requests. Default `45`.
 
@@ -70,7 +71,7 @@ The Market Context card is cached and read-only by default. The manual **Refresh
 
 - `MARKET_CONTEXT_LLM_PROVIDER`
 - `MARKET_CONTEXT_LLM_MODEL`
-- An API key: either `MARKET_CONTEXT_LLM_API_KEY` or the provider-specific fallback (`OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GEMINI_API_KEY`)
+- An API key: either `MARKET_CONTEXT_LLM_API_KEY` or the provider-specific fallback (`OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` / `OPENROUTER_API_KEY`)
 
 If the UI shows:
 
@@ -100,6 +101,14 @@ Example `.env` settings for Gemini:
 MARKET_CONTEXT_LLM_PROVIDER=gemini
 MARKET_CONTEXT_LLM_MODEL=<your-gemini-model-id>
 GEMINI_API_KEY=<your-gemini-api-key>
+```
+
+Example `.env` settings for OpenRouter:
+
+```bash
+MARKET_CONTEXT_LLM_PROVIDER=openrouter
+MARKET_CONTEXT_LLM_MODEL=openai/gpt-4o-mini
+OPENROUTER_API_KEY=<your-openrouter-api-key>
 ```
 
 Notes:
