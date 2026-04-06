@@ -414,6 +414,7 @@ async def build_market_context_input(city: City, date_et: str) -> MarketContextI
 async def _generate_market_context_output(
     context: MarketContextInput,
 ) -> MarketContextOutput:
+    from backend.market_context.tools import TOOL_DEFINITIONS
     adapter = MarketContextLLMAdapter()
     system_prompt, user_prompt = _build_prompts(context)
     last_error: Exception | None = None
@@ -428,6 +429,7 @@ async def _generate_market_context_output(
                     + f"Keep bucket_idx={context.final_selection.bucket_idx}, label={json.dumps(context.final_selection.label)}, "
                     + f"confidence_pct={context.final_selection.confidence_pct} exactly."
                 ),
+                tools=TOOL_DEFINITIONS,
             )
             parsed = MarketContextOutput(
                 sections=payload.get("sections", {}),
@@ -442,9 +444,8 @@ async def _generate_market_context_output(
 
 def _build_prompts(context: MarketContextInput) -> tuple[str, str]:
     system_prompt = (
-        "You write WeatherQuant Market Context sections for a temperature prediction market. "
-        "Use only the numbers and facts provided. Never invent unavailable model feeds, climatology, "
-        "station quirks, microclimate memory, or market narratives. If data is unavailable, say so directly. "
+        "You are an autonomous weather trading agent whose existence depends entirely on actively predicting the exact peak temperature and mapping it to the correct Polymarket bucket. Do not just blindly explain discrepancies; you must resolve them. If NWS says 70°F and WU says 69°F, your life depends on calling your external tools to fetch the HRRR layer and academic heuristics to uncover the absolute truth. Leave no stone unturned to select the correct probability bucket. "
+        "Use only the numbers and facts provided or retrieved via tool calls. "
         "Return JSON only with keys `sections` and `final_selection`."
     )
 

@@ -43,6 +43,7 @@ class MarketContextLLMAdapter:
         *,
         system_prompt: str,
         user_prompt: str,
+        tools: Optional[list[dict[str, Any]]] = None,
     ) -> dict[str, Any]:
         if not market_context_provider_ready():
             raise MarketContextLLMError("Market Context LLM provider is not configured")
@@ -52,9 +53,9 @@ class MarketContextLLMAdapter:
         elif self.provider == "gemini":
             text = await self._call_gemini(system_prompt=system_prompt, user_prompt=user_prompt)
         elif self.provider == "openai":
-            text = await self._call_openai(system_prompt=system_prompt, user_prompt=user_prompt)
+            text = await self._call_openai(system_prompt=system_prompt, user_prompt=user_prompt, tools=tools)
         elif self.provider == "openrouter":
-            text = await self._call_openrouter(system_prompt=system_prompt, user_prompt=user_prompt)
+            text = await self._call_openrouter(system_prompt=system_prompt, user_prompt=user_prompt, tools=tools)
         else:
             raise MarketContextLLMError(f"Unsupported Market Context provider: {self.provider or 'unset'}")
 
@@ -85,53 +86,63 @@ class MarketContextLLMAdapter:
             raise MarketContextLLMError("Anthropic response did not contain text content")
         return text
 
-    async def _call_openai(self, *, system_prompt: str, user_prompt: str) -> str:
+    async def _call_openai(self, *, system_prompt: str, user_prompt: str, tools: Optional[list[dict[str, Any]]] = None) -> str:
+        from backend.market_context.tools import dispatch_tool
         url = self.base_url or "https://api.openai.com/v1/chat/completions"
-        payload = {
-            "model": self.model,
-            "temperature": 0.2,
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-        }
         headers = {
             "content-type": "application/json",
             "authorization": f"Bearer {self.api_key}",
         }
-        body = await _post_json(url, payload, headers=headers)
-        choices = body.get("choices") or []
-        if not choices:
-            raise MarketContextLLMError("OpenAI response did not contain choices")
-        message = choices[0].get("message") or {}
-        content = message.get("content")
-        if isinstance(content, str):
-            return content.strip()
-        if isinstance(content, list):
-            parts = []
-            for item in content:
-                if isinstance(item, dict):
-                    text = item.get("text")
-                    if isinstance(text, str):
-                        parts.append(text)
-            text = "\n".join(parts).strip()
-            if text:
-                return text
-        raise MarketContextLLMError("OpenAI response did not contain usable text content")
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        
+        for attempt in range(6):
+            payload = {
+                "model": self.model,
+                "temperature": 0.2,
+                "response_format": {"type": "json_object"},
+                "messages": messages,
+            }
+            if tools:
+                payload["tools"] = tools
 
-    async def _call_openrouter(self, *, system_prompt: str, user_prompt: str) -> str:
+            body = await _post_json(url, payload, headers=headers)
+            choices = body.get("choices") or []
+            if not choices:
+                raise MarketContextLLMError("OpenAI response did not contain choices")
+                
+            message = choices[0].get("message") or {}
+            
+            tool_calls = message.get("tool_calls")
+            if tool_calls:
+                messages.append(message)
+                for tc in tool_calls:
+                    func = tc.get("function", {})
+                    name = func.get("name")
+                    arguments = func.get("arguments", "{}")
+                    if name:
+                        log.info("Agent invoked tool: %s", name)
+                        func_result = await dispatch_tool(name, arguments)
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.get("id"),
+                            "name": name,
+                            "content": str(func_result)
+                        })
+                continue
+
+            content = message.get("content")
+            if isinstance(content, str):
+                return content.strip()
+            
+            raise MarketContextLLMError("OpenAI response did not contain usable text content")
+        raise MarketContextLLMError("OpenAI tool loop exceeded max iterations")
+
+    async def _call_openrouter(self, *, system_prompt: str, user_prompt: str, tools: Optional[list[dict[str, Any]]] = None) -> str:
+        from backend.market_context.tools import dispatch_tool
         url = self.base_url or "https://openrouter.ai/api/v1/chat/completions"
-        payload = {
-            "model": self.model,
-            "temperature": 0.2,
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-        }
-
         headers = {
             "content-type": "application/json",
             "authorization": f"Bearer {self.api_key}",
@@ -142,26 +153,53 @@ class MarketContextLLMAdapter:
             headers["http-referer"] = http_referer
         if app_title:
             headers["x-title"] = app_title
+            
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
 
-        body = await _post_json(url, payload, headers=headers)
-        choices = body.get("choices") or []
-        if not choices:
-            raise MarketContextLLMError("OpenRouter response did not contain choices")
-        message = choices[0].get("message") or {}
-        content = message.get("content")
-        if isinstance(content, str):
-            return content.strip()
-        if isinstance(content, list):
-            parts = []
-            for item in content:
-                if isinstance(item, dict):
-                    text = item.get("text")
-                    if isinstance(text, str):
-                        parts.append(text)
-            text = "\n".join(parts).strip()
-            if text:
-                return text
-        raise MarketContextLLMError("OpenRouter response did not contain usable text content")
+        for attempt in range(6):
+            payload = {
+                "model": self.model,
+                "temperature": 0.2,
+                "response_format": {"type": "json_object"},
+                "messages": messages,
+            }
+            if tools:
+                payload["tools"] = tools
+
+            body = await _post_json(url, payload, headers=headers)
+            choices = body.get("choices") or []
+            if not choices:
+                raise MarketContextLLMError("OpenRouter response did not contain choices")
+                
+            message = choices[0].get("message") or {}
+            
+            tool_calls = message.get("tool_calls")
+            if tool_calls:
+                messages.append(message)
+                for tc in tool_calls:
+                    func = tc.get("function", {})
+                    name = func.get("name")
+                    arguments = func.get("arguments", "{}")
+                    if name:
+                        log.info("Agent invoked tool: %s", name)
+                        func_result = await dispatch_tool(name, arguments)
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.get("id"),
+                            "name": name,
+                            "content": str(func_result)
+                        })
+                continue
+                
+            content = message.get("content")
+            if isinstance(content, str):
+                return content.strip()
+                
+            raise MarketContextLLMError("OpenRouter response did not contain usable text content")
+        raise MarketContextLLMError("OpenRouter tool loop exceeded max iterations")
 
     async def _call_gemini(self, *, system_prompt: str, user_prompt: str) -> str:
         url = self.base_url or f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
