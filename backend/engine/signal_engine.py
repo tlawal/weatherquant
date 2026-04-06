@@ -215,9 +215,13 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
             "bias_nws": cal.bias_nws,
             "bias_wu_daily": cal.bias_wu_daily,
             "bias_wu_hourly": cal.bias_wu_hourly,
+            "bias_hrrr": v if (v := getattr(cal, "bias_hrrr", None)) is not None else 0.0,
+            "bias_gfs": v if (v := getattr(cal, "bias_gfs", None)) is not None else 0.0,
             "weight_nws": cal.weight_nws,
             "weight_wu_daily": cal.weight_wu_daily,
             "weight_wu_hourly": cal.weight_wu_hourly,
+            "weight_hrrr": v if (v := getattr(cal, "weight_hrrr", None)) is not None else 0.5,
+            "weight_gfs": v if (v := getattr(cal, "weight_gfs", None)) is not None else 0.2,
         }
 
     # ── Adaptive prediction engine (Kalman + regression) ────────────────────

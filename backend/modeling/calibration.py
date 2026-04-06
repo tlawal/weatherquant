@@ -29,8 +29,8 @@ def get_calibration_dict(city_id: int) -> dict:
         "weight_nws": 1 / 3,
         "weight_wu_daily": 1 / 3,
         "weight_wu_hourly": 1 / 3,
-        "weight_hrrr": 1 / 3,
-        "weight_gfs": 1 / 3,
+        "weight_hrrr": 0.5,
+        "weight_gfs": 0.2,
     }
 
 
@@ -44,13 +44,13 @@ async def get_calibration_async(city_id: int) -> dict:
         "bias_nws": cal.bias_nws,
         "bias_wu_daily": cal.bias_wu_daily,
         "bias_wu_hourly": cal.bias_wu_hourly,
-        "bias_hrrr": getattr(cal, "bias_hrrr", 0.0) or 0.0,
-        "bias_gfs": getattr(cal, "bias_gfs", 0.0) or 0.0,
+        "bias_hrrr": v if (v := getattr(cal, "bias_hrrr", None)) is not None else 0.0,
+        "bias_gfs": v if (v := getattr(cal, "bias_gfs", None)) is not None else 0.0,
         "weight_nws": cal.weight_nws,
         "weight_wu_daily": cal.weight_wu_daily,
         "weight_wu_hourly": cal.weight_wu_hourly,
-        "weight_hrrr": getattr(cal, "weight_hrrr", 1/3) or 1/3,
-        "weight_gfs": getattr(cal, "weight_gfs", 1/3) or 1/3,
+        "weight_hrrr": v if (v := getattr(cal, "weight_hrrr", None)) is not None else 0.5,
+        "weight_gfs": v if (v := getattr(cal, "weight_gfs", None)) is not None else 0.2,
     }
 
 

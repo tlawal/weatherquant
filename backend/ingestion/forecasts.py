@@ -196,6 +196,10 @@ async def fetch_open_meteo_models_all() -> None:
 
         for active_date in active_dates_for_city(city):
             for source_key, om_model in _OM_MODELS.items():
+                # Skip HRRR for non-US cities (HRRR is North America only)
+                if source_key == "hrrr" and not city.is_us:
+                    continue
+
                 high_f = None
                 hourly_data = None
                 try:
