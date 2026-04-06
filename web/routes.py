@@ -245,6 +245,8 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
         wu_d = await get_latest_successful_forecast(sess, city.id, "wu_daily", target_date_et)
         wu_h = await get_latest_successful_forecast(sess, city.id, "wu_hourly", target_date_et)
         wu_history = await get_latest_successful_forecast(sess, city.id, "wu_history", target_date_et)
+        hrrr_fc = await get_latest_successful_forecast(sess, city.id, "hrrr", target_date_et)
+        gfs_fc = await get_latest_successful_forecast(sess, city.id, "gfs", target_date_et)
         
         primary_fc = None
         if city.is_us:
@@ -319,6 +321,15 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
 
     wu_history_raw = json.loads(wu_history.raw_json) if (wu_history and wu_history.raw_json) else {}
     wu_hourly_raw = json.loads(wu_h.raw_json) if (wu_h and wu_h.raw_json) else {}
+    hrrr_raw = json.loads(hrrr_fc.raw_json) if (hrrr_fc and hrrr_fc.raw_json) else {}
+
+    # Build HRRR hourly forecast data for chart overlay
+    hrrr_hourly = []
+    hrrr_hourly_data = hrrr_raw.get("hourly") or {}
+    if hrrr_hourly_data.get("times") and hrrr_hourly_data.get("temps"):
+        for t, temp in zip(hrrr_hourly_data["times"], hrrr_hourly_data["temps"]):
+            if temp is not None:
+                hrrr_hourly.append({"time": t, "temp_f": temp})
 
     reliability_bins = await get_reliability_metrics(city.id)
 
@@ -431,6 +442,24 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                             elif sp.trend_per_hour > -0.1: trend_arrow = ">"
                             elif sp.trend_per_hour > -0.5: trend_arrow = "\\"
                             else: trend_arrow = "v"
+                            # Interpolate HRRR forecast temp at this station time
+                        hrrr_fc_temp = None
+                        if hrrr_hourly:
+                            sp_hour = dt_local.hour + dt_local.minute / 60.0
+                            for i, h in enumerate(hrrr_hourly):
+                                h_dt = datetime.fromisoformat(h["time"])
+                                h_hour = h_dt.hour + h_dt.minute / 60.0
+                                if h_hour >= sp_hour:
+                                    if i > 0:
+                                        prev = hrrr_hourly[i - 1]
+                                        p_dt = datetime.fromisoformat(prev["time"])
+                                        p_hour = p_dt.hour + p_dt.minute / 60.0
+                                        frac = (sp_hour - p_hour) / (h_hour - p_hour) if h_hour != p_hour else 0.5
+                                        hrrr_fc_temp = round(prev["temp_f"] + frac * (h["temp_f"] - prev["temp_f"]), 1)
+                                    else:
+                                        hrrr_fc_temp = h["temp_f"]
+                                    break
+
                         station_predictions.append({
                             "time": dt_local.strftime("%-I:%M %p"),
                             "actual_temp": sp.actual_temp,
@@ -440,6 +469,7 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                             "trend_per_hour": sp.trend_per_hour,
                             "trend_arrow": trend_arrow,
                             "is_predicted_high": (sp.predicted_temp == adaptive.predicted_daily_high),
+                            "hrrr_forecast_temp": hrrr_fc_temp,
                         })
                     # Compute weather sigma factor for display
                     _wx_sigma_factor = None
@@ -536,6 +566,16 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                     "obs_time": wu_history_raw.get("obs_time"),
                     "collected_at": _fmt_time_et(wu_history.fetched_at if wu_history else None),
                 },
+                "hrrr": {
+                    "high_f": hrrr_fc.high_f if hrrr_fc else None,
+                    "age_s": _age(hrrr_fc.fetched_at if hrrr_fc else None),
+                    "url": f"https://open-meteo.com/en/docs?latitude={city.lat}&longitude={city.lon}&hourly=temperature_2m&models=hrrr_seamless&temperature_unit=fahrenheit&forecast_days=1" if city.lat else None,
+                },
+                "gfs": {
+                    "high_f": gfs_fc.high_f if gfs_fc else None,
+                    "age_s": _age(gfs_fc.fetched_at if gfs_fc else None),
+                    "url": f"https://open-meteo.com/en/docs?latitude={city.lat}&longitude={city.lon}&hourly=temperature_2m&models=gfs_seamless&temperature_unit=fahrenheit&forecast_days=1" if city.lat else None,
+                },
             },
             "event": event,
             "model": {
@@ -557,6 +597,7 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
             "obs_table_json": json.dumps(obs_table),
             "station_predictions": station_predictions,
             "station_predictions_json": json.dumps(station_predictions),
+            "hrrr_hourly_json": json.dumps(hrrr_hourly),
             "adaptive_info": adaptive_info,
             "market_context_snapshot": serialize_market_context_snapshot(market_context_snapshot),
             "market_context_llm_ready": Config.market_context_llm_ready(),

@@ -371,6 +371,46 @@
         </div>
       </div>
 
+      <!-- HRRR (Open-Meteo) -->
+      {% if forecasts.hrrr.high_f is not none %}
+      <div class="group relative flex justify-between items-center cursor-pointer hover:bg-white/5 p-1 -mx-1 rounded transition-colors" x-data="{ showMeta: false }">
+        <div class="flex items-center gap-1.5" @click="showMeta = !showMeta" @click.outside="showMeta = false">
+          <span style="color:var(--text-muted)">HRRR</span>
+          <button class="hover:text-cyan-400 opacity-30 group-hover:opacity-100 transition-all">ⓘ</button>
+        </div>
+        <span class="mono font-medium text-white">{{ "%.1f"|format(forecasts.hrrr.high_f) }}°{{ city.unit|default('F') }}</span>
+        <div x-show="showMeta" x-cloak
+             x-transition:enter="transition ease-out duration-100" class="absolute left-0 right-0 top-6 w-auto p-3 rounded-xl shadow-2xl z-50 border font-medium normal-case flex flex-col items-start text-left sm:right-auto sm:w-64"
+             style="background:var(--bg-panel); border-color:var(--border);">
+             <div class="font-bold mb-1 pb-1 border-b w-full" style="color:var(--cyan); border-color:var(--border)">HRRR (High-Resolution Rapid Refresh)</div>
+             <p class="opacity-80 mb-2 mt-1 italic text-[9px]">3km resolution short-range model via Open-Meteo. Highly accurate for peak temp timing within 18 hours.</p>
+             {% if forecasts.hrrr.url %}
+             <a href="{{ forecasts.hrrr.url }}" target="_blank" rel="noopener" class="text-[10px] flex items-center gap-1 hover:underline transition-colors" style="color:var(--cyan)">↗ View on Open-Meteo</a>
+             {% endif %}
+        </div>
+      </div>
+      {% endif %}
+
+      <!-- GFS (Open-Meteo) -->
+      {% if forecasts.gfs.high_f is not none %}
+      <div class="group relative flex justify-between items-center cursor-pointer hover:bg-white/5 p-1 -mx-1 rounded transition-colors" x-data="{ showMeta: false }">
+        <div class="flex items-center gap-1.5" @click="showMeta = !showMeta" @click.outside="showMeta = false">
+          <span style="color:var(--text-muted)">GFS</span>
+          <button class="hover:text-cyan-400 opacity-30 group-hover:opacity-100 transition-all">ⓘ</button>
+        </div>
+        <span class="mono font-medium text-white">{{ "%.1f"|format(forecasts.gfs.high_f) }}°{{ city.unit|default('F') }}</span>
+        <div x-show="showMeta" x-cloak
+             x-transition:enter="transition ease-out duration-100" class="absolute left-0 right-0 top-6 w-auto p-3 rounded-xl shadow-2xl z-50 border font-medium normal-case flex flex-col items-start text-left sm:right-auto sm:w-64"
+             style="background:var(--bg-panel); border-color:var(--border);">
+             <div class="font-bold mb-1 pb-1 border-b w-full" style="color:var(--cyan); border-color:var(--border)">GFS (Global Forecast System)</div>
+             <p class="opacity-80 mb-2 mt-1 italic text-[9px]">NOAA's global medium-range forecast model via Open-Meteo. 0.25° resolution, updated every 6 hours.</p>
+             {% if forecasts.gfs.url %}
+             <a href="{{ forecasts.gfs.url }}" target="_blank" rel="noopener" class="text-[10px] flex items-center gap-1 hover:underline transition-colors" style="color:var(--cyan)">↗ View on Open-Meteo</a>
+             {% endif %}
+        </div>
+      </div>
+      {% endif %}
+
     </div>
   </div>
 </div>
@@ -580,6 +620,7 @@
           <th class="px-3 py-2 text-left">Station Time</th>
           <th class="px-2 py-2 text-right">Actual</th>
           <th class="px-2 py-2 text-right">Predicted</th>
+          <th class="px-2 py-2 text-right">HRRR</th>
           <th class="px-2 py-2 text-right">Trend</th>
           <th class="px-2 py-2 text-right">Confidence</th>
         </tr>
@@ -600,6 +641,11 @@
           <td class="px-2 py-2 text-right mono">
             {% if not sp.is_past or sp.actual_temp is none %}
             <span style="color:var(--cyan)" class="{% if sp.is_predicted_high %}font-bold{% endif %}">{{ "%.1f"|format(sp.predicted_temp) }}°</span>
+            {% else %}—{% endif %}
+          </td>
+          <td class="px-2 py-2 text-right mono">
+            {% if sp.hrrr_forecast_temp is not none %}
+            <span style="color:#F97316">{{ "%.1f"|format(sp.hrrr_forecast_temp) }}°</span>
             {% else %}—{% endif %}
           </td>
           <td class="px-2 py-2 text-right mono">
@@ -1427,6 +1473,26 @@ document.addEventListener('DOMContentLoaded', function() {
         marker: { color: '#22D3EE', size: 6 },
         hovertemplate: '%{y:.1f}° predicted<br>%{x}<extra></extra>'
       });
+    }
+
+    // HRRR hourly forecast overlay (orange line)
+    const hrrrHourly = {{ hrrr_hourly_json|safe if hrrr_hourly_json else '[]' }};
+    if (hrrrHourly.length) {
+      // Filter to 6 AM+ like observations
+      const hrrrFiltered = hrrrHourly.filter(h => {
+        const d = new Date(h.time);
+        return d.getHours() >= 6;
+      });
+      if (hrrrFiltered.length) {
+        traces.push({
+          x: hrrrFiltered.map(h => h.time),
+          y: hrrrFiltered.map(h => h.temp_f),
+          type: 'scatter', mode: 'lines',
+          name: 'HRRR forecast',
+          line: { color: '#F97316', width: 2, dash: 'dot' },
+          hovertemplate: '%{y:.1f}° HRRR<br>%{x|%-I:%M %p}<extra></extra>'
+        });
+      }
     }
 
     // Horizontal line at current daily high

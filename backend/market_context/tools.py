@@ -95,11 +95,13 @@ async def fetch_hrrr_forecast(kwargs: dict[str, Any]) -> str:
     except Exception as e:
         return f"Error connecting to HRRR API: {e}"
 
-    times = data.get("hourly", {}).get("time", [])
-    temps = data.get("hourly", {}).get("temperature_2m", [])
-    
+    hourly = data.get("hourly", {})
+    times = hourly.get("time", [])
+    # Open-Meteo returns model-suffixed keys when `models` param is used
+    temps = hourly.get("temperature_2m_hrrr_seamless", hourly.get("temperature_2m", []))
+
     if not times or not temps:
-        return "No HRRR data available for this location."
+        return f"No HRRR data available for this location. Keys returned: {list(hourly.keys())}"
     
     summary_lines = []
     for t, temp in zip(times, temps):

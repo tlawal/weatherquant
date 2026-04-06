@@ -196,14 +196,18 @@ async def fetch_open_meteo_models_all() -> None:
 
         for active_date in active_dates_for_city(city):
             for source_key, om_model in _OM_MODELS.items():
+                high_f = None
+                hourly_data = None
                 try:
-                    high_f = await _fetch_open_meteo_model_high(city, active_date, om_model)
+                    high_f, hourly_data = await _fetch_open_meteo_model_high(city, active_date, om_model)
                 except Exception as e:
                     log.error("om-%s: %s date=%s failed: %s", source_key, city.city_slug, active_date, e)
-                    high_f = None
 
                 async with get_session() as sess:
-                    raw = json.dumps({"source": source_key, "model": om_model, "high_f": high_f})
+                    raw = json.dumps({
+                        "source": source_key, "model": om_model,
+                        "high_f": high_f, "hourly": hourly_data,
+                    })
                     await insert_forecast_obs(
                         sess,
                         city_id=city.id,
@@ -223,8 +227,12 @@ async def fetch_open_meteo_models_all() -> None:
 
 async def _fetch_open_meteo_model_high(
     city: City, date_et: str, om_model: str
-) -> Optional[float]:
-    """Fetch a specific Open-Meteo model and return the max temperature for *date_et*."""
+) -> tuple[Optional[float], Optional[dict]]:
+    """Fetch a specific Open-Meteo model and return (max_temp, hourly_data) for *date_et*.
+
+    Returns a tuple of (high_f, hourly_dict) where hourly_dict contains
+    time/temp arrays for the target date (used for chart overlays).
+    """
     unit = getattr(city, "unit", "F") or "F"
     temp_unit = "fahrenheit" if unit == "F" else "celsius"
 
@@ -243,20 +251,26 @@ async def _fetch_open_meteo_model_high(
         async with http.get(url, params=params) as resp:
             if resp.status != 200:
                 log.error("om-%s: HTTP %d for %s", om_model, resp.status, city.city_slug)
-                return None
+                return None, None
             data = await resp.json()
 
     hourly = data.get("hourly", {})
     times = hourly.get("time", [])
-    temps = hourly.get("temperature_2m", [])
+    # Open-Meteo returns model-suffixed keys when `models` param is used
+    temps = hourly.get(f"temperature_2m_{om_model}", hourly.get("temperature_2m", []))
     if not temps or not times:
-        return None
+        log.warning("om-%s: no hourly temps for %s (keys: %s)", om_model, city.city_slug, list(hourly.keys()))
+        return None, None
 
-    date_temps = [t for ts, t in zip(times, temps) if ts.startswith(date_et) and t is not None]
-    if not date_temps:
-        return None
+    # Filter to target date and build hourly pairs
+    date_pairs = [(ts, t) for ts, t in zip(times, temps) if ts.startswith(date_et) and t is not None]
+    if not date_pairs:
+        log.warning("om-%s: no temps for date %s in %s", om_model, date_et, city.city_slug)
+        return None, None
 
-    return round(max(date_temps), 1)
+    high_f = round(max(t for _, t in date_pairs), 1)
+    hourly_data = {"times": [ts for ts, _ in date_pairs], "temps": [round(t, 1) for _, t in date_pairs]}
+    return high_f, hourly_data
 
 
 async def _fetch_nws_high(city: City, active_date_str: str) -> Optional[float]:
