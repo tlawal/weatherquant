@@ -462,8 +462,8 @@ class CLOBClient:
 
 
 async def fetch_clob_orderbooks(clob: CLOBClient) -> None:
-    """Fetch order books for all watched buckets and persist snapshots."""
-    from backend.tz_utils import city_local_now, city_local_tomorrow
+    """Fetch order books for all watched buckets (today + tomorrow) and persist snapshots."""
+    from backend.tz_utils import active_dates_for_city
 
     async with get_session() as sess:
         cities = await get_all_cities(sess, enabled_only=True)
@@ -471,37 +471,30 @@ async def fetch_clob_orderbooks(clob: CLOBClient) -> None:
     # Collect all orderbook data first (HTTP calls, no DB)
     snapshots_to_insert = []
     for city in cities:
-        # Match the 8 PM rollover logic from fetch_gamma_all —
-        # after 8 PM local, the active market is *tomorrow's* event.
-        now_local = city_local_now(city)
-        if now_local.hour >= 20:
-            active_date = city_local_tomorrow(city)
-        else:
-            active_date = city_local_date(city)
+        for active_date in active_dates_for_city(city):
+            async with get_session() as sess:
+                event = await get_event(sess, city.id, active_date)
+                if not event or event.status != "ok":
+                    continue
+                buckets = await get_buckets_for_event(sess, event.id)
 
-        async with get_session() as sess:
-            event = await get_event(sess, city.id, active_date)
-            if not event or event.status != "ok":
-                continue
-            buckets = await get_buckets_for_event(sess, event.id)
-
-        for bucket in buckets:
-            if not bucket.yes_token_id:
-                continue
-            ob = await clob.get_bucket_orderbook(bucket.id, bucket.yes_token_id)
-            if not ob.fetched_ok:
-                continue
-            snapshots_to_insert.append({
-                "bucket_id": bucket.id,
-                "yes_bid": ob.yes_bid,
-                "yes_ask": ob.yes_ask,
-                "yes_mid": ob.yes_mid,
-                "yes_bid_depth": ob.yes_bid_depth,
-                "yes_ask_depth": ob.yes_ask_depth,
-                "spread": ob.spread,
-            })
-            # Brief pause between token fetches
-            await asyncio.sleep(0.3)
+            for bucket in buckets:
+                if not bucket.yes_token_id:
+                    continue
+                ob = await clob.get_bucket_orderbook(bucket.id, bucket.yes_token_id)
+                if not ob.fetched_ok:
+                    continue
+                snapshots_to_insert.append({
+                    "bucket_id": bucket.id,
+                    "yes_bid": ob.yes_bid,
+                    "yes_ask": ob.yes_ask,
+                    "yes_mid": ob.yes_mid,
+                    "yes_bid_depth": ob.yes_bid_depth,
+                    "yes_ask_depth": ob.yes_ask_depth,
+                    "spread": ob.spread,
+                })
+                # Brief pause between token fetches
+                await asyncio.sleep(0.3)
 
     # Batch-insert all snapshots in a single session/transaction
     async with get_session() as sess:

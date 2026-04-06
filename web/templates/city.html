@@ -37,7 +37,7 @@
       </select>
       <span class="text-[9px] mono opacity-40">{{ city_tz }}</span>
     </div>
-    {% if event and event.gamma_slug %}
+    {% if event and event.gamma_slug and event.status == 'ok' %}
     <a href="https://polymarket.com/event/{{ event.gamma_slug }}" target="_blank"
        class="inline-flex items-center justify-center text-[10px] px-3 py-1.5 rounded-full font-bold tracking-widest transition-all hover:glow-cyan border sm:w-auto"
        style="background:var(--bg-panel); border-color:var(--cyan); color:var(--cyan)">
@@ -824,7 +824,7 @@
       <div class="px-4 py-3 border-b flex items-center justify-between gap-2" style="border-color:var(--border)">
         <h2 class="font-semibold text-sm">Buckets & Edges</h2>
         <div class="flex items-center gap-2">
-          {% if event and event.gamma_slug %}
+          {% if event and event.gamma_slug and event.status == 'ok' %}
           <a href="https://polymarket.com/event/{{ event.gamma_slug }}" target="_blank"
              class="text-[10px] px-2 py-0.5 rounded hover:underline transition-colors"
              style="background:rgba(234,179,8,0.1); color:#FBBF24"
@@ -838,6 +838,7 @@
         </div>
       </div>
       <div class="overflow-x-auto">
+        {% if buckets %}
         <table class="w-full text-xs" style="min-width:32rem">
           <thead>
             <tr class="text-[10px] uppercase tracking-widest" style="color:var(--text-muted);border-bottom:1px solid var(--border)">
@@ -931,11 +932,11 @@
               </td>
               <td class="px-2 py-2.5 text-center">
                 {% if b.actionable %}
-                <button onclick="quickTrade('{{ city.city_slug }}', {{ b.bucket_idx }})"
+                <button onclick="quickTrade('{{ city.city_slug }}', {{ b.bucket_idx }}, {{ b.bucket_id }})"
                   class="px-2 py-0.5 rounded text-xs font-semibold"
                   style="background:#065F46;border:1px solid #22C55E;color:#86EFAC" title="Strong edge — trade">▶</button>
                 {% elif b.mkt_prob is not none %}
-                <button onclick="quickTrade('{{ city.city_slug }}', {{ b.bucket_idx }})"
+                <button onclick="quickTrade('{{ city.city_slug }}', {{ b.bucket_idx }}, {{ b.bucket_id }})"
                   class="px-2 py-0.5 rounded text-xs font-semibold hover:opacity-80 transition-opacity"
                   style="background:var(--bg-panel);border:1px solid var(--border);color:var(--text-muted)" title="Trade this bucket">▶</button>
                 {% endif %}
@@ -944,6 +945,11 @@
             {% endfor %}
           </tbody>
         </table>
+        {% else %}
+        <div class="px-4 py-6 text-center text-xs" style="color:var(--text-muted)">
+          No market data yet for this date — check back in a few minutes.
+        </div>
+        {% endif %}
       </div>
     </div>
 
@@ -1478,6 +1484,7 @@ function tradingPanel() {
     // State
     selectedBucket: null,
     selectedBucketIdx: null,
+    selectedBucketId: null,
     side: 'buy',
     outcome: 'yes',
     orderType: 'limit',  // 'limit' or 'market'
@@ -1539,13 +1546,14 @@ function tradingPanel() {
       return effShares * (1 - this.limitPrice);
     },
 
-    async selectBucket(bucketIdx) {
+    async selectBucket(bucketIdx, bucketId) {
       const buckets = {{ buckets|tojson }};
       const b = buckets.find(x => x.bucket_idx === bucketIdx);
       if (!b) return;
 
       this.selectedBucket = b;
       this.selectedBucketIdx = bucketIdx;
+      this.selectedBucketId = bucketId || b.bucket_id || null;
       this.tradeResult = null;
       this.shares = 0;
       this.outcome = 'yes';
@@ -1571,7 +1579,7 @@ function tradingPanel() {
 
     async fetchPosition(bucketIdx) {
       try {
-        const resp = await fetch(`/api/position/{{ city.city_slug }}/${bucketIdx}`);
+        const resp = await fetch(`/api/position/{{ city.city_slug }}/${bucketIdx}?date_et={{ today_et }}`);
         if (!resp.ok) return;
         const data = await resp.json();
         this.heldShares = data.net_qty || 0;
@@ -1585,7 +1593,7 @@ function tradingPanel() {
     async fetchOrderbook(bucketIdx) {
       this.obLoaded = false;
       try {
-        const resp = await fetch(`/api/orderbook/{{ city.city_slug }}/${bucketIdx}`);
+        const resp = await fetch(`/api/orderbook/{{ city.city_slug }}/${bucketIdx}?date_et={{ today_et }}`);
         if (!resp.ok) return;
         const data = await resp.json();
 
@@ -1616,7 +1624,7 @@ function tradingPanel() {
         const tok = getAdminToken() || promptForToken();
         if (!tok) return;
 
-        const resp = await fetch(`/trade/orders/{{ city.city_slug }}`, {
+        const resp = await fetch(`/trade/orders/{{ city.city_slug }}?date_et={{ today_et }}`, {
           headers: { 'X-Admin-Token': tok }
         });
         if (!resp.ok) return;
@@ -1706,6 +1714,7 @@ function tradingPanel() {
     closeTrade() {
       this.selectedBucket = null;
       this.selectedBucketIdx = null;
+      this.selectedBucketId = null;
       this.tradeResult = null;
     },
 
@@ -1732,6 +1741,7 @@ function tradingPanel() {
         const payload = {
           city_slug: '{{ city.city_slug }}',
           bucket_idx: this.selectedBucketIdx,
+          bucket_id: this.selectedBucketId,
           side: this.side === 'sell' ? 'sell_yes' : (this.outcome === 'yes' ? 'buy_yes' : 'buy_no'),
           qty: this.shares,
           dry_run: this.dryRun,
@@ -1766,15 +1776,15 @@ function tradingPanel() {
 }
 
 // Global: open trading panel from bucket table ▶ button
-function quickTrade(city_slug, bucket_idx) {
+function quickTrade(city_slug, bucket_idx, bucket_id) {
   const panel = document.querySelector('[x-data]');
   if (panel && panel.__x) {
-    panel.__x.$data.selectBucket(bucket_idx);
+    panel.__x.$data.selectBucket(bucket_idx, bucket_id);
   } else {
     // Alpine 3.x approach
     const el = document.getElementById('trading-panel-section');
     if (el && el._x_dataStack) {
-      el._x_dataStack[0].selectBucket(bucket_idx);
+      el._x_dataStack[0].selectBucket(bucket_idx, bucket_id);
     }
   }
 }
@@ -1784,7 +1794,10 @@ document.addEventListener('DOMContentLoaded', () => {
     const params = new URLSearchParams(window.location.search);
     const tradeIdx = params.get('trade');
     if (tradeIdx !== null) {
-        setTimeout(() => quickTrade('{{ city.city_slug }}', parseInt(tradeIdx)), 150);
+        const buckets = {{ buckets|tojson }};
+        const match = buckets.find(x => x.bucket_idx === parseInt(tradeIdx));
+        const bucketId = match ? match.bucket_id : null;
+        setTimeout(() => quickTrade('{{ city.city_slug }}', parseInt(tradeIdx), bucketId), 150);
     }
     
     // Auto-fetch global orders + lightweight polling so open orders stay
@@ -1866,7 +1879,7 @@ document.addEventListener('alpine:init', () => {
             const tok = getAdminToken();
             if (!tok) return;
             try {
-                const resp = await fetch(`/trade/orders/${citySlug}`, {
+                const resp = await fetch(`/trade/orders/${citySlug}?date_et={{ today_et }}`, {
                     headers: { 'X-Admin-Token': tok }
                 });
                 if (resp.ok) {

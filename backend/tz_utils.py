@@ -35,6 +35,15 @@ def city_local_tomorrow(city) -> str:
     return (datetime.now(tz) + timedelta(days=1)).strftime("%Y-%m-%d")
 
 
+def active_dates_for_city(city) -> list[str]:
+    """Return [today, tomorrow] in the city's local timezone.
+
+    Used by ingestion and modeling jobs so both dates are always populated.
+    Execution/trading paths use their own 8 PM rollover logic instead.
+    """
+    return [city_local_date(city), city_local_tomorrow(city)]
+
+
 def et_today() -> str:
     """Return YYYY-MM-DD in ET — for global operations (daily PnL, arming)."""
     return datetime.now(ET).strftime("%Y-%m-%d")

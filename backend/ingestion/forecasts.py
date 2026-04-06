@@ -24,7 +24,7 @@ import aiohttp
 from bs4 import BeautifulSoup
 
 from backend.config import Config
-from backend.tz_utils import city_local_date, city_local_now, city_local_tomorrow
+from backend.tz_utils import active_dates_for_city, city_local_date, city_local_now, city_local_tomorrow
 from backend.storage.db import get_session
 from backend.storage.models import City
 from backend.storage.repos import (
@@ -74,34 +74,29 @@ async def fetch_nws_all() -> None:
         if not (city.nws_office and city.nws_grid_x and city.nws_grid_y):
             continue
 
-        now_local = city_local_now(city)
-        if now_local.hour >= 20:
-            active_date = city_local_tomorrow(city)
-        else:
-            active_date = city_local_date(city)
+        for active_date in active_dates_for_city(city):
+            try:
+                high_f = await _fetch_nws_high(city, active_date)
+            except Exception as e:
+                log.error("nws: %s date=%s failed: %s", city.city_slug, active_date, e)
+                high_f = None
 
-        try:
-            high_f = await _fetch_nws_high(city, active_date)
-        except Exception as e:
-            log.error("nws: %s failed: %s", city.city_slug, e)
-            high_f = None
+            async with get_session() as sess:
+                raw = json.dumps({"source": "nws", "high_f": high_f})
+                await insert_forecast_obs(
+                    sess,
+                    city_id=city.id,
+                    source="nws",
+                    date_et=active_date,
+                    high_f=high_f,
+                    raw_payload_hash=hashlib.md5(raw.encode()).hexdigest(),
+                    raw_json=raw,
+                    parse_error=None if high_f is not None else "parse_failed",
+                )
+            log.info("nws: %s date=%s high_f=%s", city.city_slug, active_date, high_f)
 
         async with get_session() as sess:
-            raw = json.dumps({"source": "nws", "high_f": high_f})
-            await insert_forecast_obs(
-                sess,
-                city_id=city.id,
-                source="nws",
-                date_et=active_date,
-                high_f=high_f,
-                raw_payload_hash=hashlib.md5(raw.encode()).hexdigest(),
-                raw_json=raw,
-                parse_error=None if high_f is not None else "parse_failed",
-            )
-            await update_heartbeat(
-                sess, "fetch_nws", success=(high_f is not None)
-            )
-        log.info("nws: %s high_f=%s", city.city_slug, high_f)
+            await update_heartbeat(sess, "fetch_nws", success=True)
 
 
 async def fetch_open_meteo_all() -> None:
@@ -113,38 +108,33 @@ async def fetch_open_meteo_all() -> None:
         if city.is_us:
             continue
 
-        now_local = city_local_now(city)
-        if now_local.hour >= 20:
-            active_date = city_local_tomorrow(city)
-        else:
-            active_date = city_local_date(city)
+        for active_date in active_dates_for_city(city):
+            try:
+                high_f = await _fetch_open_meteo_high(city, active_date)
+            except Exception as e:
+                log.error("open-meteo: %s date=%s failed: %s", city.city_slug, active_date, e)
+                high_f = None
 
-        try:
-            high_f = await _fetch_open_meteo_high(city)
-        except Exception as e:
-            log.error("open-meteo: %s failed: %s", city.city_slug, e)
-            high_f = None
+            async with get_session() as sess:
+                raw = json.dumps({"source": "open_meteo", "high_f": high_f})
+                await insert_forecast_obs(
+                    sess,
+                    city_id=city.id,
+                    source="open_meteo",
+                    date_et=active_date,
+                    high_f=high_f,
+                    raw_payload_hash=hashlib.md5(raw.encode()).hexdigest(),
+                    raw_json=raw,
+                    parse_error=None if high_f is not None else "parse_failed",
+                )
+            log.info("open-meteo: %s date=%s high_f=%s", city.city_slug, active_date, high_f)
 
         async with get_session() as sess:
-            raw = json.dumps({"source": "open_meteo", "high_f": high_f})
-            await insert_forecast_obs(
-                sess,
-                city_id=city.id,
-                source="open_meteo",  # always "open_meteo" so web route query works
-                date_et=active_date,
-                high_f=high_f,
-                raw_payload_hash=hashlib.md5(raw.encode()).hexdigest(),
-                raw_json=raw,
-                parse_error=None if high_f is not None else "parse_failed",
-            )
-            await update_heartbeat(
-                sess, "fetch_open_meteo", success=(high_f is not None)
-            )
-        log.info("open-meteo: %s high_f=%s (date=%s)", city.city_slug, high_f, active_date)
+            await update_heartbeat(sess, "fetch_open_meteo", success=True)
 
 
-async def _fetch_open_meteo_high(city: City) -> Optional[float]:
-    """Fetch Open-Meteo hourly forecast and return today's max temperature (°C or °F)."""
+async def _fetch_open_meteo_high(city: City, date_et: str) -> Optional[float]:
+    """Fetch Open-Meteo hourly forecast and return the max temperature for *date_et*."""
     if city.lat is None or city.lon is None:
         log.warning("open-meteo: missing coords for %s", city.city_slug)
         return None
@@ -154,7 +144,8 @@ async def _fetch_open_meteo_high(city: City) -> Optional[float]:
         "latitude": city.lat,
         "longitude": city.lon,
         "hourly": "temperature_2m",
-        "forecast_days": 1,
+        "forecast_days": 2,
+        "timezone": "auto",
     }
 
     try:
@@ -166,22 +157,23 @@ async def _fetch_open_meteo_high(city: City) -> Optional[float]:
                 data = await resp.json()
 
         hourly = data.get("hourly", {})
+        times = hourly.get("time", [])
         temps = hourly.get("temperature_2m", [])
-        if not temps:
+        if not temps or not times:
             return None
 
-        # Filter for "today" based on the city's ET context or UTC? 
-        # Open-Meteo returns 24 values for 1 day usually starting from 00:00 of the requested day.
-        # User said: "Math needs to be done so that it's still from the current day at which its called and doesn't roll over".
-        # Since we are fetching 'forecast_days=1', it returns 24 hours starting from 00:00 of the current day (local time of the lat/lon).
-        
-        high_c = max(temps)
+        # Filter to hours matching the requested date
+        date_temps = [t for ts, t in zip(times, temps) if ts.startswith(date_et) and t is not None]
+        if not date_temps:
+            return None
+
+        high_c = max(date_temps)
         if city.unit == "F":
             return round(high_c * 9 / 5 + 32, 1)
         return round(high_c, 1)
 
     except Exception as e:
-        log.exception("open-meteo: failed for %s", city.city_slug)
+        log.exception("open-meteo: failed for %s date=%s", city.city_slug, date_et)
         return None
 
 
@@ -278,73 +270,73 @@ async def fetch_wu_all() -> None:
             log.debug("wu: city %s missing WU config, skipping", city.city_slug)
             continue
 
-        today_et = city_local_date(city)
+        today_local = city_local_date(city)
 
-        # Skip WU scraping for cities where WU is NOT the settlement source
-        async with get_session() as sess:
-            event = await get_event(sess, city.id, today_et)
-        if event and not event.settlement_source_verified:
-            log.debug("wu: %s settlement_source_verified=False (temporarily unverified on Polymarket), fetching forecast anyway", city.city_slug)
+        for date_et in active_dates_for_city(city):
+            is_today = (date_et == today_local)
 
-        # Rate limit: source-aware.  If ALL three WU sources have succeeded
-        # recently, use the normal 30-min cooldown.  If ANY source has never
-        # succeeded today, use a shorter retry interval so broken sources
-        # recover quickly without hammering WU.
-        async with get_session() as sess:
-            last_daily = await get_latest_successful_forecast(sess, city.id, "wu_daily", today_et)
-            last_hourly = await get_latest_successful_forecast(sess, city.id, "wu_hourly", today_et)
-            last_history = await get_latest_successful_forecast(sess, city.id, "wu_history", today_et)
-
-        all_sources = [last_daily, last_hourly, last_history]
-        all_succeeded = all(f and f.fetched_at for f in all_sources)
-
-        if all_succeeded:
-            oldest_age = max(
-                (datetime.now(timezone.utc) - (f.fetched_at.replace(tzinfo=timezone.utc) if f.fetched_at.tzinfo is None else f.fetched_at)).total_seconds()
-                for f in all_sources
-            )
-            if oldest_age < Config.WU_MIN_SCRAPE_INTERVAL_SECONDS:
-                log.debug("wu: %s all sources fresh, rate limited (oldest=%.0fs < %ds)",
-                          city.city_slug, oldest_age, Config.WU_MIN_SCRAPE_INTERVAL_SECONDS)
-                continue
-        else:
-            # At least one source missing — use shorter retry interval
-            # Gate on the most recent *attempt* (any row, including failures)
-            # to avoid hammering WU servers
-            from backend.storage.repos import get_latest_forecast as _get_latest_any
+            # Skip WU scraping for cities where WU is NOT the settlement source
             async with get_session() as sess:
-                recent_attempts = []
-                for src in ["wu_daily", "wu_hourly", "wu_history"]:
-                    rec = await _get_latest_any(sess, city.id, src, today_et)
-                    if rec and rec.fetched_at:
-                        recent_attempts.append(rec.fetched_at)
+                event = await get_event(sess, city.id, date_et)
+            if event and not event.settlement_source_verified:
+                log.debug("wu: %s date=%s settlement_source_verified=False, fetching forecast anyway", city.city_slug, date_et)
 
-            if recent_attempts:
-                newest_attempt_age = min(
-                    (datetime.now(timezone.utc) - (ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else ts)).total_seconds()
-                    for ts in recent_attempts
+            # Rate limit: source-aware per date.
+            # For non-today dates we skip wu_daily (same HTML page), so only
+            # check hourly + history sources for the cooldown.
+            async with get_session() as sess:
+                last_daily = await get_latest_successful_forecast(sess, city.id, "wu_daily", date_et) if is_today else None
+                last_hourly = await get_latest_successful_forecast(sess, city.id, "wu_hourly", date_et)
+                last_history = await get_latest_successful_forecast(sess, city.id, "wu_history", date_et)
+
+            check_sources = [last_daily, last_hourly, last_history] if is_today else [last_hourly, last_history]
+            all_succeeded = all(f and f.fetched_at for f in check_sources)
+
+            if all_succeeded:
+                oldest_age = max(
+                    (datetime.now(timezone.utc) - (f.fetched_at.replace(tzinfo=timezone.utc) if f.fetched_at.tzinfo is None else f.fetched_at)).total_seconds()
+                    for f in check_sources
                 )
-                if newest_attempt_age < Config.WU_FAILED_RETRY_INTERVAL_SECONDS:
-                    log.debug("wu: %s has failed source(s) but attempted %.0fs ago, waiting",
-                              city.city_slug, newest_attempt_age)
+                if oldest_age < Config.WU_MIN_SCRAPE_INTERVAL_SECONDS:
+                    log.debug("wu: %s date=%s all sources fresh, rate limited (oldest=%.0fs < %ds)",
+                              city.city_slug, date_et, oldest_age, Config.WU_MIN_SCRAPE_INTERVAL_SECONDS)
                     continue
+            else:
+                from backend.storage.repos import get_latest_forecast as _get_latest_any
+                source_names = ["wu_daily", "wu_hourly", "wu_history"] if is_today else ["wu_hourly", "wu_history"]
+                async with get_session() as sess:
+                    recent_attempts = []
+                    for src in source_names:
+                        rec = await _get_latest_any(sess, city.id, src, date_et)
+                        if rec and rec.fetched_at:
+                            recent_attempts.append(rec.fetched_at)
 
-            log.info("wu: %s has failed source(s) [daily=%s hourly=%s history=%s], retrying now",
-                     city.city_slug,
-                     "ok" if last_daily else "FAIL",
-                     "ok" if last_hourly else "FAIL",
-                     "ok" if last_history else "FAIL")
+                if recent_attempts:
+                    newest_attempt_age = min(
+                        (datetime.now(timezone.utc) - (ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else ts)).total_seconds()
+                        for ts in recent_attempts
+                    )
+                    if newest_attempt_age < Config.WU_FAILED_RETRY_INTERVAL_SECONDS:
+                        log.debug("wu: %s date=%s has failed source(s) but attempted %.0fs ago, waiting",
+                                  city.city_slug, date_et, newest_attempt_age)
+                        continue
 
-        try:
-            await _scrape_wu_city(city, today_et)
-        except Exception as e:
-            log.exception("wu: Unhandled exception scraping %s: %s", city.city_slug, e)
-            
+                log.info("wu: %s date=%s has failed source(s) [daily=%s hourly=%s history=%s], retrying now",
+                         city.city_slug, date_et,
+                         "ok" if last_daily else ("SKIP" if not is_today else "FAIL"),
+                         "ok" if last_hourly else "FAIL",
+                         "ok" if last_history else "FAIL")
+
+            try:
+                await _scrape_wu_city(city, date_et, skip_daily=not is_today)
+            except Exception as e:
+                log.exception("wu: Unhandled exception scraping %s date=%s: %s", city.city_slug, date_et, e)
+
         # Stagger per city to be polite to WU
         await asyncio.sleep(5)
 
 
-async def _scrape_wu_city(city: City, date_et: str) -> None:
+async def _scrape_wu_city(city: City, date_et: str, skip_daily: bool = False) -> None:
     # Fetch station profile for resolution-aware filtering
     from backend.storage.repos import get_station_profile, get_latest_forecast
     valid_minutes = None
@@ -356,18 +348,19 @@ async def _scrape_wu_city(city: City, date_et: str) -> None:
 
     # Isolate each scraper so one failure doesn't block the others
     daily_high = None
-    try:
-        daily_high = await _scrape_wu_daily(city)
-    except Exception as e:
-        log.exception("wu_daily: %s scrape exception: %s", city.city_slug, e)
+    if not skip_daily:
+        try:
+            daily_high = await _scrape_wu_daily(city)
+        except Exception as e:
+            log.exception("wu_daily: %s scrape exception: %s", city.city_slug, e)
 
     hourly_peak, peak_hour = None, None
     try:
-        hourly_peak, peak_hour = await _fetch_wu_hourly_api(city)
+        hourly_peak, peak_hour = await _fetch_wu_hourly_api(city, date_et)
     except Exception as e:
-        log.exception("wu_hourly_api: %s scrape exception: %s", city.city_slug, e)
+        log.exception("wu_hourly_api: %s date=%s scrape exception: %s", city.city_slug, date_et, e)
 
-    log.info("wu: %s fetched — daily=%.1f hourly=%.1f", city.city_slug, daily_high or 0, hourly_peak or 0)
+    log.info("wu: %s date=%s fetched — daily=%.1f hourly=%.1f", city.city_slug, date_et, daily_high or 0, hourly_peak or 0)
 
     # Smart scheduling for WU History (~35 mins after station observation)
     now_utc = datetime.now(timezone.utc)
@@ -419,45 +412,46 @@ async def _scrape_wu_city(city: City, date_et: str) -> None:
 
     # DB inserts — isolate per source so one failure doesn't block others
     async with get_session() as sess:
-        # Floor: wu_daily can't be below any already-known high for today.
-        # The WU daily page transitions to night forecast in late afternoon, causing
-        # the scraper to pick up the overnight low instead of the day's high.
-        # Use history_high + hourly_peak (already fetched above) as primary floors
-        # since they come from APIs rather than HTML scraping. METAR provides
-        # an additional floor if available.
-        try:
-            metar_high = await get_daily_high_metar(sess, city.id, date_et, city_tz=getattr(city, "tz", "America/New_York"))
-        except Exception as e:
-            log.exception("wu: %s failed get_daily_high_metar: %s", city.city_slug, e)
-            metar_high = None
+        if not skip_daily:
+            # Floor: wu_daily can't be below any already-known high for today.
+            # The WU daily page transitions to night forecast in late afternoon, causing
+            # the scraper to pick up the overnight low instead of the day's high.
+            # Use history_high + hourly_peak (already fetched above) as primary floors
+            # since they come from APIs rather than HTML scraping. METAR provides
+            # an additional floor if available.
+            try:
+                metar_high = await get_daily_high_metar(sess, city.id, date_et, city_tz=getattr(city, "tz", "America/New_York"))
+            except Exception as e:
+                log.exception("wu: %s failed get_daily_high_metar: %s", city.city_slug, e)
+                metar_high = None
 
-        floor = max(
-            (v for v in [metar_high, history_high, hourly_peak] if v is not None),
-            default=None,
-        )
-        if daily_high is not None and floor is not None and daily_high < floor:
-            log.info(
-                "wu_daily: %s scraped %.1f < floor %.1f "
-                "(metar=%.1f, history=%.1f, hourly=%.1f) — using floor",
-                city.city_slug, daily_high, floor,
-                metar_high or 0, history_high or 0, hourly_peak or 0,
+            floor = max(
+                (v for v in [metar_high, history_high, hourly_peak] if v is not None),
+                default=None,
             )
-            daily_high = floor
+            if daily_high is not None and floor is not None and daily_high < floor:
+                log.info(
+                    "wu_daily: %s scraped %.1f < floor %.1f "
+                    "(metar=%.1f, history=%.1f, hourly=%.1f) — using floor",
+                    city.city_slug, daily_high, floor,
+                    metar_high or 0, history_high or 0, hourly_peak or 0,
+                )
+                daily_high = floor
 
-        try:
-            raw = json.dumps({"high_f": daily_high, "source": "wu_daily"})
-            await insert_forecast_obs(
-                sess,
-                city_id=city.id,
-                source="wu_daily",
-                date_et=date_et,
-                high_f=daily_high,
-                raw_payload_hash=hashlib.md5(raw.encode()).hexdigest(),
-                raw_json=raw,
-                parse_error=None if daily_high is not None else "parse_failed",
-            )
-        except Exception as e:
-            log.exception("wu: %s failed to insert wu_daily: %s", city.city_slug, e)
+            try:
+                raw = json.dumps({"high_f": daily_high, "source": "wu_daily"})
+                await insert_forecast_obs(
+                    sess,
+                    city_id=city.id,
+                    source="wu_daily",
+                    date_et=date_et,
+                    high_f=daily_high,
+                    raw_payload_hash=hashlib.md5(raw.encode()).hexdigest(),
+                    raw_json=raw,
+                    parse_error=None if daily_high is not None else "parse_failed",
+                )
+            except Exception as e:
+                log.exception("wu: %s failed to insert wu_daily: %s", city.city_slug, e)
 
         try:
             raw = json.dumps({"high_f": hourly_peak, "peak_hour": peak_hour, "source": "wu_hourly"})
@@ -565,12 +559,12 @@ async def _scrape_wu_daily(city: City) -> Optional[float]:
     return None
 
 
-async def _fetch_wu_hourly_api(city: City) -> tuple[Optional[float], Optional[str]]:
+async def _fetch_wu_hourly_api(city: City, date_et: str | None = None) -> tuple[Optional[float], Optional[str]]:
     """Fetch WU hourly forecast via weather.com v1 API, returning (max_temp_f, peak_hour_et_str).
 
     Uses the same v1 API pattern as wu_history to avoid HTML-scraping accuracy issues
     (the HTML page mixes actual temp and feels-like temp columns, causing off-by-1 errors).
-    Filters to today's ET hours only so tomorrow's highs don't inflate the result.
+    Filters to *date_et* hours only so other days don't inflate the result.
     """
     country = "US"
     if not getattr(city, "is_us", True):
@@ -583,7 +577,7 @@ async def _fetch_wu_hourly_api(city: City) -> tuple[Optional[float], Optional[st
         f"?apiKey=e1f10a1e78da46f5b10a1e78da96f525&units={units}"
     )
 
-    today_et = city_local_date(city)  # YYYY-MM-DD
+    target_date = date_et or city_local_date(city)
 
     for attempt in range(3):
         try:
@@ -593,15 +587,15 @@ async def _fetch_wu_hourly_api(city: City) -> tuple[Optional[float], Optional[st
                         data = await resp.json(content_type=None)
                         forecasts = data.get("forecasts", [])
 
-                        # Filter to today's ET hours only
-                        today_forecasts = [
+                        # Filter to the requested date's hours only
+                        date_forecasts = [
                             f for f in forecasts
-                            if f.get("fcst_valid_local", "")[:10] == today_et
+                            if f.get("fcst_valid_local", "")[:10] == target_date
                             and f.get("temp") is not None
                         ]
 
-                        if today_forecasts:
-                            best = max(today_forecasts, key=lambda f: f["temp"])
+                        if date_forecasts:
+                            best = max(date_forecasts, key=lambda f: f["temp"])
                             high_f = float(best["temp"])
                             peak_hour_str = None
                             local_dt_str = best.get("fcst_valid_local", "")
@@ -612,17 +606,17 @@ async def _fetch_wu_hourly_api(city: City) -> tuple[Optional[float], Optional[st
                                 except Exception:
                                     pass
                             return high_f, peak_hour_str
-                        log.warning("wu_hourly_api: %s — no today forecasts in response", city.city_slug)
+                        log.warning("wu_hourly_api: %s date=%s — no forecasts in response", city.city_slug, target_date)
                         return None, None
                     elif resp.status == 404:
-                        log.warning("wu_hourly_api: %s — 404", city.city_slug)
+                        log.warning("wu_hourly_api: %s date=%s — 404", city.city_slug, target_date)
                         return None, None
                     else:
                         body = await resp.text()
-                        log.warning("wu_hourly_api: HTTP %d for %s — body: %.200s",
-                                    resp.status, city.city_slug, body)
+                        log.warning("wu_hourly_api: HTTP %d for %s date=%s — body: %.200s",
+                                    resp.status, city.city_slug, target_date, body)
         except Exception as e:
-            log.warning("wu_hourly_api: failed for %s (attempt %d/3): %s", city.city_slug, attempt + 1, e)
+            log.warning("wu_hourly_api: failed for %s date=%s (attempt %d/3): %s", city.city_slug, target_date, attempt + 1, e)
             if attempt < 2:
                 await asyncio.sleep(2)
 

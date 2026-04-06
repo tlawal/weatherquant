@@ -146,6 +146,11 @@ async def get_buckets_for_event(session: AsyncSession, event_id: int) -> list[Bu
     return list(result.scalars().all())
 
 
+async def get_bucket_by_id(session: AsyncSession, bucket_id: int) -> Optional[Bucket]:
+    result = await session.execute(select(Bucket).where(Bucket.id == bucket_id))
+    return result.scalar_one_or_none()
+
+
 async def upsert_bucket(
     session: AsyncSession, event_id: int, bucket_idx: int, **kwargs
 ) -> Bucket:

@@ -1190,17 +1190,17 @@ async def redeem_diagnostics(condition_id: str = None):
 
 
 @router.get("/api/position/{city_slug}/{bucket_idx}")
-async def get_bucket_position(city_slug: str, bucket_idx: int):
+async def get_bucket_position(city_slug: str, bucket_idx: int, date_et: str | None = None):
     """Get current position for a specific bucket."""
     from backend.storage.repos import get_position
     async with get_session() as sess:
         city = await _get_city_or_404(sess, city_slug)
-        from backend.tz_utils import city_local_now, city_local_tomorrow
-        now_local = city_local_now(city)
-        if now_local.hour >= 20:
-            active_date = city_local_tomorrow(city)
+        if date_et:
+            active_date = date_et
         else:
-            active_date = city_local_date(city)
+            from backend.tz_utils import city_local_now, city_local_tomorrow
+            now_local = city_local_now(city)
+            active_date = city_local_tomorrow(city) if now_local.hour >= 20 else city_local_date(city)
         event = await get_event(sess, city.id, active_date)
         if not event:
             return {"net_qty": 0, "avg_cost": 0, "side": "yes", "unrealized_pnl": 0}
@@ -1477,16 +1477,21 @@ async def get_wallet_balance():
 # ─── Live Orderbook ──────────────────────────────────────────────────────────
 
 @router.get("/api/orderbook/{city_slug}/{bucket_idx}")
-async def get_orderbook(city_slug: str, bucket_idx: int):
+async def get_orderbook(city_slug: str, bucket_idx: int, date_et: str | None = None):
     """Live orderbook + balance for the trading panel."""
     from backend.ingestion.polymarket_clob import get_clob
 
     async with get_session() as sess:
         city = await _get_city_or_404(sess, city_slug)
-        today_city = city_local_date(city)
-        event = await get_event(sess, city.id, today_city)
+        if date_et:
+            active_date = date_et
+        else:
+            from backend.tz_utils import city_local_now, city_local_tomorrow
+            now_local = city_local_now(city)
+            active_date = city_local_tomorrow(city) if now_local.hour >= 20 else city_local_date(city)
+        event = await get_event(sess, city.id, active_date)
         if not event:
-            raise HTTPException(status_code=404, detail="No event today for this city")
+            raise HTTPException(status_code=404, detail=f"No event for this city on {active_date}")
         buckets = await get_buckets_for_event(sess, event.id)
 
     bucket = next((b for b in buckets if b.bucket_idx == bucket_idx), None)
@@ -1567,6 +1572,7 @@ async def get_orderbook(city_slug: str, bucket_idx: int):
 class ManualTradeRequest(BaseModel):
     city_slug: str
     bucket_idx: int
+    bucket_id: Optional[int] = None  # canonical PK — when present, bypasses date guessing
     side: str  # "buy_yes" | "buy_no" | "sell_yes" | "sell_no"
     qty: Optional[float] = None  # None = auto-size
     limit_price: Optional[float] = None
@@ -1588,22 +1594,33 @@ async def manual_trade(
     async with get_session() as sess:
         city = await _get_city_or_404(sess, body.city_slug)
 
-        # Match the 8 PM rollover logic used by the web UI and Gamma scanner
-        now_local = city_local_now(city)
-        if now_local.hour >= 20:
-            active_date = city_local_tomorrow(city)
+        if body.bucket_id is not None:
+            # Canonical path: resolve bucket directly by PK — no date guessing
+            from backend.storage.repos import get_bucket_by_id, get_event_by_id
+            bucket = await get_bucket_by_id(sess, body.bucket_id)
+            if not bucket:
+                raise HTTPException(status_code=404, detail=f"Bucket id={body.bucket_id} not found")
+            event = await get_event_by_id(sess, bucket.event_id)
+            if not event:
+                raise HTTPException(status_code=404, detail=f"Event for bucket id={body.bucket_id} not found")
+            if event.city_id != city.id:
+                raise HTTPException(status_code=400, detail=f"Bucket id={body.bucket_id} does not belong to city {body.city_slug}")
         else:
-            active_date = city_local_date(city)
+            # Legacy path: resolve by city_slug + bucket_idx + 8 PM rollover
+            now_local = city_local_now(city)
+            if now_local.hour >= 20:
+                active_date = city_local_tomorrow(city)
+            else:
+                active_date = city_local_date(city)
 
-        event = await get_event(sess, city.id, active_date)
-        if not event:
-            raise HTTPException(status_code=404, detail=f"No event for {body.city_slug} on {active_date}")
+            event = await get_event(sess, city.id, active_date)
+            if not event:
+                raise HTTPException(status_code=404, detail=f"No event for {body.city_slug} on {active_date}")
 
-        buckets = await get_buckets_for_event(sess, event.id)
-
-    bucket = next((b for b in buckets if b.bucket_idx == body.bucket_idx), None)
-    if not bucket:
-        raise HTTPException(status_code=404, detail=f"Bucket {body.bucket_idx} not found")
+            buckets = await get_buckets_for_event(sess, event.id)
+            bucket = next((b for b in buckets if b.bucket_idx == body.bucket_idx), None)
+            if not bucket:
+                raise HTTPException(status_code=404, detail=f"Bucket {body.bucket_idx} not found")
 
     async with get_session() as sess:
         from backend.storage.repos import get_latest_signal_for_bucket, get_latest_market_snapshot
@@ -1662,7 +1679,7 @@ async def manual_trade(
 
 
 @router.get("/trade/orders/{city_slug}")
-async def get_active_orders(city_slug: str, actor: str = Depends(require_admin)):
+async def get_active_orders(city_slug: str, date_et: str | None = None, actor: str = Depends(require_admin)):
     """Get active Polymarket CLOB limit orders for the current city."""
     from backend.ingestion.polymarket_clob import get_clob
     from backend.tz_utils import city_local_now, city_local_date, city_local_tomorrow
@@ -1670,12 +1687,15 @@ async def get_active_orders(city_slug: str, actor: str = Depends(require_admin))
 
     async with get_session() as sess:
         city = await _get_city_or_404(sess, city_slug)
-        now_local = city_local_now(city)
-        active_date = city_local_tomorrow(city) if now_local.hour >= 20 else city_local_date(city)
+        if date_et:
+            active_date = date_et
+        else:
+            now_local = city_local_now(city)
+            active_date = city_local_tomorrow(city) if now_local.hour >= 20 else city_local_date(city)
         event = await get_event(sess, city.id, active_date)
         if not event:
             return []
-        
+
         buckets = await get_buckets_for_event(sess, event.id)
         if not buckets:
             return []

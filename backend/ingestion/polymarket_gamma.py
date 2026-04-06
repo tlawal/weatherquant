@@ -190,35 +190,26 @@ def _normalize_buckets(raw_buckets: list[dict]) -> list[dict]:
 
 
 async def fetch_gamma_all() -> None:
-    """Discover/refresh today's events for all enabled cities."""
-    from backend.tz_utils import city_local_date, et_today, city_local_now
+    """Discover/refresh today's and tomorrow's events for all enabled cities."""
+    from backend.tz_utils import active_dates_for_city
 
     async with get_session() as sess:
         cities = await get_all_cities(sess, enabled_only=True)
 
-    et_date = et_today()
-    city_dates = {}
-    for city in cities:
-        now_local = city_local_now(city)
-        if now_local.hour >= 20:
-            from backend.tz_utils import city_local_tomorrow
-            city_date = city_local_tomorrow(city)
-        else:
-            city_date = city_local_date(city)
-            
-        city_dates[city.city_slug] = city_date
-        if city_date != et_date:
-            log.info("gamma: %s fetch_date=%s differs from et=%s (tz=%s)",
-                     city.city_slug, city_date, et_date, getattr(city, "tz", "?"))
+    tasks = [
+        (city, d)
+        for city in cities
+        for d in active_dates_for_city(city)
+    ]
 
     results = await asyncio.gather(
-        *[_fetch_city_event(city, city_dates[city.city_slug]) for city in cities],
+        *[_fetch_city_event(city, d) for city, d in tasks],
         return_exceptions=True,
     )
 
-    for city, result in zip(cities, results):
+    for (city, d), result in zip(tasks, results):
         if isinstance(result, Exception):
-            log.error("gamma: %s error: %s", city.city_slug, result)
+            log.error("gamma: %s date=%s error: %s", city.city_slug, d, result)
 
     async with get_session() as sess:
         await update_heartbeat(sess, "fetch_gamma", success=True)

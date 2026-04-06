@@ -17,7 +17,7 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 from backend.config import Config
-from backend.tz_utils import city_local_date, city_local_now
+from backend.tz_utils import active_dates_for_city, city_local_date, city_local_now
 from backend.modeling.distribution import edge as compute_edge
 from backend.modeling.temperature_model import compute_model, ModelResult
 from backend.modeling.calibration import get_calibration_async
@@ -120,9 +120,9 @@ async def run_signal_engine() -> list[BucketSignal]:
         cities = await get_all_cities(sess, enabled_only=True)
 
     for city in cities:
-        today_local = city_local_date(city)
-        city_signals = await _compute_city_signals(city, today_local)
-        signals.extend(city_signals)
+        for d in active_dates_for_city(city):
+            city_signals = await _compute_city_signals(city, d)
+            signals.extend(city_signals)
 
     # Sort by true_edge descending
     signals.sort(key=lambda s: s.true_edge, reverse=True)
