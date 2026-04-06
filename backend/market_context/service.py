@@ -429,12 +429,11 @@ async def _generate_market_context_output(
                     + f"confidence_pct={context.final_selection.confidence_pct} exactly."
                 ),
             )
-            parsed = MarketContextOutput(**payload)
-            _validate_authoritative_selection(parsed.final_selection, context.final_selection)
-            return MarketContextOutput(
-                sections=parsed.sections,
+            parsed = MarketContextOutput(
+                sections=payload.get("sections", {}),
                 final_selection=context.final_selection,
             )
+            return parsed
         except Exception as exc:
             last_error = exc
 
@@ -455,6 +454,7 @@ def _build_prompts(context: MarketContextInput) -> tuple[str, str]:
         "- Use these exact section keys inside `sections`: "
         + ", ".join(SECTION_KEYS)
         + "\n"
+        "- Each value inside `sections` MUST be a single markdown-formatted string (a prose paragraph), NOT a nested JSON object or list.\n"
         "- The six sections must align to this structure:\n"
         "  1. Current Observations\n"
         "  2. Short-Range Model Landscape\n"
@@ -466,8 +466,7 @@ def _build_prompts(context: MarketContextInput) -> tuple[str, str]:
         "- Explain causality, not just conditions.\n"
         "- Mention missing unsupported feeds explicitly: HRRR/NAM/RAP/ECMWF and climatology/microclimate if unavailable.\n"
         "- The final selection is authoritative. Do not change it.\n"
-        "- Return `final_selection` echoing the authoritative bucket_idx, label, confidence_pct, and flip_signals.\n"
-        "- `final_selection.life_or_death_call` must begin with: `If life depended on being correct, I would select`.\n\n"
+        "- Return `final_selection` echoing the authoritative `bucket_idx`, `label`, `confidence_pct`, and `flip_signals`.\n\n"
         "Authoritative final selection:\n"
         f"{json.dumps(context.final_selection.model_dump(), indent=2)}\n\n"
         "Structured backend context:\n"
