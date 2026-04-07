@@ -82,11 +82,13 @@ async def get_reliability_metrics(city_id: int, days_back: int = 30) -> List[Rel
             )
             .where(Event.city_id == city_id)
             .where(Event.date_et < today_et)
+            .where(Event.resolved_at.isnot(None))
             .order_by(desc(Event.date_et))
             .limit(200)
         )
 
         results = (await sess.execute(query)).all()
+        log.info("calibration: city_id=%d found %d settled events with wu_history", city_id, len(results))
 
         # We also need the bucket boundaries for each event to check for "hits"
         event_ids = list(set([r[2] for r in results]))
@@ -129,6 +131,9 @@ async def get_reliability_metrics(city_id: int, days_back: int = 30) -> List[Rel
             if i == hit_idx:
                 bins[bin_idx].hits += 1
                 
+    total = sum(b.count for b in bins)
+    log.info("calibration: city_id=%d total_samples=%d bins_with_data=%d",
+             city_id, total, sum(1 for b in bins if b.count > 0))
     return bins
 
 def remap_probability(prob: float, bins: List[ReliabilityBin]) -> float:

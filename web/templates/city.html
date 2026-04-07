@@ -270,7 +270,7 @@
         <span>Distribution Model Mean</span>
       </div>
       <div class="space-y-1.5 opacity-90">
-        <p class="py-1 italic mb-2">Projected true daily high, dynamically fusing NWS, WU Daily, and WU Hourly forecasts. Note: Timing and magnitude of the peak heavily depend on afternoon cloud cover/humidity regulating solar insolation.</p>
+        <p class="py-1 italic mb-2">Projected true daily high from a weighted ensemble of 5 forecast sources (NWS, WU Daily, WU Hourly, HRRR, GFS) blended with live METAR observations via time-of-day weighting. Uncertainty (sigma) adjusts dynamically for cloud cover, humidity, wind, pressure, and precipitation. A Kalman filter + regression adaptive engine refines the projection as observations accumulate.</p>
         <div class="flex justify-between"><span style="color:var(--text-muted)">Sigma Spread</span><span class="mono">{% if model and model.sigma %}{{ "%.2f"|format(model.sigma) }}{% else %}—{% endif %}</span></div>
         <div class="flex justify-between"><span style="color:var(--text-muted)">Est. Peak Timing</span><span class="mono">{% if adaptive_info and adaptive_info.composite_peak_timing %}{{ adaptive_info.composite_peak_timing }}{% elif avg_peak_timing %}{{ avg_peak_timing }}{% else %}—{% endif %}</span></div>
         {% if adaptive_info and adaptive_info.peak_timing_source %}
@@ -778,10 +778,22 @@
 
       {% if model and model.inputs %}
       <div class="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs border-t pt-4" style="border-color:var(--border)">
-        <div class="panel rounded p-2">
-          <div style="color:var(--text-muted)">Projected High</div>
+        <div class="panel rounded p-2 relative" x-data="{ showTip: false }">
+          <div class="flex items-center gap-1">
+            <span style="color:var(--text-muted)">Projected High</span>
+            <button @click="showTip = !showTip" @click.outside="showTip = false"
+                    class="hover:text-cyan-400 opacity-50 hover:opacity-100 transition-all text-[10px]">ⓘ</button>
+          </div>
           <div class="mono font-semibold">
             {% if model.inputs.projected_high %}{{ "%.1f"|format(model.inputs.projected_high) }}°{{ city.unit|default('F') }}{% else %}—{% endif %}
+          </div>
+          <div x-show="showTip" x-cloak
+               x-transition:enter="transition ease-out duration-100"
+               x-transition:enter-start="opacity-0 scale-95"
+               x-transition:enter-end="opacity-100 scale-100"
+               class="absolute left-2 right-2 top-14 w-auto p-3 rounded-xl shadow-2xl z-50 border text-[10px] normal-case tracking-tight font-medium sm:left-auto sm:right-0 sm:w-64"
+               style="background:var(--bg-card); border-color:var(--border);">
+            <div class="opacity-80 py-1 italic">Best estimate of today's final daily high. Blends forecast consensus with observed temperatures, weighted by time of day. After 5 PM, capped near the observed high since meaningful rises are unlikely after sunset.</div>
           </div>
         </div>
         <div class="panel rounded p-2 relative" x-data="{ showMeta: false }">
@@ -804,7 +816,7 @@
               METAR Observation Weight
             </div>
             <div class="space-y-1.5">
-              <div class="opacity-80 py-1 italic mb-2">Dynamic blend between forecast sources (NWS, WU) and live METAR observations. Early AM: forecasts dominate (~0%). By evening: METAR dominates (~80%).</div>
+              <div class="opacity-80 py-1 italic mb-2">Dynamic blend between forecast sources (NWS, WU, HRRR, GFS) and live METAR observations. Early AM: forecasts dominate (~0%). By evening: METAR dominates (~80%). Also controls how much forecast spread vs. observation certainty determines sigma.</div>
               <div class="flex justify-between"><span style="color:var(--text-muted)">Current Hour (ET)</span><span class="mono">{{ now_hour_et }}:00</span></div>
               <div class="flex justify-between"><span style="color:var(--text-muted)">Weight</span><span class="mono">{{ "%.0f"|format((model.inputs.w_metar|default(0)) * 100) }}%</span></div>
               <div class="mt-2 pt-2 border-t opacity-70" style="border-color:var(--border)">
@@ -813,9 +825,21 @@
             </div>
           </div>
         </div>
-        <div class="panel rounded p-2">
-          <div style="color:var(--text-muted)">Forecast Spread</div>
+        <div class="panel rounded p-2 relative" x-data="{ showTip: false }">
+          <div class="flex items-center gap-1">
+            <span style="color:var(--text-muted)">Forecast Spread</span>
+            <button @click="showTip = !showTip" @click.outside="showTip = false"
+                    class="hover:text-cyan-400 opacity-50 hover:opacity-100 transition-all text-[10px]">ⓘ</button>
+          </div>
           <div class="mono font-semibold">{{ "%.1f"|format(model.inputs.spread|default(0)) }}°{{ city.unit|default('F') }}</div>
+          <div x-show="showTip" x-cloak
+               x-transition:enter="transition ease-out duration-100"
+               x-transition:enter-start="opacity-0 scale-95"
+               x-transition:enter-end="opacity-100 scale-100"
+               class="absolute left-2 right-2 top-14 w-auto p-3 rounded-xl shadow-2xl z-50 border text-[10px] normal-case tracking-tight font-medium sm:left-auto sm:right-0 sm:w-64"
+               style="background:var(--bg-card); border-color:var(--border);">
+            <div class="opacity-80 py-1 italic">Range between the highest and lowest forecast source. A small spread means sources agree; a large spread increases model uncertainty (sigma).</div>
+          </div>
         </div>
       </div>
       {% endif %}
