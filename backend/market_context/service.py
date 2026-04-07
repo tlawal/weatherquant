@@ -459,31 +459,67 @@ async def _generate_market_context_output(
 
 def _build_prompts(context: MarketContextInput) -> tuple[str, str]:
     system_prompt = (
-        "You are an autonomous weather trading agent whose existence depends entirely on actively predicting the exact peak temperature and mapping it to the correct Polymarket bucket. Do not just blindly explain discrepancies; you must resolve them. If NWS says 70°F and WU says 69°F, your life depends on calling your external tools to fetch the HRRR layer and academic heuristics to uncover the absolute truth. Leave no stone unturned to select the correct probability bucket. "
-        "Use only the numbers and facts provided or retrieved via tool calls. "
-        "Return JSON only with keys `sections` and `final_selection`."
+        "You are a quantitative weather-derivatives analyst producing a concise, evidence-dense Market Context report "
+        "for a Polymarket temperature-bucket prediction. Your output drives real capital allocation.\n\n"
+        "Operating principles:\n"
+        "1. Every claim requires a specific number from the provided context or a tool-call result. No unsourced assertions.\n"
+        "2. When model forecasts disagree, diagnose WHY (synoptic regime, initialization time, known bias) and resolve using calibration_biases_f and recent_error_summary.\n"
+        "3. Apply bias corrections explicitly: state the raw forecast AND the bias-adjusted value for each source.\n"
+        "4. Quantify uncertainty via sigma_f, forecast_spread_f, and confidence_components. Never hedge without an attached number.\n"
+        "5. The final_selection is pre-computed and authoritative. Build the analytical narrative justifying it; do not override it.\n"
+        "6. Be terse. Each section: 2-4 sentences max. Total output must fit 1400 tokens.\n"
+        "7. Return ONLY valid JSON with keys `sections` (6 string values) and `final_selection` (echo authoritative values exactly)."
+    )
+
+    avail = context.availability
+    unavailable = [
+        k.replace("_available", "").upper()
+        for k, v in avail.items()
+        if k.endswith("_available") and not v
+    ]
+    availability_note = (
+        f"Unavailable sources: {', '.join(unavailable)}. Do not reference these as if present."
+        if unavailable else "All configured data sources are available."
     )
 
     user_prompt = (
-        "Generate a concise but evidence-dense Market Context using the provided backend context.\n\n"
-        "Hard requirements:\n"
-        "- Use these exact section keys inside `sections`: "
+        f"Market Context report: {context.city_display} on {context.date_et}. Return JSON only.\n\n"
+        "STRUCTURE: `sections` must contain exactly these keys: "
         + ", ".join(SECTION_KEYS)
         + "\n"
-        "- Each value inside `sections` MUST be a single markdown-formatted string (a prose paragraph), NOT a nested JSON object or list.\n"
-        "- The six sections must align to this structure:\n"
-        "  1. Current Observations\n"
-        "  2. Short-Range Model Landscape\n"
-        "  3. Historical & Climatology Perspective\n"
-        "  4. Market Pricing Analysis\n"
-        "  5. Diagnostic Reasoning\n"
-        "  6. Final, High-Stakes Selection\n"
-        "- Cite concrete numbers throughout.\n"
-        "- Explain causality, not just conditions.\n"
-        "- If the availability dict shows any external models as unavailable, briefly note which are missing. Do not mention models that are available as if they were missing.\n"
-        "- CRITICAL CONSISTENCY: Your projected high, probability assignments, and bucket selection MUST be mutually consistent. If your top bucket is 68-69F with 72% probability, your projected high MUST fall within or near that range. Never state a projected high that conflicts with your top bucket by more than 2 degrees.\n"
-        "- The final selection is authoritative. Do not change it.\n"
-        "- Return `final_selection` echoing the authoritative `bucket_idx`, `label`, `confidence_pct`, and `flip_signals`.\n\n"
+        "Each value: a single markdown prose string (2-4 dense sentences). No nested JSON objects or lists.\n\n"
+        "SECTION REQUIREMENTS -- cite the named fields explicitly:\n\n"
+        "1. current_observations -- State current_temp_f, observed_high_f, resolution_high_f. "
+        "Report dewpoint_spread_f and its implication for remaining heating potential. "
+        "Cite temp_change_1h_f, warming_acceleration_f_per_hr_delta, and cloud_trend to characterize the temperature trajectory (accelerating, decelerating, or stalling). "
+        "Flag if metar_age_s > 1200.\n\n"
+        "2. short_range_model_landscape -- Report mu_f +/- sigma_f as distribution center/width. "
+        "State forecast_spread_f across sources. "
+        "Compare hrrr_high_f vs gfs_high_f; diagnose >1F disagreements using known model biases. "
+        "Apply calibration_biases_f to each source to produce bias-adjusted forecasts. "
+        "Name best_recent_source and its MAE from recent_error_summary. Note missing_external_models.\n\n"
+        "3. historical_climatology_perspective -- Report avg_high_7d_f, avg_high_prev_7d_f, trend_delta_f. "
+        "Compare projected_high_f to the 7-day realized average. "
+        "If last_settled_errors_f exist, state which source was most accurate yesterday. "
+        "Quantify calibration_biases_f for NWS, WU daily, WU hourly.\n\n"
+        "4. market_pricing_analysis -- State model_consensus_bucket vs market_consensus_bucket. "
+        "If they diverge, explain true_edge on the selected bucket. Report consensus_spread_pts. "
+        "Identify top overpriced_buckets and underpriced_buckets by true_edge magnitude. "
+        "State selected bucket calibrated_prob vs market_prob.\n\n"
+        "5. diagnostic_reasoning -- Build a causal chain: "
+        "(a) peak_already_passed? If yes, anchor on remaining_rise_f and projected_high_f. "
+        "(b) kalman_trend_per_hr + regression_r2: is the intraday trend reliable? "
+        "(c) pressure_tendency_inhg_3h + wind_shift_deg_3h: synoptic shift? "
+        "(d) cloud_trend + resolution_mismatch_f: observational red flags? "
+        "Synthesize a single verdict: projected high robust or vulnerable, and why.\n\n"
+        "6. final_high_stakes_selection -- Restate authoritative bucket label and confidence_pct. "
+        "Decompose confidence via confidence_components (top 2 boosters, top 2 penalties by magnitude). "
+        "State flip_signals verbatim. Declare peak_time and life_or_death_call.\n\n"
+        "CONSISTENCY RULES:\n"
+        "- Stated projected high must fall within +/-1F of the selected bucket range [low_f, high_f].\n"
+        "- Probability figures must match context to 1 decimal place. Do not alter calibrated_prob, market_prob, or true_edge.\n"
+        "- final_selection fields bucket_id, bucket_idx, label, confidence_pct: echo EXACTLY as provided.\n\n"
+        f"AVAILABILITY: {availability_note}\n\n"
         "Authoritative final selection:\n"
         f"{json.dumps(context.final_selection.model_dump(), indent=2)}\n\n"
         "Structured backend context:\n"
