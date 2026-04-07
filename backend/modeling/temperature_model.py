@@ -289,15 +289,6 @@ def compute_model(
             current_projected = current_temp_f + remaining_rise
             projected_high = max(projected_high, current_projected)
 
-    # After 5 PM ET with declining temps, cap projected_high —
-    # no meaningful temperature rises expected after sunset.
-    if hour_local >= 17 and daily_high_metar is not None:
-        projected_ceiling = max(
-            daily_high_metar,
-            (current_temp_f or daily_high_metar) + 1.0,
-        )
-        projected_high = min(projected_high, projected_ceiling)
-
     # ── Adaptive prediction integration ──────────────────────────────────────
     # Use Kalman + regression predicted high as an additional projected_high
     # candidate, weighted by the adaptive engine's confidence.
@@ -312,12 +303,19 @@ def compute_model(
             n_obs = adaptive.kalman.n_observations if adaptive.kalman else 0
             adaptive_w = min(0.4, n_obs * 0.02)  # caps at 0.4 with 20+ obs
 
-            # Time-of-day cap: before peak heating, adaptive has insufficient
-            # diurnal data and tends to under-predict the day's high.
+            # Time-of-day caps: adaptive influence varies through the day.
+            # Before peak: insufficient diurnal data, tends to under-predict.
+            # After peak: high is increasingly locked in, minimal influence needed.
             if hour_local < 11:
                 adaptive_w = min(adaptive_w, 0.15)
             elif hour_local < 13:
                 adaptive_w = min(adaptive_w, 0.25)
+            elif hour_local >= 19:
+                adaptive_w = min(adaptive_w, 0.05)  # high is locked
+            elif hour_local >= 17:
+                adaptive_w = min(adaptive_w, 0.10)  # approaching lock-in
+            elif hour_local >= 15:
+                adaptive_w = min(adaptive_w, 0.25)  # peak region
 
             # Consensus-divergence dampening: when adaptive disagrees with
             # the forecast consensus by more than sigma, reduce its influence.
@@ -333,12 +331,24 @@ def compute_model(
 
             projected_high = (1.0 - adaptive_w) * projected_high + adaptive_w * adaptive_high
 
+    # After 5 PM with declining temps, hard-cap projected_high.
+    # This is a physical constraint (no meaningful rises after sunset)
+    # and must be applied AFTER adaptive blending to prevent re-inflation.
+    if hour_local >= 17 and daily_high_metar is not None:
+        projected_ceiling = max(
+            daily_high_metar,
+            (current_temp_f or daily_high_metar) + 1.0,
+        )
+        projected_high = min(projected_high, projected_ceiling)
+
     # Weighted combination
     mu_final = (1.0 - w_metar) * mu_forecast + w_metar * projected_high
 
-    # When heavily relying on METAR, widen sigma slightly to reflect
-    # that a single ground observation is noisy
-    sigma_final = sigma_raw * (1.0 + 0.2 * w_metar)
+    # As METAR observations accumulate through the day (w_metar rises),
+    # forecast spread becomes less relevant because ground truth dominates.
+    # Blend from full forecast sigma toward a tight observation-based sigma.
+    observation_sigma = max(1.0, remaining_rise + 0.5) * unit_mult
+    sigma_final = (1.0 - w_metar) * sigma_raw + w_metar * observation_sigma
 
     # Apply adaptive sigma adjustment (tightens when trend data is rich)
     if adaptive is not None:
