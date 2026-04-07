@@ -180,7 +180,7 @@ async def _fetch_open_meteo_high(city: City, date_et: str) -> Optional[float]:
 # ─── Open-Meteo Multi-Model (HRRR + GFS) ────────────────────────────────────
 
 _OM_MODELS = {
-    "hrrr": "hrrr_seamless",    # NA-only, high-resolution
+    "hrrr": "gfs_hrrr",          # GFS+HRRR blend, NA high-resolution
     "gfs": "gfs_seamless",       # global
 }
 
@@ -254,7 +254,8 @@ async def _fetch_open_meteo_model_high(
     async with aiohttp.ClientSession(timeout=_TIMEOUT) as http:
         async with http.get(url, params=params) as resp:
             if resp.status != 200:
-                log.error("om-%s: HTTP %d for %s", om_model, resp.status, city.city_slug)
+                body = await resp.text()
+                log.error("om-%s: HTTP %d for %s — %s", om_model, resp.status, city.city_slug, body[:200])
                 return None, None
             data = await resp.json()
 

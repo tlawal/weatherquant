@@ -569,7 +569,7 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                 "hrrr": {
                     "high_f": hrrr_fc.high_f if hrrr_fc else None,
                     "age_s": _age(hrrr_fc.fetched_at if hrrr_fc else None),
-                    "url": f"https://open-meteo.com/en/docs?latitude={city.lat}&longitude={city.lon}&hourly=temperature_2m&models=hrrr_seamless&temperature_unit=fahrenheit&forecast_days=1" if city.lat else None,
+                    "url": f"https://open-meteo.com/en/docs?latitude={city.lat}&longitude={city.lon}&hourly=temperature_2m&models=gfs_hrrr&temperature_unit=fahrenheit&forecast_days=1" if city.lat else None,
                 },
                 "gfs": {
                     "high_f": gfs_fc.high_f if gfs_fc else None,

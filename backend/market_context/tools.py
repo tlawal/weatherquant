@@ -20,7 +20,7 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "fetch_hrrr_forecast",
-            "description": "Fetches the high-resolution rapid refresh (HRRR) hourly temperature forecast for a direct geographic coordinate. This is extremely predictive for short-range exact temperatures. Use this to determine plateauing temperatures or break ties between other models.",
+            "description": "Fetches the GFS+HRRR blended hourly temperature forecast via Open-Meteo for a US city. Combines GFS reliability with HRRR's rapid hourly updates. Extremely predictive for short-range exact temperatures. Use this to determine plateauing temperatures or break ties between other models.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -84,7 +84,7 @@ async def fetch_hrrr_forecast(kwargs: dict[str, Any]) -> str:
     if not lat or not lon:
         return f"Error: Coordinates not found for '{city_slug}'."
 
-    url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&hourly=temperature_2m&temperature_unit=fahrenheit&forecast_days=1&models=hrrr_seamless"
+    url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&hourly=temperature_2m&temperature_unit=fahrenheit&forecast_days=1&models=gfs_hrrr"
     
     try:
         async with aiohttp.ClientSession() as session:
@@ -98,7 +98,7 @@ async def fetch_hrrr_forecast(kwargs: dict[str, Any]) -> str:
     hourly = data.get("hourly", {})
     times = hourly.get("time", [])
     # Open-Meteo returns model-suffixed keys when `models` param is used
-    temps = hourly.get("temperature_2m_hrrr_seamless", hourly.get("temperature_2m", []))
+    temps = hourly.get("temperature_2m_gfs_hrrr", hourly.get("temperature_2m", []))
 
     if not times or not temps:
         return f"No HRRR data available for this location. Keys returned: {list(hourly.keys())}"
