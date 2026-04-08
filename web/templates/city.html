@@ -293,6 +293,18 @@
         <span style="color:var(--cyan)">Obs. High: {{ "%.1f"|format(obs_high_f) }}°</span>
       {% else %}No observed high yet{% endif %}
     </div>
+    {% if model and model.inputs %}
+    <div class="text-[11px] mt-2 flex flex-wrap gap-x-3 gap-y-1" style="color:var(--text-muted)">
+      <span>P(UP): {% if model.inputs.get('prob_hotter_bucket') is not none %}{{ "%.1f"|format(model.inputs.get('prob_hotter_bucket') * 100) }}%{% else %}—{% endif %}</span>
+      <span>Raw Up: {% if model.inputs.get('prob_new_high_raw') is not none %}{{ "%.1f"|format(model.inputs.get('prob_new_high_raw') * 100) }}%{% else %}—{% endif %}</span>
+      {% if model.inputs.get('observed_bucket_upper_f') is not none %}
+      <span>Next Hotter: {{ "%.1f"|format(model.inputs.get('observed_bucket_upper_f')) }}°{{ city.unit|default('F') }}</span>
+      {% endif %}
+      {% if model.inputs.get('lock_regime') %}
+      <span class="font-semibold" style="color:var(--cyan)">Late-Day Lock</span>
+      {% endif %}
+    </div>
+    {% endif %}
   </div>
 
   <!-- Forecast Sources Summary -->

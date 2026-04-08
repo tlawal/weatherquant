@@ -72,6 +72,8 @@ async def dashboard(request: Request):
 
         reason = json.loads(sig.reason_json) if sig.reason_json else {}
         gate_failures = json.loads(sig.gate_failures_json) if sig.gate_failures_json else []
+        if reason.get("city_state") == "resolved":
+            continue
 
         slug = city_row.city_slug if city_row else ""
         signal_rows.append({
@@ -90,7 +92,12 @@ async def dashboard(request: Request):
             "ask_depth": reason.get("ask_depth"),
             "actionable": sig.true_edge >= 0.10 and not gate_failures,
             "gate_failures": gate_failures,
-            "prob_new_high": reason.get("prob_new_high", 1.0),
+            "prob_new_high": reason.get("prob_hotter_bucket", reason.get("prob_new_high", 1.0)),
+            "prob_hotter_bucket": reason.get("prob_hotter_bucket", reason.get("prob_new_high", 1.0)),
+            "prob_new_high_raw": reason.get("prob_new_high_raw"),
+            "lock_regime": reason.get("lock_regime", False),
+            "observed_bucket_idx": reason.get("observed_bucket_idx"),
+            "observed_bucket_upper_f": reason.get("observed_bucket_upper_f"),
             "city_state": reason.get("city_state", "early"),
             "resolution_high": reason.get("resolution_high"),
             "raw_high": reason.get("raw_high"),
@@ -264,9 +271,12 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
         async with get_session() as sess:
             buckets = await get_buckets_for_event(sess, event.id)
             model = await get_latest_model_snapshot(sess, event.id)
+            model_inputs = json.loads(model.inputs_json) if model and model.inputs_json else {}
 
             for bucket in buckets:
                 sig = await get_latest_signal_for_bucket(sess, bucket.id)
+                if model and sig and sig.computed_at < model.computed_at:
+                    sig = None
                 mkt = await get_latest_market_snapshot(sess, bucket.id)
 
                 probs = json.loads(model.probs_json) if model and model.probs_json else []
@@ -657,6 +667,8 @@ async def htmx_signals_table(request: Request):
 
         reason = json.loads(sig.reason_json) if sig.reason_json else {}
         gate_failures = json.loads(sig.gate_failures_json) if sig.gate_failures_json else []
+        if reason.get("city_state") == "resolved":
+            continue
 
         slug = c.city_slug if c else ""
         rows.append({
@@ -674,7 +686,12 @@ async def htmx_signals_table(request: Request):
             "ask_depth": reason.get("ask_depth"),
             "actionable": sig.true_edge >= 0.10 and not gate_failures,
             "gate_failures": gate_failures,
-            "prob_new_high": reason.get("prob_new_high", 1.0),
+            "prob_new_high": reason.get("prob_hotter_bucket", reason.get("prob_new_high", 1.0)),
+            "prob_hotter_bucket": reason.get("prob_hotter_bucket", reason.get("prob_new_high", 1.0)),
+            "prob_new_high_raw": reason.get("prob_new_high_raw"),
+            "lock_regime": reason.get("lock_regime", False),
+            "observed_bucket_idx": reason.get("observed_bucket_idx"),
+            "observed_bucket_upper_f": reason.get("observed_bucket_upper_f"),
             "city_state": reason.get("city_state", "early"),
             "resolution_high": reason.get("resolution_high"),
             "raw_high": reason.get("raw_high"),

@@ -23,6 +23,12 @@ from zoneinfo import ZoneInfo
 from scipy.stats import norm as _norm
 
 from backend.modeling.distribution import bucket_probabilities, conditional_bucket_probabilities
+from backend.modeling.settlement import (
+    bucket_upper_bound,
+    canonical_bucket_ranges,
+    find_bucket_idx_for_value,
+    hotter_bucket_floor,
+)
 from backend.modeling.residual_tracker import predict_remaining_rise, is_ml_model_loaded
 
 log = logging.getLogger(__name__)
@@ -67,6 +73,11 @@ class ModelResult:
     remaining_rise: float
     forecast_quality: str
     prob_new_high: float = 1.0
+    prob_hotter_bucket: float = 1.0
+    prob_new_high_raw: float = 1.0
+    lock_regime: bool = False
+    observed_bucket_idx: Optional[int] = None
+    observed_bucket_upper_f: Optional[float] = None
     inputs: dict = field(default_factory=dict)
 
 
@@ -156,6 +167,103 @@ def weather_adjusted_sigma(
     return sigma_raw * max(0.5, min(1.5, factor))
 
 
+def _clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+def _sum_hotter_bucket_probabilities(probs: list[float], observed_bucket_idx: Optional[int]) -> float:
+    if observed_bucket_idx is None:
+        return 1.0 if probs else 0.0
+    return float(sum(probs[observed_bucket_idx + 1:]))
+
+
+def _reallocate_hotter_tail(
+    probs: list[float],
+    observed_bucket_idx: int,
+    hotter_prob: float,
+) -> list[float]:
+    adjusted = [0.0 for _ in probs]
+    adjusted[observed_bucket_idx] = max(0.0, 1.0 - hotter_prob)
+    tail = probs[observed_bucket_idx + 1:]
+    tail_sum = sum(tail)
+    if hotter_prob > 0 and tail_sum > 0:
+        for idx, prob in enumerate(tail, start=observed_bucket_idx + 1):
+            adjusted[idx] = hotter_prob * prob / tail_sum
+    return adjusted
+
+
+def _late_day_lock_active(
+    *,
+    observed_high: Optional[float],
+    current_temp_f: Optional[float],
+    remaining_rise: float,
+    adaptive,
+    hour_local: int,
+    unit_mult: float,
+) -> bool:
+    if observed_high is None or adaptive is None or not adaptive.peak_already_passed:
+        return False
+    if current_temp_f is None or remaining_rise > 0.25 * unit_mult:
+        return False
+    if current_temp_f > observed_high - (0.5 * unit_mult):
+        return False
+    trend_per_hr = adaptive.kalman.temp_trend_per_min * 60.0 if adaptive.kalman else None
+    return hour_local >= 18 or trend_per_hr is None or trend_per_hr <= 0.25
+
+
+def _compute_lock_probs(
+    *,
+    canonical_buckets: list[tuple[Optional[float], Optional[float]]],
+    observed_high: float,
+    observed_bucket_idx: int,
+    current_temp_f: Optional[float],
+    adaptive,
+    existing_probs: list[float],
+    existing_hotter_prob: float,
+    unit_mult: float,
+) -> tuple[list[float], float, float, float, float]:
+    trend_per_hr = adaptive.kalman.temp_trend_per_min * 60.0 if adaptive and adaptive.kalman else 0.0
+    future_predictions = []
+    if adaptive is not None:
+        future_predictions = [
+            pred for pred in (adaptive.station_predictions or [])
+            if not pred.is_past and pred.minutes_ahead > 0
+        ]
+
+    if future_predictions:
+        hottest_future = max(future_predictions, key=lambda pred: pred.predicted_temp)
+        hottest_prediction = float(hottest_future.predicted_temp)
+        hottest_uncertainty = float(hottest_future.uncertainty or (0.25 * unit_mult))
+        lock_sigma = _clamp(hottest_uncertainty, 0.15 * unit_mult, 0.50 * unit_mult)
+
+        deficit_from_high = observed_high - hottest_prediction
+        if trend_per_hr <= 0.0 and deficit_from_high >= 1.5 * unit_mult:
+            lock_sigma = min(lock_sigma, 0.15 * unit_mult)
+        elif trend_per_hr <= 0.0 and deficit_from_high >= 0.5 * unit_mult:
+            lock_sigma = min(lock_sigma, 0.25 * unit_mult)
+
+        lock_mu = max(observed_high, hottest_prediction)
+        lock_probs = conditional_bucket_probabilities(
+            lock_mu,
+            lock_sigma,
+            canonical_buckets,
+            floor=observed_high,
+        )
+        return lock_probs, _sum_hotter_bucket_probabilities(lock_probs, observed_bucket_idx), lock_mu, lock_sigma, max(observed_high, hottest_prediction)
+
+    deficit_from_high = (observed_high - current_temp_f) if current_temp_f is not None else 0.0
+    if trend_per_hr <= 0.0 and deficit_from_high >= 1.5 * unit_mult:
+        cap = min(existing_hotter_prob, 0.02)
+    elif trend_per_hr <= 0.25 and deficit_from_high >= 0.5 * unit_mult:
+        cap = min(existing_hotter_prob, 0.05)
+    else:
+        cap = min(existing_hotter_prob, 0.10)
+
+    fallback_sigma = 0.15 * unit_mult if deficit_from_high >= 1.5 * unit_mult and trend_per_hr <= 0.0 else 0.25 * unit_mult
+    lock_probs = _reallocate_hotter_tail(existing_probs, observed_bucket_idx, cap)
+    return lock_probs, cap, observed_high, fallback_sigma, observed_high
+
+
 def compute_model(
     nws_high: Optional[float],
     wu_daily_high: Optional[float],
@@ -234,6 +342,7 @@ def compute_model(
 
     # Scale factor for Celsius
     unit_mult = 5.0 / 9.0 if unit == "C" else 1.0
+    canonical_buckets = canonical_bucket_ranges(buckets)
 
     # Uncertainty from disagreement
     vals = [v for v, _ in calibrated.values()]
@@ -357,23 +466,53 @@ def compute_model(
     sigma_final = max(1.0 * unit_mult, sigma_final)
 
     # ── Compute bucket probabilities ───────────────────────────────────────────
-    if not buckets:
+    if not canonical_buckets:
         log.warning("model: no buckets to compute probabilities for")
         probs = []
     elif observed_high is not None:
-        # Daily high can only go up — zero out buckets already surpassed
         probs = conditional_bucket_probabilities(
-            mu_final, sigma_final, buckets, floor=observed_high
+            mu_final, sigma_final, canonical_buckets, floor=observed_high
         )
     else:
-        probs = bucket_probabilities(mu_final, sigma_final, buckets)
+        probs = bucket_probabilities(mu_final, sigma_final, canonical_buckets)
 
-    # ── Prob new high ────────────────────────────────────────────────────────────
-    # P(final daily high > current observed max) using the model distribution.
-    if daily_high_metar is not None and sigma_final > 0:
-        prob_new_high = float(1.0 - _norm.cdf(daily_high_metar, mu_final, sigma_final))
+    observed_bucket_idx = find_bucket_idx_for_value(canonical_buckets, observed_high)
+    observed_bucket_upper_f = bucket_upper_bound(canonical_buckets, observed_bucket_idx)
+
+    if observed_high is not None and sigma_final > 0:
+        prob_new_high_raw = float(1.0 - _norm.cdf(observed_high, mu_final, sigma_final))
     else:
-        prob_new_high = 1.0  # no observation yet — high hasn't been established
+        prob_new_high_raw = 1.0
+
+    if observed_high is not None and observed_bucket_idx is not None:
+        prob_hotter_bucket = _sum_hotter_bucket_probabilities(probs, observed_bucket_idx)
+    else:
+        prob_hotter_bucket = prob_new_high_raw
+
+    lock_regime = _late_day_lock_active(
+        observed_high=observed_high,
+        current_temp_f=current_temp_f,
+        remaining_rise=remaining_rise,
+        adaptive=adaptive,
+        hour_local=hour_local,
+        unit_mult=unit_mult,
+    )
+
+    if lock_regime and observed_high is not None and observed_bucket_idx is not None:
+        lock_probs, prob_hotter_bucket, lock_mu, lock_sigma, lock_projected_high = _compute_lock_probs(
+            canonical_buckets=canonical_buckets,
+            observed_high=observed_high,
+            observed_bucket_idx=observed_bucket_idx,
+            current_temp_f=current_temp_f,
+            adaptive=adaptive,
+            existing_probs=probs,
+            existing_hotter_prob=prob_hotter_bucket,
+            unit_mult=unit_mult,
+        )
+        probs = lock_probs
+        mu_final = float(lock_mu)
+        sigma_final = float(lock_sigma)
+        projected_high = float(lock_projected_high)
 
     inputs = {
         "nws_high": nws_high,
@@ -392,8 +531,14 @@ def compute_model(
         "sigma_raw": float(sigma_raw),
         "sources_used": list(calibrated.keys()),
         "forecast_quality": forecast_quality,
-        "prob_new_high": round(prob_new_high, 4),
+        "prob_new_high": round(prob_hotter_bucket, 4),
+        "prob_hotter_bucket": round(prob_hotter_bucket, 4),
+        "prob_new_high_raw": round(prob_new_high_raw, 4),
+        "lock_regime": lock_regime,
         "observed_high": observed_high,
+        "observed_bucket_idx": observed_bucket_idx,
+        "observed_bucket_upper_f": observed_bucket_upper_f,
+        "next_hotter_bucket_floor_f": hotter_bucket_floor(canonical_buckets, observed_bucket_idx),
     }
 
     # Adaptive engine audit data
@@ -421,6 +566,11 @@ def compute_model(
         w_metar=float(w_metar),
         remaining_rise=remaining_rise,
         forecast_quality=forecast_quality,
-        prob_new_high=prob_new_high,
+        prob_new_high=prob_hotter_bucket,
+        prob_hotter_bucket=prob_hotter_bucket,
+        prob_new_high_raw=prob_new_high_raw,
+        lock_regime=lock_regime,
+        observed_bucket_idx=observed_bucket_idx,
+        observed_bucket_upper_f=observed_bucket_upper_f,
         inputs=inputs,
     )

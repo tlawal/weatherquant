@@ -14,6 +14,7 @@ from typing import Optional, List, Dict
 from sqlalchemy import select, desc, func
 from backend.storage.db import get_session
 from backend.storage.models import ModelSnapshot, Event, ForecastObs, Bucket
+from backend.modeling.settlement import canonical_bucket_ranges, find_bucket_idx_for_value
 
 log = logging.getLogger(__name__)
 
@@ -112,14 +113,9 @@ async def get_reliability_metrics(city_id: int, days_back: int = 30) -> List[Rel
             continue
         rh: float = float(rh_val)
         
-        # Determine which bucket the outcome landed in
-        hit_idx = -1
-        for i, b in enumerate(buckets):
-            low = b.low_f if b.low_f is not None else -float('inf')
-            high = b.high_f if b.high_f is not None else float('inf')
-            if low <= rh < high:
-                hit_idx = i
-                break
+        canonical = canonical_bucket_ranges([(b.low_f, b.high_f) for b in buckets])
+        hit = find_bucket_idx_for_value(canonical, rh)
+        hit_idx = hit if hit is not None else -1
         
         if hit_idx == -1:
             continue

@@ -91,8 +91,9 @@
   </td>
 
   <!-- Prob New High -->
-  <td class="px-3 py-3 text-right mono text-xs">
-    {% set pnh = row.prob_new_high * 100 %}
+  <td class="px-3 py-3 text-right mono text-xs"
+      title="{% if row.prob_new_high_raw is not none %}Raw continuous upside: {{ '%.1f'|format(row.prob_new_high_raw * 100) }}%{% endif %}{% if row.lock_regime %} | Late-day lock active{% endif %}">
+    {% set pnh = row.prob_hotter_bucket * 100 if row.prob_hotter_bucket is not none else row.prob_new_high * 100 %}
     {% if pnh > 30 %}
       <span class="text-green-400">{{ "%.0f"|format(pnh) }}%</span>
     {% elif pnh > 10 %}

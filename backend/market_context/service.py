@@ -23,6 +23,7 @@ from backend.market_context.types import (
     SECTION_KEYS,
 )
 from backend.modeling.calibration_engine import get_reliability_metrics, remap_probability
+from backend.modeling.settlement import bucket_upper_bound, canonical_bucket_ranges, hotter_bucket_floor
 from backend.storage.db import get_session
 from backend.storage.models import City, MarketContextSnapshot
 from backend.storage.repos import (
@@ -171,6 +172,7 @@ async def build_market_context_input(city: City, date_et: str) -> MarketContextI
         buckets = await get_buckets_for_event(sess, event.id)
         if not buckets:
             raise MarketContextBuildError(f"No buckets found for {city.city_slug} on {date_et}")
+        canonical_ranges = canonical_bucket_ranges([(bucket.low_f, bucket.high_f) for bucket in buckets])
 
         model = await get_latest_model_snapshot(sess, event.id)
         if model is None:
@@ -235,6 +237,8 @@ async def build_market_context_input(city: City, date_et: str) -> MarketContextI
                     "label": bucket.label or _bucket_label_from_bounds(bucket.low_f, bucket.high_f),
                     "low_f": bucket.low_f,
                     "high_f": bucket.high_f,
+                    "settlement_upper_f": bucket_upper_bound(canonical_ranges, bucket.bucket_idx),
+                    "next_hotter_floor_f": hotter_bucket_floor(canonical_ranges, bucket.bucket_idx),
                     "raw_model_prob": raw_model_prob,
                     "calibrated_prob": calibrated_prob,
                     "market_prob": market_prob,
@@ -850,11 +854,11 @@ def _build_flip_signals(
 ) -> list[str]:
     triggers: list[str] = []
     low_f = selected.get("low_f")
-    high_f = selected.get("high_f")
+    settlement_upper_f = selected.get("settlement_upper_f")
 
-    if high_f is not None:
+    if settlement_upper_f is not None:
         triggers.append(
-            f"If the next official reading reaches {float(high_f):.1f}°F or higher, the hotter neighboring bucket takes control."
+            f"If the next official reading reaches {float(settlement_upper_f):.1f}°F or higher, the hotter neighboring bucket takes control."
         )
     if low_f is not None:
         triggers.append(

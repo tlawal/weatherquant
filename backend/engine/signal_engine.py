@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 from backend.config import Config
 from backend.tz_utils import active_dates_for_city, city_local_date, city_local_now
 from backend.modeling.distribution import edge as compute_edge
+from backend.modeling.settlement import bucket_upper_bound, canonical_bucket_ranges
 from backend.modeling.temperature_model import compute_model, ModelResult
 from backend.modeling.calibration import get_calibration_async
 from backend.modeling.calibration_engine import get_reliability_metrics, remap_probability
@@ -74,8 +75,13 @@ class BucketSignal:
     gate_failures: list[str] = field(default_factory=list)
     actionable: bool = False
     prob_new_high: float = 1.0
+    prob_hotter_bucket: float = 1.0
+    prob_new_high_raw: float = 1.0
+    lock_regime: bool = False
     city_state: str = "early"
     resolution_mismatch: Optional[float] = None
+    observed_bucket_idx: Optional[int] = None
+    observed_bucket_upper_f: Optional[float] = None
 
 
 def classify_city_state(prob_new_high: float) -> str:
@@ -184,6 +190,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
 
     # Build bucket boundary list
     bucket_ranges = [(b.low_f, b.high_f) for b in buckets]
+    canonical_ranges = canonical_bucket_ranges(bucket_ranges)
 
     # Resolve ground truth: prefer WU history (settlement source),
     # then resolution-filtered METAR, then raw METAR
@@ -237,9 +244,9 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         except Exception:
             pass
 
+    obs_dicts = []
     if valid_minutes and todays_obs_rows:
         # Convert MetarObs rows to dicts for the adaptive engine
-        obs_dicts = []
         for row in todays_obs_rows:
             d = {
                 "observed_at": row.observed_at,
@@ -351,12 +358,9 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         log.warning("signal: %s — model returned None (insufficient data)", city.city_slug)
         return []
 
-    prob_new_high = model.prob_new_high
-    city_state = classify_city_state(prob_new_high)
-
-    if city_state == "resolved":
-        log.info("signal: %s — resolved (prob_new_high=%.3f), skipping", city.city_slug, prob_new_high)
-        return []
+    prob_hotter_bucket = model.prob_hotter_bucket
+    city_state = classify_city_state(prob_hotter_bucket)
+    model.inputs["city_state"] = city_state
 
     # Use a single session for all DB writes (model snapshot + per-bucket reads/inserts)
     signals: list[BucketSignal] = []
@@ -372,6 +376,13 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
             forecast_quality=model.forecast_quality,
         )
 
+        if city_state == "resolved":
+            log.info(
+                "signal: %s — resolved (prob_hotter_bucket=%.3f), writing non-actionable signals",
+                city.city_slug,
+                prob_hotter_bucket,
+            )
+
         # Compute signal per bucket
         for i, bucket in enumerate(buckets):
             if i >= len(model.probs):
@@ -381,8 +392,9 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
 
             # If METAR high already exceeds this bucket's ceiling, probability is 0
             # (the final daily high can only go up, never down)
-            if ground_truth_high is not None and bucket.high_f is not None:
-                if ground_truth_high >= bucket.high_f:
+            bucket_ceiling = bucket_upper_bound(canonical_ranges, i)
+            if ground_truth_high is not None and bucket_ceiling is not None:
+                if ground_truth_high >= bucket_ceiling:
                     model_prob = 0.0
 
             # Get latest market snapshot (reuse session)
@@ -411,9 +423,14 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
                     spread=None,
                     yes_ask_depth=0.0,
                     gate_failures=["no_market_data"],
-                    prob_new_high=prob_new_high,
+                    prob_new_high=prob_hotter_bucket,
+                    prob_hotter_bucket=prob_hotter_bucket,
+                    prob_new_high_raw=model.prob_new_high_raw,
+                    lock_regime=model.lock_regime,
                     city_state=city_state,
                     resolution_mismatch=resolution_mismatch,
+                    observed_bucket_idx=model.observed_bucket_idx,
+                    observed_bucket_upper_f=model.observed_bucket_upper_f,
                 )
                 signals.append(sig)
                 continue
@@ -443,6 +460,11 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
                 "spread": spread,
                 "ask_depth": ask_depth,
                 "city_state": city_state,
+                "prob_hotter_bucket": round(model.prob_hotter_bucket, 4),
+                "prob_new_high_raw": round(model.prob_new_high_raw, 4),
+                "lock_regime": model.lock_regime,
+                "observed_bucket_idx": model.observed_bucket_idx,
+                "observed_bucket_upper_f": model.observed_bucket_upper_f,
                 "resolution_high": resolution_high,
                 "raw_high": daily_high,
                 "observation_minutes": valid_minutes,
@@ -454,6 +476,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
                 and 0.02 <= mkt_prob <= 0.98  # avoid extreme markets
                 and ask_depth >= Config.MIN_LIQUIDITY_SHARES
                 and event.forecast_quality == "ok"
+                and city_state != "resolved"
             )
 
             sig = BucketSignal(
@@ -478,9 +501,14 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
                 yes_ask_depth=ask_depth,
                 reason=reason,
                 actionable=actionable,
-                prob_new_high=prob_new_high,
+                prob_new_high=prob_hotter_bucket,
+                prob_hotter_bucket=prob_hotter_bucket,
+                prob_new_high_raw=model.prob_new_high_raw,
+                lock_regime=model.lock_regime,
                 city_state=city_state,
                 resolution_mismatch=resolution_mismatch,
+                observed_bucket_idx=model.observed_bucket_idx,
+                observed_bucket_upper_f=model.observed_bucket_upper_f,
             )
             signals.append(sig)
 
@@ -498,4 +526,3 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
             )
 
     return signals
-
