@@ -15,9 +15,13 @@ SECTION_ORDER: list[tuple[str, str]] = [
     ("market_pricing_analysis", "4. Market Pricing Analysis:"),
     ("diagnostic_reasoning", "5. Diagnostic Reasoning:"),
     ("final_high_stakes_selection", "6. Final, High-Stakes Selection:"),
+    ("independent_assessment", "7. Independent Assessment:"),
 ]
 SECTION_KEYS = [key for key, _ in SECTION_ORDER]
 SECTION_LABELS = {key: label for key, label in SECTION_ORDER}
+
+# Sections that are allowed but not required (for backward compat with older snapshots)
+OPTIONAL_SECTION_KEYS = {"independent_assessment"}
 
 
 class MarketContextSelection(BaseModel):
@@ -67,7 +71,8 @@ class MarketContextOutput(BaseModel):
     @field_validator("sections")
     @classmethod
     def _validate_sections(cls, value: dict[str, str]) -> dict[str, str]:
-        missing = [key for key in SECTION_KEYS if not value.get(key)]
+        required = [key for key in SECTION_KEYS if key not in OPTIONAL_SECTION_KEYS]
+        missing = [key for key in required if not value.get(key)]
         if missing:
             raise ValueError(f"Missing required Market Context sections: {', '.join(missing)}")
         extra = [key for key in value.keys() if key not in SECTION_KEYS]
@@ -77,7 +82,8 @@ class MarketContextOutput(BaseModel):
         cleaned: dict[str, str] = {}
         for key in SECTION_KEYS:
             text = (value.get(key) or "").strip()
-            if not text:
+            if text:
+                cleaned[key] = text
+            elif key not in OPTIONAL_SECTION_KEYS:
                 raise ValueError(f"Section {key} must not be blank")
-            cleaned[key] = text
         return cleaned

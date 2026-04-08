@@ -68,7 +68,7 @@ class MarketContextLLMAdapter:
         url = self.base_url or "https://api.anthropic.com/v1/messages"
         payload = {
             "model": self.model,
-            "max_tokens": 1400,
+            "max_tokens": 2000,
             "temperature": 0.2,
             "system": system_prompt,
             "messages": [{"role": "user", "content": user_prompt}],
