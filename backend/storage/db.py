@@ -152,6 +152,12 @@ async def init_db() -> None:
     await _run_ddl("UPDATE calibration_params SET weight_hrrr = 0.5 WHERE weight_hrrr = 0.333")
     await _run_ddl("UPDATE calibration_params SET weight_gfs = 0.2 WHERE weight_gfs = 0.333")
 
+    # calibration_params — GFS → NBM rename
+    await _run_ddl("ALTER TABLE calibration_params ADD COLUMN bias_nbm FLOAT DEFAULT 0.0")
+    await _run_ddl("ALTER TABLE calibration_params ADD COLUMN weight_nbm FLOAT DEFAULT 0.2")
+    await _run_ddl("UPDATE calibration_params SET bias_nbm = bias_gfs WHERE bias_nbm = 0.0 AND bias_gfs != 0.0")
+    await _run_ddl("UPDATE calibration_params SET weight_nbm = weight_gfs WHERE weight_nbm = 0.2 AND weight_gfs != 0.2")
+
     # Step 3: seed initial data
     await _seed_initial_data()
     log.info("db: init complete")

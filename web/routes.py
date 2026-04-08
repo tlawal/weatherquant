@@ -246,7 +246,7 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
         wu_h = await get_latest_successful_forecast(sess, city.id, "wu_hourly", target_date_et)
         wu_history = await get_latest_successful_forecast(sess, city.id, "wu_history", target_date_et)
         hrrr_fc = await get_latest_successful_forecast(sess, city.id, "hrrr", target_date_et)
-        gfs_fc = await get_latest_successful_forecast(sess, city.id, "gfs", target_date_et)
+        nbm_fc = await get_latest_successful_forecast(sess, city.id, "nbm", target_date_et)
         
         primary_fc = None
         if city.is_us:
@@ -524,6 +524,7 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
             "station_confidence": station_profile.confidence if station_profile else None,
             "station_frequency": station_profile.observation_frequency if station_profile else None,
             "resolution_source_url": event.resolution_source_url if event else None,
+            "nws_timeseries_url": f"https://www.weather.gov/wrh/timeseries?site={city.metar_station.lower()}" if city.metar_station else None,
             "resolution_station_id": event.resolution_station_id if event else None,
             "settlement_source_verified": event.settlement_source_verified if event else None,
             "metar": {
@@ -571,10 +572,10 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                     "age_s": _age(hrrr_fc.fetched_at if hrrr_fc else None),
                     "url": f"https://open-meteo.com/en/docs?latitude={city.lat}&longitude={city.lon}&hourly=temperature_2m&models=gfs_hrrr&temperature_unit=fahrenheit&forecast_days=1" if city.lat else None,
                 },
-                "gfs": {
-                    "high_f": gfs_fc.high_f if gfs_fc else None,
-                    "age_s": _age(gfs_fc.fetched_at if gfs_fc else None),
-                    "url": f"https://open-meteo.com/en/docs?latitude={city.lat}&longitude={city.lon}&hourly=temperature_2m&models=gfs_seamless&temperature_unit=fahrenheit&forecast_days=1" if city.lat else None,
+                "nbm": {
+                    "high_f": nbm_fc.high_f if nbm_fc else None,
+                    "age_s": _age(nbm_fc.fetched_at if nbm_fc else None),
+                    "url": f"https://open-meteo.com/en/docs?latitude={city.lat}&longitude={city.lon}&hourly=temperature_2m&models=ncep_nbm_conus&temperature_unit=fahrenheit&forecast_days=1" if city.lat else None,
                 },
             },
             "event": event,

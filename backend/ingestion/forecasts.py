@@ -181,7 +181,7 @@ async def _fetch_open_meteo_high(city: City, date_et: str) -> Optional[float]:
 
 _OM_MODELS = {
     "hrrr": "gfs_hrrr",          # GFS+HRRR blend, NA high-resolution
-    "gfs": "gfs_seamless",       # global
+    "nbm": "ncep_nbm_conus",    # NCEP National Blend of Models, US CONUS
 }
 
 

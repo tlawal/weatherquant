@@ -197,7 +197,7 @@ async def build_market_context_input(city: City, date_et: str) -> MarketContextI
         wu_hourly = await get_latest_successful_forecast(sess, city.id, "wu_hourly", date_et)
         wu_history = await get_latest_successful_forecast(sess, city.id, "wu_history", date_et)
         hrrr_fc = await get_latest_successful_forecast(sess, city.id, "hrrr", date_et)
-        gfs_fc = await get_latest_successful_forecast(sess, city.id, "gfs", date_et)
+        nbm_fc = await get_latest_successful_forecast(sess, city.id, "nbm", date_et)
         calibration = await get_calibration(sess, city.id)
         recent_events = await get_recent_events_for_city(sess, city.id, before_or_on_date_et=date_et, limit=16)
         avg_peak_timing = await get_avg_peak_timing(sess, city.id, days_back=7, et_tz=city_tz)
@@ -288,7 +288,7 @@ async def build_market_context_input(city: City, date_et: str) -> MarketContextI
         wu_daily=wu_daily,
         wu_hourly=wu_hourly,
         hrrr_fc=hrrr_fc,
-        gfs_fc=gfs_fc,
+        nbm_fc=nbm_fc,
         adaptive_inputs=adaptive_inputs,
         target_is_today=target_is_today,
         now_utc=now_utc,
@@ -317,7 +317,7 @@ async def build_market_context_input(city: City, date_et: str) -> MarketContextI
         "adaptive_available": bool(adaptive_inputs),
         "station_pattern_available": bool(observation_minutes),
         "hrrr_available": hrrr_fc is not None,
-        "gfs_available": gfs_fc is not None,
+        "nbm_available": nbm_fc is not None,
         "nam_available": False,
         "rap_available": False,
         "ecmwf_available": False,
@@ -367,11 +367,11 @@ async def build_market_context_input(city: City, date_et: str) -> MarketContextI
             "best_recent_source": _best_recent_source(error_summary),
             "recent_error_summary": error_summary,
             "hrrr_high_f": _round_float(hrrr_fc.high_f) if hrrr_fc else None,
-            "gfs_high_f": _round_float(gfs_fc.high_f) if gfs_fc else None,
+            "nbm_high_f": _round_float(nbm_fc.high_f) if nbm_fc else None,
             "missing_external_models": [
                 m for m, avail in [
                     ("HRRR", hrrr_fc is not None),
-                    ("GFS", gfs_fc is not None),
+                    ("NBM", nbm_fc is not None),
                     ("NAM", False),
                     ("RAP", False),
                     ("ECMWF", False),
@@ -495,7 +495,7 @@ def _build_prompts(context: MarketContextInput) -> tuple[str, str]:
         "Flag if metar_age_s > 1200.\n\n"
         "2. short_range_model_landscape -- Report mu_f +/- sigma_f as distribution center/width. "
         "State forecast_spread_f across sources. "
-        "Compare hrrr_high_f vs gfs_high_f; diagnose >1F disagreements using known model biases. "
+        "Compare hrrr_high_f vs nbm_high_f; diagnose >1F disagreements using known model biases. "
         "Apply calibration_biases_f to each source to produce bias-adjusted forecasts. "
         "Name best_recent_source and its MAE from recent_error_summary. Note missing_external_models.\n\n"
         "3. historical_climatology_perspective -- Report avg_high_7d_f, avg_high_prev_7d_f, trend_delta_f. "
@@ -669,7 +669,7 @@ def _summarize_sources(
     wu_daily,
     wu_hourly,
     hrrr_fc=None,
-    gfs_fc=None,
+    nbm_fc=None,
     adaptive_inputs: dict[str, Any],
     target_is_today: bool,
     now_utc: datetime,
@@ -695,7 +695,7 @@ def _summarize_sources(
         "wu_daily": _build_source("wu_daily", wu_daily, Config.WU_STALE_TTL_SECONDS),
         "wu_hourly": _build_source("wu_hourly", wu_hourly, Config.WU_STALE_TTL_SECONDS),
         "hrrr": _build_source("hrrr", hrrr_fc, 3600),
-        "gfs": _build_source("gfs", gfs_fc, 3600),
+        "nbm": _build_source("nbm", nbm_fc, 3600),
         "adaptive": {
             "predicted_daily_high_f": _round_float(adaptive_inputs.get("predicted_daily_high")),
             "peak_time_local": adaptive_inputs.get("composite_peak_timing"),

@@ -1577,7 +1577,6 @@ class ManualTradeRequest(BaseModel):
     qty: Optional[float] = None  # None = auto-size
     limit_price: Optional[float] = None
     order_type: str = "limit"  # "limit" | "market"
-    dry_run: bool = False
 
 
 @router.post("/trade")
@@ -1668,7 +1667,6 @@ async def manual_trade(
         signal,
         bankroll=bankroll,
         actor=actor,
-        dry_run=body.dry_run,
         manual=True,
         qty_override=body.qty,
         order_type=body.order_type,

@@ -68,7 +68,6 @@ async def execute_signal(
     signal: BucketSignal,
     bankroll: float,
     actor: str = "auto_trader",
-    dry_run: bool = False,
     manual: bool = False,
     qty_override: float | None = None,
     order_type: str = "limit",
@@ -242,7 +241,6 @@ async def execute_signal(
         limit_price,
         cost,
         signal.true_edge,
-        "[DRY-RUN]" if dry_run else "",
     )
 
     # ── Look up YES token ID for this bucket ──────────────────────────────────
@@ -333,15 +331,11 @@ async def execute_signal(
             side="sell_yes" if side == "SELL" else "buy_yes",
             qty=shares,
             limit_price=limit_price,
-            status="pending" if not dry_run else "dry_run",
+            status="pending",
             gates_json=json.dumps({"passed": True, "failures": []}),
         )
 
     result["order_id"] = order.id
-
-    if dry_run:
-        result["status"] = "dry_run"
-        return result
 
     # ── Place CLOB order ──────────────────────────────────────────────────────
     clob = get_clob()

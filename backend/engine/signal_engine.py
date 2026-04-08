@@ -152,7 +152,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         wu_hourly_obs = await get_latest_forecast(sess, city.id, "wu_hourly", today_et)
         wu_history_obs = await get_latest_forecast(sess, city.id, "wu_history", today_et)
         hrrr_obs = await get_latest_forecast(sess, city.id, "hrrr", today_et)
-        gfs_obs = await get_latest_forecast(sess, city.id, "gfs", today_et)
+        nbm_obs = await get_latest_forecast(sess, city.id, "nbm", today_et)
 
         cal = await get_calibration(sess, city.id)
         # NEW: Reliability metrics for probability remapping
@@ -216,12 +216,12 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
             "bias_wu_daily": cal.bias_wu_daily,
             "bias_wu_hourly": cal.bias_wu_hourly,
             "bias_hrrr": v if (v := getattr(cal, "bias_hrrr", None)) is not None else 0.0,
-            "bias_gfs": v if (v := getattr(cal, "bias_gfs", None)) is not None else 0.0,
+            "bias_nbm": v if (v := getattr(cal, "bias_nbm", None)) is not None else 0.0,
             "weight_nws": cal.weight_nws,
             "weight_wu_daily": cal.weight_wu_daily,
             "weight_wu_hourly": cal.weight_wu_hourly,
             "weight_hrrr": v if (v := getattr(cal, "weight_hrrr", None)) is not None else 0.5,
-            "weight_gfs": v if (v := getattr(cal, "weight_gfs", None)) is not None else 0.2,
+            "weight_nbm": v if (v := getattr(cal, "weight_nbm", None)) is not None else 0.2,
         }
 
     # ── Adaptive prediction engine (Kalman + regression) ────────────────────
@@ -329,7 +329,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         wu_daily_high=wu_daily_obs.high_f if wu_daily_obs else None,
         wu_hourly_peak=wu_hourly_obs.high_f if wu_hourly_obs else None,
         hrrr_high=hrrr_obs.high_f if hrrr_obs else None,
-        gfs_high=gfs_obs.high_f if gfs_obs else None,
+        nbm_high=nbm_obs.high_f if nbm_obs else None,
         daily_high_metar=ground_truth_high,
         current_temp_f=metar.temp_f if metar else None,
         calibration=cal_dict,

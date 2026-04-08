@@ -172,7 +172,7 @@ def compute_model(
     adaptive=None,
     latest_weather: Optional[dict] = None,
     hrrr_high: Optional[float] = None,
-    gfs_high: Optional[float] = None,
+    nbm_high: Optional[float] = None,
 ) -> Optional[ModelResult]:
     """
     Fuse all forecast sources and compute temperature distribution + bucket probabilities.
@@ -221,8 +221,8 @@ def compute_model(
         calibrated["wu_hourly"] = (wu_hourly_peak + bias_wuh, w_wuh)
     if hrrr_high is not None:
         calibrated["hrrr"] = (hrrr_high + cal.get("bias_hrrr", 0.0), cal.get("weight_hrrr", 0.5))
-    if gfs_high is not None:
-        calibrated["gfs"] = (gfs_high + cal.get("bias_gfs", 0.0), cal.get("weight_gfs", 0.2))
+    if nbm_high is not None:
+        calibrated["nbm"] = (nbm_high + cal.get("bias_nbm", 0.0), cal.get("weight_nbm", 0.2))
 
     if not calibrated:
         log.warning("model: no forecast sources available — cannot compute model")
@@ -380,7 +380,7 @@ def compute_model(
         "wu_daily_high": wu_daily_high,
         "wu_hourly_peak": wu_hourly_peak,
         "hrrr_high": hrrr_high,
-        "gfs_high": gfs_high,
+        "nbm_high": nbm_high,
         "daily_high_metar": daily_high_metar,
         "current_temp_f": current_temp_f,
         "mu_forecast": float(mu_forecast),

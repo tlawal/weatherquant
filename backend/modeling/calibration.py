@@ -25,12 +25,12 @@ def get_calibration_dict(city_id: int) -> dict:
         "bias_wu_daily": 0.0,
         "bias_wu_hourly": 0.0,
         "bias_hrrr": 0.0,
-        "bias_gfs": 0.0,
+        "bias_nbm": 0.0,
         "weight_nws": 1 / 3,
         "weight_wu_daily": 1 / 3,
         "weight_wu_hourly": 1 / 3,
         "weight_hrrr": 0.5,
-        "weight_gfs": 0.2,
+        "weight_nbm": 0.2,
     }
 
 
@@ -45,12 +45,12 @@ async def get_calibration_async(city_id: int) -> dict:
         "bias_wu_daily": cal.bias_wu_daily,
         "bias_wu_hourly": cal.bias_wu_hourly,
         "bias_hrrr": v if (v := getattr(cal, "bias_hrrr", None)) is not None else 0.0,
-        "bias_gfs": v if (v := getattr(cal, "bias_gfs", None)) is not None else 0.0,
+        "bias_nbm": v if (v := getattr(cal, "bias_nbm", None)) is not None else 0.0,
         "weight_nws": cal.weight_nws,
         "weight_wu_daily": cal.weight_wu_daily,
         "weight_wu_hourly": cal.weight_wu_hourly,
         "weight_hrrr": v if (v := getattr(cal, "weight_hrrr", None)) is not None else 0.5,
-        "weight_gfs": v if (v := getattr(cal, "weight_gfs", None)) is not None else 0.2,
+        "weight_nbm": v if (v := getattr(cal, "weight_nbm", None)) is not None else 0.2,
     }
 
 
@@ -61,7 +61,7 @@ async def update_calibration(
     wu_daily_forecast: Optional[float],
     wu_hourly_forecast: Optional[float],
     hrrr_forecast: Optional[float] = None,
-    gfs_forecast: Optional[float] = None,
+    nbm_forecast: Optional[float] = None,
 ) -> None:
     """
     Update per-city bias corrections after settlement.
@@ -100,11 +100,11 @@ async def update_calibration(
         updates["bias_hrrr"] = _ALPHA * error + (1 - _ALPHA) * old_bias
         log.info("calibration: city_id=%d hrrr_error=%.2f new_bias_hrrr=%.3f", city_id, error, updates["bias_hrrr"])
 
-    if gfs_forecast is not None:
-        old_bias = getattr(cal, "bias_gfs", 0.0) or 0.0
-        error = realized_high_f - (gfs_forecast + old_bias)
-        updates["bias_gfs"] = _ALPHA * error + (1 - _ALPHA) * old_bias
-        log.info("calibration: city_id=%d gfs_error=%.2f new_bias_gfs=%.3f", city_id, error, updates["bias_gfs"])
+    if nbm_forecast is not None:
+        old_bias = getattr(cal, "bias_nbm", 0.0) or 0.0
+        error = realized_high_f - (nbm_forecast + old_bias)
+        updates["bias_nbm"] = _ALPHA * error + (1 - _ALPHA) * old_bias
+        log.info("calibration: city_id=%d nbm_error=%.2f new_bias_nbm=%.3f", city_id, error, updates["bias_nbm"])
 
     updates["n_samples"] = (cal.n_samples or 0) + 1
     updates["last_realized_high"] = realized_high_f
