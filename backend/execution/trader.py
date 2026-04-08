@@ -73,6 +73,7 @@ async def execute_signal(
     order_type: str = "limit",
     side: str = "BUY",
     limit_price_override: float | None = None,
+    strategy: str = "default",
 ) -> dict:
     """
     Attempt to execute a trade for the given signal.
@@ -113,7 +114,7 @@ async def execute_signal(
             return result
 
     # ── Run all safety gates ──────────────────────────────────────────────────
-    gate_result = await run_all_gates(signal, event, city.id)
+    gate_result = await run_all_gates(signal, event, city.id, strategy=strategy)
 
     # For manual trades, filter out bot-only gates that don't apply to
     # human-initiated trades. Keep critical safety gates (daily loss, max positions).
@@ -619,6 +620,7 @@ async def execute_top_signals(
     bankroll: float,
     max_trades: int = 2,
     actor: str = "auto_trader",
+    strategy: str = "default",
 ) -> list[dict]:
     """
     Execute the top N actionable signals.
@@ -636,7 +638,7 @@ async def execute_top_signals(
 
     results = []
     for signal in actionable[:max_trades]:
-        result = await execute_signal(signal, bankroll, actor=actor)
+        result = await execute_signal(signal, bankroll, actor=actor, strategy=strategy)
         results.append(result)
         log.info("trader: %s → status=%s", signal.city_slug, result["status"])
 

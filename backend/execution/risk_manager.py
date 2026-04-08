@@ -54,6 +54,12 @@ def compute_size(
     """
     # Cap bankroll to hard ceiling (safety: never trust passed-in bankroll > cap)
     effective_bankroll = min(bankroll, Config.BANKROLL_CAP)
+    
+    # Halve position size for thin orderbooks
+    liquidity_value = ask_depth * limit_price
+    if liquidity_value < Config.MIN_ORDERBOOK_DEPTH_DOLLARS:
+        effective_bankroll *= 0.5
+        
     bankroll_remaining = effective_bankroll - open_exposure
 
     if bankroll_remaining <= 0:

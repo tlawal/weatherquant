@@ -157,6 +157,24 @@ Numerical Weather Prediction (NWP) models run on fixed UTC cycles. The **z** sta
 - NBM status: [NWS MDL NBM](https://vlab.noaa.gov/web/mdl/nbm)
 - Open-Meteo model status: [Open-Meteo](https://open-meteo.com/en/docs)
 
+### 📉 Execution & Exit Strategies (Quick Flip vs Ladder)
+
+The automated execution layer manages dynamic risk exposure using two distinct profit-taking modes, integrated into an APScheduler loop:
+
+1. **Quick Flip Mode (Primary)**: Automatically scale into consensus buckets below 36¢, holding until the position appreciates by +5¢ (e.g. bought at 35¢, sold at 40¢). Yields highly reliable ~14% ROI by exploiting early morning latency before broad market repricing.
+2. **Ladder Scaling (Secondary)**: Once the +5¢ liquidity is consumed, the Exit Engine trails the remaining balance via progressive limit ladders as the temperature rises.
+
+The **Exit Engine (cascade)** sweeps positions every 5 minutes utilizing a 4-level priority gate:
+- **Level 1 (Emergency)**: METAR observed temp contradicts bucket by ≥3°F (Immediate market sell)
+- **Level 2 (Urgent)**: Model consensus has drastically shifted to a different bucket (Limit sell aggressively)
+- **Level 3 (Quick Flip)**: Market ask provides +5¢ edge over VWAP (Realize profit)
+- **Level 4 (Ladder)**: Normal position scaling
+
+### 🦉 Night Owl Strategy
+
+Polymarket orderbooks often stagnate overnight, but NWP models continue outputting fresh forecasts. The **Night Owl Orchestrator** bypasses normal daytime constraints (running exclusively from 23:00 to 06:00 ET).
+By ingesting 00z and early 06z model consensus, it identifies structural pricing inefficiencies and executes bulk limit orders when orderbook depths occasionally plunge below the $2,000 threshold.
+
 ---
 
 ## 📡 Data Ingestion & Observation Routing

@@ -88,6 +88,18 @@ async def job_run_model():
     return signals
 
 
+async def job_run_night_owl():
+    """Runs overnight to look for fresh 00z/06z model edges."""
+    from backend.strategy.night_owl import run_night_owl
+    from backend.execution.arming import is_armed
+    if not await is_armed():
+        return
+    try:
+        await run_night_owl()
+    except Exception as e:
+        log.exception("job_run_night_owl error: %s", e)
+
+
 async def job_run_auto_trader():
     """Execute top signals if armed."""
     from backend.engine.signal_engine import run_signal_engine
@@ -140,6 +152,12 @@ async def job_reconcile_orders():
 async def job_auto_check_disarm():
     from backend.execution.arming import auto_check_disarm
     await auto_check_disarm()
+
+
+async def job_run_exit_engine():
+    """Evaluate open positions for Quick Flip or Emergency Exits."""
+    from backend.execution.exit_engine import run_exit_engine
+    await run_exit_engine()
 
 
 async def job_discover_cities():
@@ -204,6 +222,8 @@ def create_scheduler() -> AsyncIOScheduler:
     add(job_fetch_clob,          seconds=30,   name="fetch_clob")
     add(job_run_model,           seconds=60,   name="run_model")
     add(job_run_auto_trader,     seconds=60,   name="run_auto_trader")
+    add(job_run_exit_engine,     seconds=300,  name="run_exit_engine")     # 5 min cascade
+    add(job_run_night_owl,       seconds=300,  name="run_night_owl")       # 5 min cascade over night
     add(job_reconcile_orders,    seconds=30,   name="reconcile_orders")
     add(job_auto_check_disarm,   seconds=60,   name="auto_check_disarm")
     add(job_discover_cities,     seconds=86400, name="discover_cities")  # 24h

@@ -71,6 +71,9 @@ class Config:
     MIN_LIQUIDITY_SHARES: float = _float("MIN_LIQUIDITY_SHARES", 10.0)
     MAX_POSITIONS_PER_EVENT: int = _int("MAX_POSITIONS_PER_EVENT", 2)
     MAX_LIQUIDITY_PCT: float = _float("MAX_LIQUIDITY_PCT", 0.20)
+    MAX_ENTRY_PRICE: float = _float("MAX_ENTRY_PRICE", 0.36)
+    MAX_SPREAD: float = _float("MAX_SPREAD", 0.04)
+    MIN_ORDERBOOK_DEPTH_DOLLARS: float = _float("MIN_ORDERBOOK_DEPTH_DOLLARS", 2000.0)
 
     # ── Trading Window (ET hours) ─────────────────────────────────────────────
     TRADING_WINDOW_CLOSE_ET: int = _int("TRADING_WINDOW_CLOSE_ET", 19)

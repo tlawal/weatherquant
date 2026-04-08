@@ -44,6 +44,7 @@ async def run_all_gates(
     signal: BucketSignal,
     event: Event,
     city_id: int,
+    strategy: str = "default",
 ) -> GateResult:
     """
     Run all safety gates for a candidate trade signal.
@@ -121,11 +122,19 @@ async def run_all_gates(
             f"GATE_EDGE: true_edge={signal.true_edge:.4f} < min={Config.MIN_TRUE_EDGE}"
         )
 
-    # ── Gate: Market not at extremes ─────────────────────────────────────────
-    if signal.mkt_prob < 0.02 or signal.mkt_prob > 0.98:
+    # ── Gate: Market price thresholds ─────────────────────────────────────────
+    if signal.mkt_prob >= Config.MAX_ENTRY_PRICE:
         failures.append(
-            f"GATE_MKT_EXTREME: mkt_prob={signal.mkt_prob:.4f} is at extreme "
-            f"(acceptable range: 0.02–0.98)"
+            f"GATE_MAX_PRICE: mkt_prob={signal.mkt_prob:.4f} >= max "
+            f"entry threshold of {Config.MAX_ENTRY_PRICE}"
+        )
+    elif signal.mkt_prob < 0.02:
+        failures.append(f"GATE_MIN_PRICE: mkt_prob={signal.mkt_prob:.4f} < 0.02")
+
+    # ── Gate: Maximum Spread ──────────────────────────────────────────────────
+    if signal.spread is None or signal.spread > Config.MAX_SPREAD:
+        failures.append(
+            f"GATE_SPREAD: spread={signal.spread} > max={Config.MAX_SPREAD}"
         )
 
     # ── Gate: Daily loss limit ────────────────────────────────────────────────
