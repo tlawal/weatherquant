@@ -90,6 +90,9 @@ async def main() -> None:
         format="%(asctime)s %(levelname)s %(message)s",
     )
 
+    from backend.storage.db import init_db
+    await init_db()
+
     async with get_session() as sess:
         stmt = select(Event).where(Event.gamma_event_id.isnot(None))
         if not args.include_overrides:
