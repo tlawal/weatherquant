@@ -5,7 +5,8 @@ Quantitative prediction market trading system for weather events on Polymarket.
 ## 🏗️ Architecture
 
 - **Signal Engine**: Fuses NWS, Weather Underground, and METAR data into a probabilistic distribution.
-- **Calibration Engine**: Monitors model reliability and remaps probabilities based on historical hit rates (Brier Score optimization).
+- **Calibration Engine**: Monitors global model reliability and remaps probabilities based on historical hit rates (Brier Score optimization).
+- **Station Calibration Engine**: Computes 30-day rolling MAE, bias, and RMSE for every METAR station. Features a Leaflet.js visualization map and sortable performance analytics for granular "Tradeability" gating (GREEN/AMBER/RED).
 - **Execution Layer**: Interfaces with Polymarket CLOB, implementing Kelly Criterion sizing and automated risk gates.
 - **Market Context Agent**: An autonomous tool-calling agent (LLM) with 5 tools (HRRR, NBM, Semantic Scholar, NWS AFD, Polymarket) that resolves forecast discrepancies and produces independent temperature assessments.
 - **Dashboard**: HTMX-powered real-time monitoring of edges, calibration, and portfolio state.
@@ -470,3 +471,19 @@ The adaptive engine depends on accurate METAR data. Phase 1 addresses three root
 10. **Mayer & Groom (2002)** "Diurnal heating rate in the surface layer" — *J. Atmos. Sci.* 59, 1413–1424. Derives surface heating rate as f(net radiation, soil flux, BL depth). Heating rate peaks 2–3 hr after sunrise and decays quasi-linearly to zero at peak temperature time.
 
 11. **Hemri et al. (2014)** "Trends in the predictive performance of raw ensemble weather forecasts" — *Geophys. Res. Lett.* 41, 9197–9205. EMOS framework: heteroscedastic sigma depending on weather regime, not just forecast spread. Foundation for weather-conditioned sigma adjustment.
+
+### 📡 Station Calibration (30-day Rolling)
+
+Per-station calibration allows the system to identify location-specific model biases and forecast quality degradation. By comparing the fused ensemble forecast against the actual METAR high over a 30-day window, the system assigns a **Tradeability Status**:
+
+| Status | MAE Threshold | Description |
+|---|---|---|
+| **GREEN** | < 1.5°F | High reliability; optimal for tight-spread trading. |
+| **AMBER** | 1.5–3.0°F | Moderate noise; requires higher edge/Kelly discount. |
+| **RED** | > 3.0°F | Degraded quality; trading not recommended. |
+
+The system features:
+- **Leaflet Map**: Visual distribution of station health across the US, color-coded by performance.
+- **Sortable Analytics**: Deep dive into Bias, RMSE, and Sample Count to identify specific NWP model failures.
+- **Compact UI Integration**: Every city page displays a real-time calibration card, allowing traders to verify station-specific edge before execution.
+- **CSV Export**: Automated reporting for external audit and backtesting.

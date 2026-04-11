@@ -1859,6 +1859,119 @@ async def toggle_city(city_slug: str, actor: str = Depends(require_admin)):
     return {"city_slug": city_slug, "enabled": enabled}
 
 
+# ─── Station Calibrations ────────────────────────────────────────────────────
+
+@router.get("/api/station-calibrations")
+async def list_station_calibrations():
+    """All per-station 30-day rolling calibration metrics."""
+    from backend.storage.repos import get_all_station_calibrations
+
+    async with get_session() as sess:
+        cals = await get_all_station_calibrations(sess)
+
+    return [
+        {
+            "station_id": c.station_id,
+            "city_slug": c.city_slug,
+            "city_name": c.city_name,
+            "lat": c.lat,
+            "lon": c.lon,
+            "mae_f": c.mae_f,
+            "bias_f": c.bias_f,
+            "rmse_f": c.rmse_f,
+            "n_samples": c.n_samples,
+            "pct_days_traded": c.pct_days_traded,
+            "tradeability": c.tradeability,
+            "best_source": c.best_source,
+            "best_source_mae": c.best_source_mae,
+            "source_mae_json": c.source_mae_json,
+            "updated_at": c.updated_at.isoformat() if c.updated_at else None,
+        }
+        for c in cals
+    ]
+
+
+@router.get("/api/station-calibrations/csv")
+async def station_calibrations_csv():
+    """Download station calibrations as CSV."""
+    from fastapi.responses import StreamingResponse
+    from backend.storage.repos import get_all_station_calibrations
+    import io
+    import csv
+
+    async with get_session() as sess:
+        cals = await get_all_station_calibrations(sess)
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "station_id", "city_slug", "city_name", "lat", "lon",
+        "mae_f", "bias_f", "rmse_f", "n_samples",
+        "pct_days_traded", "tradeability",
+        "best_source", "best_source_mae", "updated_at",
+    ])
+    for c in cals:
+        writer.writerow([
+            c.station_id, c.city_slug, c.city_name,
+            c.lat, c.lon,
+            c.mae_f, c.bias_f, c.rmse_f, c.n_samples,
+            c.pct_days_traded, c.tradeability,
+            c.best_source, c.best_source_mae,
+            c.updated_at.isoformat() if c.updated_at else "",
+        ])
+
+    output.seek(0)
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=station_calibrations.csv"},
+    )
+
+
+@router.get("/api/station-calibrations/{station_id}")
+async def get_station_calibration_detail(station_id: str):
+    """Single station calibration detail."""
+    from backend.storage.repos import get_station_calibration as _get_cal
+
+    async with get_session() as sess:
+        c = await _get_cal(sess, station_id.upper())
+
+    if not c:
+        raise HTTPException(status_code=404, detail=f"No calibration for {station_id}")
+
+    return {
+        "station_id": c.station_id,
+        "city_slug": c.city_slug,
+        "city_name": c.city_name,
+        "lat": c.lat,
+        "lon": c.lon,
+        "mae_f": c.mae_f,
+        "bias_f": c.bias_f,
+        "rmse_f": c.rmse_f,
+        "n_samples": c.n_samples,
+        "pct_days_traded": c.pct_days_traded,
+        "tradeability": c.tradeability,
+        "best_source": c.best_source,
+        "best_source_mae": c.best_source_mae,
+        "source_mae_json": c.source_mae_json,
+        "updated_at": c.updated_at.isoformat() if c.updated_at else None,
+    }
+
+
+@router.post("/api/station-calibrations/refresh")
+async def refresh_station_calibrations(actor: str = Depends(require_admin)):
+    """On-demand recalculation of all station calibrations."""
+    from backend.modeling.station_calibration import refresh_all_station_calibrations
+
+    count = await refresh_all_station_calibrations()
+    async with get_session() as sess:
+        await append_audit(
+            sess, actor=actor, action="station_calibrations_refreshed",
+            payload={"stations_updated": count},
+        )
+    return {"ok": True, "stations_updated": count}
+
+
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
 async def _get_city_or_404(sess, city_slug: str):

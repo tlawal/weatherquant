@@ -474,3 +474,39 @@ class WorkerHeartbeat(Base):
     last_error: Mapped[Optional[str]] = mapped_column(Text)
     run_count: Mapped[int] = mapped_column(Integer, default=0)
     error_count: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class StationCalibration(Base):
+    """Per-station 30-day rolling forecast calibration metrics.
+
+    Compares fused ensemble forecast vs. observed METAR daily highs
+    to track MAE, bias, and tradeability per ICAO station.
+    """
+    __tablename__ = "station_calibrations"
+    __table_args__ = (
+        UniqueConstraint("station_id", name="uq_station_cal_station"),
+        Index("ix_station_cal_tradeability", "tradeability"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    station_id: Mapped[str] = mapped_column(String(8), nullable=False)   # ICAO e.g. "KATL"
+    city_slug: Mapped[str] = mapped_column(String(64), nullable=False)
+    city_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    lat: Mapped[Optional[float]] = mapped_column(Float)
+    lon: Mapped[Optional[float]] = mapped_column(Float)
+    # 30-day rolling metrics
+    mae_f: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    bias_f: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    rmse_f: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    n_samples: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    pct_days_traded: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    # "GREEN" (<1.5°F MAE), "AMBER" (1.5-3.0), "RED" (>3.0)
+    tradeability: Mapped[str] = mapped_column(String(8), default="RED", nullable=False)
+    # Best individual forecast source and its MAE
+    best_source: Mapped[Optional[str]] = mapped_column(String(16))
+    best_source_mae: Mapped[Optional[float]] = mapped_column(Float)
+    # Per-source MAE breakdown (JSON dict)
+    source_mae_json: Mapped[Optional[str]] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )

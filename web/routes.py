@@ -521,6 +521,25 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
             except Exception as e:
                 log.warning("city_detail: adaptive engine failed for %s: %s", city_slug, e)
 
+    # Fetch station calibration for compact card
+    station_cal = None
+    if city.metar_station:
+        from backend.storage.repos import get_station_calibration
+        async with get_session() as sess:
+            station_cal_row = await get_station_calibration(sess, city.metar_station)
+        if station_cal_row:
+            station_cal = {
+                "station_id": station_cal_row.station_id,
+                "mae_f": station_cal_row.mae_f,
+                "bias_f": station_cal_row.bias_f,
+                "rmse_f": station_cal_row.rmse_f,
+                "n_samples": station_cal_row.n_samples,
+                "pct_days_traded": station_cal_row.pct_days_traded,
+                "tradeability": station_cal_row.tradeability,
+                "best_source": station_cal_row.best_source,
+                "best_source_mae": station_cal_row.best_source_mae,
+            }
+
     return templates.TemplateResponse(
         "city.html",
         {
@@ -632,6 +651,7 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
             "station_predictions_json": json.dumps(station_predictions),
             "hrrr_hourly_json": json.dumps(hrrr_hourly),
             "adaptive_info": adaptive_info,
+            "station_cal": station_cal,
             "market_context_snapshot": serialize_market_context_snapshot(market_context_snapshot),
             "market_context_llm_ready": Config.market_context_llm_ready(),
         },
@@ -723,6 +743,24 @@ async def htmx_signals_table(request: Request):
 
     rows.sort(key=lambda r: (get_city_priority(r["city_slug"]), -(r.get("mkt_prob") if r.get("mkt_prob") is not None else -1.0)))
     return templates.TemplateResponse("partials/signals_table.html", {"request": request, "signal_rows": rows})
+
+
+@dashboard_router.get("/stations", response_class=HTMLResponse)
+async def stations_page(request: Request):
+    """Full-page view of all station calibrations with Leaflet map."""
+    from backend.storage.db import get_session
+    from backend.storage.repos import get_arming_state
+
+    async with get_session() as sess:
+        arming = await get_arming_state(sess)
+
+    return templates.TemplateResponse(
+        "stations.html",
+        {
+            "request": request,
+            "arming_state": arming.state,
+        },
+    )
 
 
 @dashboard_router.get("/redemptions", response_class=HTMLResponse)

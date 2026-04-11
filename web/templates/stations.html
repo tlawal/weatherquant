@@ -1,0 +1,357 @@
+{% extends "base.html" %}
+{% block title %}Station Calibration — WeatherQuant{% endblock %}
+
+{% block extra_head %}
+<!-- Leaflet CSS -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+<style>
+  #station-map { height: 420px; border-radius: 8px; border: 1px solid var(--border); }
+  .leaflet-container { background: var(--bg-panel); }
+  .station-tooltip { font-family: 'JetBrains Mono', monospace; font-size: 11px; }
+  .station-tooltip .tt-station { font-weight: 700; color: var(--cyan); }
+  .station-tooltip .tt-label { color: #94A3B8; }
+  .station-tooltip .tt-green { color: #22C55E; }
+  .station-tooltip .tt-amber { color: #EAB308; }
+  .station-tooltip .tt-red { color: #EF4444; }
+  .sort-header { cursor: pointer; user-select: none; }
+  .sort-header:hover { color: var(--cyan) !important; }
+  .sort-asc::after { content: ' ▲'; font-size: 8px; }
+  .sort-desc::after { content: ' ▼'; font-size: 8px; }
+  .badge-green { background: rgba(34,197,94,0.15); color: #86EFAC; border: 1px solid rgba(34,197,94,0.3); }
+  .badge-amber { background: rgba(234,179,8,0.15); color: #FDE047; border: 1px solid rgba(234,179,8,0.3); }
+  .badge-red { background: rgba(239,68,68,0.15); color: #FCA5A5; border: 1px solid rgba(239,68,68,0.3); }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="flex flex-wrap items-start justify-between gap-4 mb-6">
+  <div class="flex items-center gap-3">
+    <a href="/" class="text-sm hover:underline" style="color:var(--text-muted)">← Signals</a>
+    <span style="color:var(--text-muted)">/</span>
+    <h1 class="text-2xl font-bold tracking-tight sm:text-3xl">Station Calibration</h1>
+    <span class="text-[10px] px-2 py-0.5 rounded-full font-bold"
+          style="background:rgba(34,211,238,0.12);color:var(--cyan)">30-Day Rolling</span>
+  </div>
+  <div class="flex items-center gap-2">
+    <button onclick="refreshCalibrations(this)"
+            class="px-3 py-1.5 rounded-lg text-[10px] font-bold tracking-widest transition-all border"
+            style="background:var(--bg-panel);border-color:var(--cyan);color:var(--cyan)">
+      REFRESH
+    </button>
+    <a href="/api/station-calibrations/csv"
+       class="px-3 py-1.5 rounded-lg text-[10px] font-bold tracking-widest transition-all border"
+       style="background:var(--bg-panel);border-color:var(--border);color:var(--text-muted)">
+      CSV ↓
+    </a>
+  </div>
+</div>
+
+<!-- Summary Stats -->
+<div x-data="stationData()" x-init="init()" class="space-y-6">
+
+  <div class="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-3">
+    <div class="card p-3">
+      <div class="text-[10px] uppercase tracking-widest" style="color:var(--text-muted)">Total Stations</div>
+      <div class="mono text-lg font-bold" style="color:var(--cyan)" x-text="stations.length">—</div>
+    </div>
+    <div class="card p-3">
+      <div class="text-[10px] uppercase tracking-widest" style="color:var(--text-muted)">Avg MAE</div>
+      <div class="mono text-lg font-bold" x-text="avgMae !== null ? avgMae.toFixed(2) + '°' : '—'">—</div>
+    </div>
+    <div class="card p-3">
+      <div class="text-[10px] uppercase tracking-widest" style="color:var(--text-muted)">Green</div>
+      <div class="mono text-lg font-bold" style="color:#22C55E" x-text="countGreen">0</div>
+    </div>
+    <div class="card p-3">
+      <div class="text-[10px] uppercase tracking-widest" style="color:var(--text-muted)">Amber</div>
+      <div class="mono text-lg font-bold" style="color:#EAB308" x-text="countAmber">0</div>
+    </div>
+    <div class="card p-3">
+      <div class="text-[10px] uppercase tracking-widest" style="color:var(--text-muted)">Red</div>
+      <div class="mono text-lg font-bold" style="color:#EF4444" x-text="countRed">0</div>
+    </div>
+    <div class="card p-3">
+      <div class="text-[10px] uppercase tracking-widest" style="color:var(--text-muted)">Avg Traded</div>
+      <div class="mono text-lg font-bold" style="color:var(--text-muted)" x-text="avgTraded !== null ? avgTraded.toFixed(0) + '%' : '—'">—</div>
+    </div>
+  </div>
+
+  <!-- Leaflet Map -->
+  <div class="card p-4">
+    <div class="flex items-center justify-between mb-3">
+      <h2 class="font-semibold text-sm">Station Map</h2>
+      <div class="flex items-center gap-3 text-[10px]">
+        <span class="flex items-center gap-1"><span class="inline-block w-2.5 h-2.5 rounded-full" style="background:#22C55E"></span> MAE &lt;1.5°</span>
+        <span class="flex items-center gap-1"><span class="inline-block w-2.5 h-2.5 rounded-full" style="background:#EAB308"></span> 1.5–3.0°</span>
+        <span class="flex items-center gap-1"><span class="inline-block w-2.5 h-2.5 rounded-full" style="background:#EF4444"></span> &gt;3.0°</span>
+      </div>
+    </div>
+    <div id="station-map"></div>
+  </div>
+
+  <!-- Sortable Table -->
+  <div class="card overflow-hidden">
+    <div class="px-4 py-3 border-b flex items-center justify-between gap-3" style="border-color:var(--border)">
+      <h2 class="font-semibold text-sm">All Stations</h2>
+      <div class="flex items-center gap-2">
+        <input type="text" x-model="filter" placeholder="Filter by city..."
+               class="px-3 py-1.5 text-xs rounded-lg border bg-transparent w-48 transition-all"
+               style="border-color:var(--border);color:var(--text-main)" />
+        <select x-model="tradeFilter" class="px-2 py-1.5 text-xs rounded-lg border bg-transparent transition-all"
+                style="border-color:var(--border);color:var(--text-main)">
+          <option value="">All</option>
+          <option value="GREEN">Green</option>
+          <option value="AMBER">Amber</option>
+          <option value="RED">Red</option>
+        </select>
+      </div>
+    </div>
+    <div class="overflow-x-auto">
+      <table class="w-full text-xs" style="min-width:56rem">
+        <thead>
+          <tr class="text-[10px] uppercase tracking-widest" style="color:var(--text-muted);border-bottom:1px solid var(--border)">
+            <th class="px-3 py-2 text-left sort-header" :class="sortCol === 'station_id' ? (sortDir === 'asc' ? 'sort-asc' : 'sort-desc') : ''"
+                @click="toggleSort('station_id')">Station</th>
+            <th class="px-2 py-2 text-left sort-header" :class="sortCol === 'city_name' ? (sortDir === 'asc' ? 'sort-asc' : 'sort-desc') : ''"
+                @click="toggleSort('city_name')">City</th>
+            <th class="px-2 py-2 text-right sort-header" :class="sortCol === 'mae_f' ? (sortDir === 'asc' ? 'sort-asc' : 'sort-desc') : ''"
+                @click="toggleSort('mae_f')">MAE</th>
+            <th class="px-2 py-2 text-right sort-header" :class="sortCol === 'bias_f' ? (sortDir === 'asc' ? 'sort-asc' : 'sort-desc') : ''"
+                @click="toggleSort('bias_f')">Bias</th>
+            <th class="px-2 py-2 text-right sort-header" :class="sortCol === 'rmse_f' ? (sortDir === 'asc' ? 'sort-asc' : 'sort-desc') : ''"
+                @click="toggleSort('rmse_f')">RMSE</th>
+            <th class="px-2 py-2 text-right sort-header" :class="sortCol === 'n_samples' ? (sortDir === 'asc' ? 'sort-asc' : 'sort-desc') : ''"
+                @click="toggleSort('n_samples')">Samples</th>
+            <th class="px-2 py-2 text-right sort-header" :class="sortCol === 'pct_days_traded' ? (sortDir === 'asc' ? 'sort-asc' : 'sort-desc') : ''"
+                @click="toggleSort('pct_days_traded')">% Traded</th>
+            <th class="px-2 py-2 text-center">Status</th>
+            <th class="px-2 py-2 text-left sort-header" :class="sortCol === 'best_source' ? (sortDir === 'asc' ? 'sort-asc' : 'sort-desc') : ''"
+                @click="toggleSort('best_source')">Best Source</th>
+          </tr>
+        </thead>
+        <tbody>
+          <template x-for="s in filteredStations" :key="s.station_id">
+            <tr class="border-b hover:bg-white/5 transition-colors cursor-pointer"
+                style="border-color:rgba(26,58,107,0.4)"
+                @click="window.location.href='/city/' + s.city_slug">
+              <td class="px-3 py-2.5 mono font-semibold" x-text="s.station_id"></td>
+              <td class="px-2 py-2.5 font-medium" x-text="s.city_name"></td>
+              <td class="px-2 py-2.5 text-right mono font-bold"
+                  :style="s.mae_f <= 1.5 ? 'color:#22C55E' : (s.mae_f <= 3.0 ? 'color:#EAB308' : 'color:#EF4444')"
+                  x-text="s.mae_f.toFixed(2) + '°'"></td>
+              <td class="px-2 py-2.5 text-right mono"
+                  :style="s.bias_f > 0 ? 'color:#F97316' : 'color:#60A5FA'"
+                  x-text="(s.bias_f > 0 ? '+' : '') + s.bias_f.toFixed(2) + '°'"></td>
+              <td class="px-2 py-2.5 text-right mono" style="color:var(--text-muted)" x-text="s.rmse_f.toFixed(2) + '°'"></td>
+              <td class="px-2 py-2.5 text-right mono" style="color:var(--text-muted)" x-text="s.n_samples"></td>
+              <td class="px-2 py-2.5 text-right mono" style="color:var(--text-muted)" x-text="s.pct_days_traded.toFixed(0) + '%'"></td>
+              <td class="px-2 py-2.5 text-center">
+                <span class="text-[10px] font-bold px-2 py-0.5 rounded-full"
+                      :class="s.tradeability === 'GREEN' ? 'badge-green' : (s.tradeability === 'AMBER' ? 'badge-amber' : 'badge-red')"
+                      x-text="s.tradeability"></span>
+              </td>
+              <td class="px-2 py-2.5 mono text-[10px]" style="color:var(--text-muted)">
+                <span x-text="s.best_source ? s.best_source.toUpperCase() : '—'"></span>
+                <span x-show="s.best_source_mae" class="ml-1 opacity-60" x-text="s.best_source_mae ? '(' + s.best_source_mae.toFixed(1) + '°)' : ''"></span>
+              </td>
+            </tr>
+          </template>
+          <template x-if="filteredStations.length === 0">
+            <tr>
+              <td colspan="9" class="px-4 py-8 text-center" style="color:var(--text-muted)">
+                <span x-show="stations.length === 0">No calibration data yet. Press REFRESH to compute.</span>
+                <span x-show="stations.length > 0">No stations match filter.</span>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<!-- Leaflet JS -->
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+
+<script>
+  let _leafletMap = null;
+  let _markerLayer = null;
+
+  function stationData() {
+    return {
+      stations: [],
+      filter: '',
+      tradeFilter: '',
+      sortCol: 'mae_f',
+      sortDir: 'asc',
+      avgMae: null,
+      avgTraded: null,
+      countGreen: 0,
+      countAmber: 0,
+      countRed: 0,
+
+      get filteredStations() {
+        let list = this.stations;
+        const f = this.filter.toLowerCase().trim();
+        if (f) {
+          list = list.filter(s =>
+            s.city_name.toLowerCase().includes(f) ||
+            s.station_id.toLowerCase().includes(f) ||
+            s.city_slug.toLowerCase().includes(f)
+          );
+        }
+        if (this.tradeFilter) {
+          list = list.filter(s => s.tradeability === this.tradeFilter);
+        }
+        // Sort
+        const col = this.sortCol;
+        const dir = this.sortDir === 'asc' ? 1 : -1;
+        list = [...list].sort((a, b) => {
+          const av = a[col] ?? '';
+          const bv = b[col] ?? '';
+          if (typeof av === 'number' && typeof bv === 'number') return (av - bv) * dir;
+          return String(av).localeCompare(String(bv)) * dir;
+        });
+        return list;
+      },
+
+      toggleSort(col) {
+        if (this.sortCol === col) {
+          this.sortDir = this.sortDir === 'asc' ? 'desc' : 'asc';
+        } else {
+          this.sortCol = col;
+          this.sortDir = 'asc';
+        }
+      },
+
+      async init() {
+        await this.fetchData();
+        this.initMap();
+      },
+
+      async fetchData() {
+        try {
+          const res = await fetch('/api/station-calibrations');
+          if (res.ok) {
+            this.stations = await res.json();
+            this.computeStats();
+            this.updateMap();
+          }
+        } catch (e) { console.error('Failed to fetch calibrations:', e); }
+      },
+
+      computeStats() {
+        if (this.stations.length === 0) return;
+        this.avgMae = this.stations.reduce((s, c) => s + c.mae_f, 0) / this.stations.length;
+        this.avgTraded = this.stations.reduce((s, c) => s + c.pct_days_traded, 0) / this.stations.length;
+        this.countGreen = this.stations.filter(s => s.tradeability === 'GREEN').length;
+        this.countAmber = this.stations.filter(s => s.tradeability === 'AMBER').length;
+        this.countRed = this.stations.filter(s => s.tradeability === 'RED').length;
+      },
+
+      initMap() {
+        _leafletMap = L.map('station-map', {
+          center: [39.5, -98.5],
+          zoom: 4,
+          zoomControl: true,
+          attributionControl: false,
+        });
+
+        // CartoDB dark tiles
+        L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+          maxZoom: 19,
+          subdomains: 'abcd',
+        }).addTo(_leafletMap);
+
+        _markerLayer = L.layerGroup().addTo(_leafletMap);
+        this.updateMap();
+      },
+
+      updateMap() {
+        if (!_markerLayer) return;
+        _markerLayer.clearLayers();
+
+        for (const s of this.stations) {
+          if (s.lat == null || s.lon == null) continue;
+
+          const color = s.mae_f <= 1.5 ? '#22C55E' : (s.mae_f <= 3.0 ? '#EAB308' : '#EF4444');
+          const tradeClass = s.tradeability === 'GREEN' ? 'tt-green' : (s.tradeability === 'AMBER' ? 'tt-amber' : 'tt-red');
+
+          const marker = L.circleMarker([s.lat, s.lon], {
+            radius: 8,
+            fillColor: color,
+            color: color,
+            weight: 2,
+            opacity: 0.9,
+            fillOpacity: 0.6,
+          });
+
+          const tooltip = `
+            <div class="station-tooltip">
+              <div class="tt-station">${s.station_id} — ${s.city_name}</div>
+              <div class="tt-label">MAE: <span class="${tradeClass}">${s.mae_f.toFixed(2)}°F</span></div>
+              <div class="tt-label">Bias: ${s.bias_f > 0 ? '+' : ''}${s.bias_f.toFixed(2)}°F</div>
+              <div class="tt-label">RMSE: ${s.rmse_f.toFixed(2)}°F</div>
+              <div class="tt-label">Samples: ${s.n_samples} days</div>
+              <div class="tt-label">Best: ${(s.best_source || '—').toUpperCase()}${s.best_source_mae ? ' (' + s.best_source_mae.toFixed(1) + '°)' : ''}</div>
+              <div class="tt-label" style="margin-top:2px">Status: <span class="${tradeClass}">${s.tradeability}</span></div>
+            </div>`;
+
+          marker.bindTooltip(tooltip, {
+            direction: 'top',
+            offset: [0, -8],
+            className: 'station-tooltip-wrap',
+          });
+
+          marker.on('click', () => {
+            window.location.href = '/city/' + s.city_slug;
+          });
+
+          marker.addTo(_markerLayer);
+        }
+
+        // Fit bounds if we have markers
+        if (this.stations.length > 0) {
+          const lats = this.stations.filter(s => s.lat != null).map(s => s.lat);
+          const lons = this.stations.filter(s => s.lon != null).map(s => s.lon);
+          if (lats.length > 1) {
+            _leafletMap.fitBounds([
+              [Math.min(...lats) - 2, Math.min(...lons) - 5],
+              [Math.max(...lats) + 2, Math.max(...lons) + 5],
+            ]);
+          }
+        }
+      },
+    };
+  }
+
+  async function refreshCalibrations(btn) {
+    btn.disabled = true;
+    btn.textContent = 'REFRESHING...';
+    try {
+      const token = getAdminToken() || promptForToken();
+      if (!token) { btn.disabled = false; btn.textContent = 'REFRESH'; return; }
+      const res = await fetch('/api/station-calibrations/refresh', {
+        method: 'POST',
+        headers: { 'X-Admin-Token': token },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        btn.textContent = `DONE (${data.stations_updated})`;
+        setTimeout(() => location.reload(), 1000);
+      } else {
+        btn.textContent = 'FAILED';
+        setTimeout(() => { btn.textContent = 'REFRESH'; btn.disabled = false; }, 2000);
+      }
+    } catch (e) {
+      btn.textContent = 'ERROR';
+      setTimeout(() => { btn.textContent = 'REFRESH'; btn.disabled = false; }, 2000);
+    }
+  }
+</script>
+{% endblock %}

@@ -32,6 +32,7 @@ from backend.storage.models import (
     Order,
     Position,
     Signal,
+    StationCalibration,
     StationProfile,
     WorkerHeartbeat,
 )
@@ -1153,3 +1154,48 @@ async def get_recently_redeemed_events(session: AsyncSession, days: int = 7) -> 
         .options(selectinload(Event.buckets))
     )
     return list(result.scalars().all())
+
+
+# ─── Station Calibrations ─────────────────────────────────────────────────────
+
+async def get_station_calibration(
+    session: AsyncSession, station_id: str
+) -> Optional[StationCalibration]:
+    result = await session.execute(
+        select(StationCalibration).where(StationCalibration.station_id == station_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_station_calibration_by_slug(
+    session: AsyncSession, city_slug: str
+) -> Optional[StationCalibration]:
+    result = await session.execute(
+        select(StationCalibration).where(StationCalibration.city_slug == city_slug)
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_all_station_calibrations(
+    session: AsyncSession,
+) -> list[StationCalibration]:
+    result = await session.execute(
+        select(StationCalibration).order_by(StationCalibration.mae_f)
+    )
+    return list(result.scalars().all())
+
+
+async def upsert_station_calibration(
+    session: AsyncSession, station_id: str, **kwargs
+) -> StationCalibration:
+    cal = await get_station_calibration(session, station_id)
+    if cal is None:
+        cal = StationCalibration(station_id=station_id, **kwargs)
+        session.add(cal)
+    else:
+        for k, v in kwargs.items():
+            if hasattr(cal, k):
+                setattr(cal, k, v)
+    await session.commit()
+    await session.refresh(cal)
+    return cal
