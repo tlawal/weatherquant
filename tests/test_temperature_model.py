@@ -14,6 +14,15 @@ class _FixedDateTime(datetime):
         return fixed.astimezone(tz) if tz else fixed
 
 
+class _AfternoonDateTime(datetime):
+    """14:00 local — before the classic 18:00 rollover guard kicks in."""
+
+    @classmethod
+    def now(cls, tz=None):
+        fixed = cls(2026, 4, 8, 14, 0, tzinfo=ZoneInfo("America/New_York"))
+        return fixed.astimezone(tz) if tz else fixed
+
+
 def test_compute_model_locks_current_bucket_after_peak(monkeypatch):
     monkeypatch.setattr(temperature_model, "datetime", _FixedDateTime)
 
@@ -156,3 +165,63 @@ def test_lock_falls_back_when_adaptive_lags(monkeypatch):
     # The observed bucket should hold the dominant mass.
     assert model.probs[2] > 0.9
     assert model.prob_hotter_bucket < 0.05
+
+
+def test_compute_model_drops_wu_daily_below_metar_high(monkeypatch):
+    """Physics floor: WU forecast daily high cannot be below METAR's
+    already-observed daily high. Exercises the new guard in compute_model
+    during the afternoon (before the classic 18:00 rollover guard would
+    even trigger) to prove the physics-floor branch fires on its own."""
+    monkeypatch.setattr(temperature_model, "datetime", _AfternoonDateTime)
+
+    model = compute_model(
+        nws_high=79.0,
+        wu_daily_high=55.0,  # absurdly low vs the observed high — drop it
+        wu_hourly_peak=78.5,
+        daily_high_metar=78.8,
+        current_temp_f=76.0,
+        calibration=None,
+        buckets=[(74.0, 75.0), (76.0, 77.0), (78.0, 79.0), (80.0, None)],
+        forecast_quality="ok",
+        unit="F",
+        city_tz="America/New_York",
+        observed_high=78.8,
+        ml_features=None,
+        adaptive=None,
+        latest_weather=None,
+        hrrr_high=78.4,
+        nbm_high=78.6,
+    )
+
+    assert model is not None
+    # The remaining sources center near 78-79; if wu_daily=55 had been
+    # folded in, mu would collapse into the mid-60s. Guard against that.
+    assert model.mu > 75.0, f"mu={model.mu} — wu_daily_high=55 was not dropped"
+
+
+def test_compute_model_drops_wu_daily_below_current_temp(monkeypatch):
+    """Physics floor variant: METAR daily high missing, but the live
+    current temperature still exceeds WU's claimed daily high. Drop WU."""
+    monkeypatch.setattr(temperature_model, "datetime", _AfternoonDateTime)
+
+    model = compute_model(
+        nws_high=78.0,
+        wu_daily_high=55.0,  # below the live 72°F reading
+        wu_hourly_peak=77.5,
+        daily_high_metar=None,
+        current_temp_f=72.0,
+        calibration=None,
+        buckets=[(72.0, 73.0), (74.0, 75.0), (76.0, 77.0), (78.0, None)],
+        forecast_quality="ok",
+        unit="F",
+        city_tz="America/New_York",
+        observed_high=None,
+        ml_features=None,
+        adaptive=None,
+        latest_weather=None,
+        hrrr_high=77.8,
+        nbm_high=77.6,
+    )
+
+    assert model is not None
+    assert model.mu > 73.0, f"mu={model.mu} — wu_daily_high=55 was not dropped"

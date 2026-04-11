@@ -339,16 +339,48 @@ def compute_model(
     w_nws = cal.get("weight_nws", 1/3)
     w_wud = cal.get("weight_wu_daily", 1/3)
     w_wuh = cal.get("weight_wu_hourly", 1/3)
-    # WU Nighttime Rollover Protection
-    # If it's past 18:00 local and the WU daily forecast deviates wildly from the actual METAR high so far,
-    # it's highly likely WU has rolled over its "Today" block to display tomorrow's high. We discard it.
+    # WU Nighttime Rollover Protection + physics floor.
+    # (1) Classic rollover: past 18:00 local AND WU's "Today" block
+    #     disagrees with METAR's observed high by more than unit_dev — WU
+    #     has likely rolled over and is showing tomorrow's forecast.
+    # (2) Physics floor (any hour): a forecast daily high cannot be
+    #     meaningfully below today's already-observed high. If WU says
+    #     55°F and METAR has already clocked 78.8°F, WU is wrong
+    #     (scraper glitch, stale page, rollover-window garbage).
+    # (3) Physics floor vs current temp (any hour): a forecast daily
+    #     high cannot be meaningfully below the current live reading.
     local_tz = ZoneInfo(city_tz)
     now_local = datetime.now(local_tz)
     hour_local = now_local.hour
-    if hour_local >= 18 and wu_daily_high is not None and daily_high_metar is not None:
-        unit_dev = 6.0 if unit == "C" else 10.0
-        if abs(wu_daily_high - daily_high_metar) > unit_dev:
-            log.warning("model: dropping wu_daily_high (%.1f) due to likely nighttime rollover (metar=%.1f)", wu_daily_high, daily_high_metar)
+    if wu_daily_high is not None:
+        drop_reason: Optional[str] = None
+        if hour_local >= 18 and daily_high_metar is not None:
+            unit_dev = 6.0 if unit == "C" else 10.0
+            if abs(wu_daily_high - daily_high_metar) > unit_dev:
+                drop_reason = f"nighttime rollover (metar={daily_high_metar:.1f})"
+        # Physics floor: WU forecast high should not sit below the
+        # already-observed METAR high (minus a small rounding slack).
+        if drop_reason is None and daily_high_metar is not None:
+            slack = 2.0 if unit == "C" else 4.0
+            if wu_daily_high < daily_high_metar - slack:
+                drop_reason = (
+                    f"below observed METAR high "
+                    f"(metar={daily_high_metar:.1f}, slack={slack})"
+                )
+        # Physics floor: WU forecast high should not sit below the
+        # current live reading either.
+        if drop_reason is None and current_temp_f is not None:
+            slack_cur = 2.0 if unit == "C" else 4.0
+            if wu_daily_high < current_temp_f - slack_cur:
+                drop_reason = (
+                    f"below current temp (current={current_temp_f:.1f})"
+                )
+        if drop_reason:
+            log.warning(
+                "model: dropping wu_daily_high (%.1f) — %s",
+                wu_daily_high,
+                drop_reason,
+            )
             wu_daily_high = None
 
     calibrated = {}

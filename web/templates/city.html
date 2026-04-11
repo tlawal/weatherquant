@@ -1596,6 +1596,12 @@ function tradingPanel() {
     selectedBucket: null,
     selectedBucketIdx: null,
     selectedBucketId: null,
+    // Stamp the current page's city so bfcache restoration can detect
+    // cross-city state leak (e.g. user clicked Buy on Atlanta, hit back,
+    // then forward to Houston — Alpine's heap could carry Atlanta's
+    // selectedBucketId over and the Submit would post a bucket_id that
+    // belongs to the wrong city).
+    pageCitySlug: '{{ city.city_slug }}',
     side: 'buy',
     outcome: 'yes',
     orderType: 'limit',  // 'limit' or 'market'
@@ -1656,14 +1662,55 @@ function tradingPanel() {
       return effShares * (1 - this.limitPrice);
     },
 
+    init() {
+      // Defence against bfcache / back-forward navigation state leak.
+      // If selectedBucketId was set from a different city's page and the
+      // browser restored the Alpine heap without a full re-init, wipe the
+      // stale selection before the user can submit it.
+      const validIds = new Set(
+        ({{ buckets|tojson }} || []).map(b => b.bucket_id).filter(x => x != null)
+      );
+      if (this.selectedBucketId != null && !validIds.has(this.selectedBucketId)) {
+        this.selectedBucket = null;
+        this.selectedBucketIdx = null;
+        this.selectedBucketId = null;
+      }
+      // Also reset on pageshow(persisted) — triggered when the page is
+      // restored from bfcache. Alpine's init() may not re-run, so wire
+      // this separately.
+      window.addEventListener('pageshow', (e) => {
+        if (!e.persisted) return;
+        const liveIds = new Set(
+          ({{ buckets|tojson }} || []).map(b => b.bucket_id).filter(x => x != null)
+        );
+        if (this.selectedBucketId != null && !liveIds.has(this.selectedBucketId)) {
+          this.selectedBucket = null;
+          this.selectedBucketIdx = null;
+          this.selectedBucketId = null;
+          this.tradeResult = null;
+        }
+      });
+    },
+
     async selectBucket(bucketIdx, bucketId) {
       const buckets = {{ buckets|tojson }};
       const b = buckets.find(x => x.bucket_idx === bucketIdx);
-      if (!b) return;
+      if (!b) {
+        // Clicked bucket isn't on this page — almost certainly a stale
+        // onclick from a prior city page. Wipe and bail.
+        this.selectedBucket = null;
+        this.selectedBucketIdx = null;
+        this.selectedBucketId = null;
+        return;
+      }
 
       this.selectedBucket = b;
       this.selectedBucketIdx = bucketIdx;
-      this.selectedBucketId = bucketId || b.bucket_id || null;
+      // Always trust the server-rendered bucket_id from the CURRENT page's
+      // buckets list. Never fall back to whatever bucketId the caller
+      // passed in — that argument could be a stale literal baked into a
+      // cached DOM handler from a different city page.
+      this.selectedBucketId = b.bucket_id || null;
       this.tradeResult = null;
       this.shares = 0;
       this.outcome = 'yes';
@@ -1848,10 +1895,25 @@ function tradingPanel() {
       this.tradeResult = null;
 
       try {
+        // Re-derive bucket_id from the current page's buckets list every
+        // time. This is the authoritative source for "which bucket am I
+        // trading" — any stale selectedBucketId carried over from a
+        // different city's page (bfcache, Alpine heap restore) must not
+        // reach the backend.
+        const liveBuckets = {{ buckets|tojson }} || [];
+        const liveBucket = liveBuckets.find(x => x.bucket_idx === this.selectedBucketIdx);
+        if (!liveBucket) {
+          this.tradeResult = {
+            status: 'error',
+            error: 'Selected bucket is not on this page — refresh and try again.',
+          };
+          this.submitting = false;
+          return;
+        }
         const payload = {
           city_slug: '{{ city.city_slug }}',
           bucket_idx: this.selectedBucketIdx,
-          bucket_id: this.selectedBucketId,
+          bucket_id: liveBucket.bucket_id,
           side: this.side === 'sell' ? 'sell_yes' : (this.outcome === 'yes' ? 'buy_yes' : 'buy_no'),
           qty: this.shares,
           order_type: this.orderType,

@@ -1635,6 +1635,17 @@ async def manual_trade(
             if not event:
                 raise HTTPException(status_code=404, detail=f"Event for bucket id={body.bucket_id} not found")
             if event.city_id != city.id:
+                log.error(
+                    "manual_trade: bucket/city mismatch — bucket_id=%d "
+                    "event_id=%d event.city_id=%d city.id=%d slug=%s "
+                    "(likely stale client-side bucket_id — see frontend "
+                    "bfcache/pageshow guards in web/templates/city.html)",
+                    body.bucket_id,
+                    event.id,
+                    event.city_id,
+                    city.id,
+                    body.city_slug,
+                )
                 raise HTTPException(status_code=400, detail=f"Bucket id={body.bucket_id} does not belong to city {body.city_slug}")
         else:
             # Legacy path: resolve by city_slug + bucket_idx + 8 PM rollover

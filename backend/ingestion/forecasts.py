@@ -610,8 +610,17 @@ async def _scrape_wu_city(city: City, date_et: str, skip_daily: bool = False) ->
     )
 
 
+_WU_DASH_TOKENS = {"--", "—", "–", "-"}
+
+
 async def _scrape_wu_daily(city: City) -> Optional[float]:
-    """Scrape WU station page for daily high forecast."""
+    """Scrape WU station page for daily high forecast.
+
+    Returns None when WU's "Today" block is not showing a numeric high.
+    This happens nightly between the day's "peak locked in" window and the
+    next morning's forecast publication — WU renders the high as `--`. In
+    that state we must not guess: a wrong value silently poisons the model.
+    """
     url = _wu_daily_url(city)
     html = await _fetch_html(url)
     if not html:
@@ -619,43 +628,67 @@ async def _scrape_wu_daily(city: City) -> Optional[float]:
 
     soup = BeautifulSoup(html, "lxml")
 
-    # Selector priority — WU redesigns frequently, use multiple fallbacks
+    # Strategy 1 — trusted structured selectors. These are the only places
+    # we accept as "today's forecast high". If the element is present but
+    # shows a dash glyph, WU is explicitly telling us "not published" and
+    # we bail out immediately.
     selectors = [
-        # Pattern 1: structured data-ng-model or similar
         ("span", {"data-test": "daily-temperature-high"}),
-        # Pattern 2: Today's high in forecast today block  
         ("div", {"class": re.compile(r"todaySummaryTemp|today-summary", re.I)}),
     ]
-
     for tag, attrs in selectors:
         el = soup.find(tag, attrs)
-        if el:
-            temp = _extract_temp_from_element(el)
-            if temp is not None:
-                return temp
+        if el is None:
+            continue
+        raw = el.get_text(strip=True)
+        if raw in _WU_DASH_TOKENS or raw.replace("°", "").replace("F", "").strip() in _WU_DASH_TOKENS:
+            log.info("wu_daily: %s — WU shows '%s' (not published), skipping", city.city_slug, raw)
+            return None
+        temp = _extract_temp_from_element(el)
+        if temp is not None:
+            return temp
 
-    # Fallback: regex scan for temperature patterns in relevant sections
-    # Look for "High: 87°F" or similar in body text
-    text = soup.get_text(" ")
-    match = re.search(r"(?:high|today).*?(\d{2,3})\s*°?\s*F", text, re.I)
-    if match:
+    text = soup.get_text(" ", strip=True)
+
+    # Strategy 2 — if the body text has "today" or "high" right next to a
+    # dash glyph, WU is clearly in the rollover window. Treat as no-data.
+    if re.search(r"(?:today|high)[^A-Za-z0-9]{0,20}(?:--|—|–)", text, re.I):
+        log.info("wu_daily: %s — '--' near today/high in body, skipping", city.city_slug)
+        return None
+
+    # Strategy 3 — scoped phrase match. Require the `°F` literal marker,
+    # stay within one clause (no crossing a period or newline), and
+    # explicitly reject false-positive prefixes like "record high" /
+    # "previous high" / "all-time high" which describe historical records,
+    # not today's forecast.
+    _BAD_PREFIXES = ("record", "previous", "all-time", "all time", "historic", "historical")
+    for match in re.finditer(
+        r"\b(?:high|today)\b[^.\n]{0,30}?(\d{2,3})\s*°\s*F\b",
+        text,
+        re.I,
+    ):
+        start = match.start()
+        prefix = text[max(0, start - 20):start].lower()
+        if any(bad in prefix for bad in _BAD_PREFIXES):
+            continue
         try:
             val = float(match.group(1))
             if 0 <= val <= 130:
                 return val
         except ValueError:
-            pass
+            continue
 
-    # Last resort: find all temperature spans and take the max plausible value
-    temps = []
-    for el in soup.find_all(["span", "div", "td"], string=re.compile(r"^\s*\d{2,3}\s*°?\s*$")):
-        t = _extract_temp_from_element(el)
-        if t and 50 <= t <= 130:
-            temps.append(t)
-    if temps:
-        return max(temps)
-
-    log.warning("wu_daily: %s — could not parse high temp from %s", city.city_slug, url)
+    # No last-resort max-sweep. If the structured selectors and the scoped
+    # regex both fail, return None and let the model fall back to NWS +
+    # WU hourly + HRRR/NBM. Silence is safer than garbage — the old
+    # "max of all 2–3 digit numbers on page" fallback was the exact
+    # mechanism producing wildly wrong wu_daily values during the WU
+    # rollover window.
+    log.warning(
+        "wu_daily: %s — no high found at %s (likely WU rollover window)",
+        city.city_slug,
+        url,
+    )
     return None
 
 
