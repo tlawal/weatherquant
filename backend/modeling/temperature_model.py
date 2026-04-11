@@ -1,14 +1,27 @@
 """
 Temperature forecast fusion + METAR intraday adjustment.
 
-Fuses NWS API, WU daily, and WU hourly forecasts using calibrated weights.
-Applies METAR-based intraday adjustment as the day progresses.
+Fuses six forecast sources using calibrated weights:
+  - NWS API (US only)
+  - WU daily scrape
+  - WU hourly peak scrape
+  - HRRR (via Open-Meteo, GFS+HRRR blend, US CONUS)
+  - NBM (via Open-Meteo, NCEP National Blend of Models, US CONUS)
+  - ECMWF IFS (via Open-Meteo, global 9–25 km, top-2 global NWP model)
+
+The ensemble μ is blended as 70% multi-model + 30% Kalman nowcast,
+with the Kalman slice gated to hour_local >= 11 (before 11 AM the
+Kalman engine has insufficient diurnal data and systematically
+under-shoots the peak). METAR-based intraday adjustment is applied
+downstream via the _METAR_WEIGHT_TABLE, unchanged.
 
 Key design decisions:
   - sigma never collapses below 1.0°F (minimum uncertainty)
   - METAR weight increases continuously through the day
   - When METAR-heavy (late day), sigma widens slightly to reflect
     that we're trusting a single ground observation more
+  - Kalman is used only once: as the 30% slice of mu_forecast (post-11AM),
+    plus a capped (<=10%) residual nudge into projected_high
 """
 from __future__ import annotations
 
@@ -312,6 +325,7 @@ def compute_model(
     latest_weather: Optional[dict] = None,
     hrrr_high: Optional[float] = None,
     nbm_high: Optional[float] = None,
+    ecmwf_ifs_high: Optional[float] = None,
 ) -> Optional[ModelResult]:
     """
     Fuse all forecast sources and compute temperature distribution + bucket probabilities.
@@ -394,14 +408,51 @@ def compute_model(
         calibrated["hrrr"] = (hrrr_high + cal.get("bias_hrrr", 0.0), cal.get("weight_hrrr", 0.5))
     if nbm_high is not None:
         calibrated["nbm"] = (nbm_high + cal.get("bias_nbm", 0.0), cal.get("weight_nbm", 0.2))
+    if ecmwf_ifs_high is not None:
+        calibrated["ecmwf_ifs"] = (
+            ecmwf_ifs_high + cal.get("bias_ecmwf_ifs", 0.0),
+            cal.get("weight_ecmwf_ifs", 0.5),
+        )
 
     if not calibrated:
         log.warning("model: no forecast sources available — cannot compute model")
         return None
 
-    # Weighted mean of available sources (re-normalize weights)
+    # Multi-model weighted mean of available sources (re-normalize weights).
+    # This is the 70% slice of the final ensemble mu.
     total_weight = sum(w for _, w in calibrated.values())
-    mu_forecast = sum(v * w for v, w in calibrated.values()) / total_weight
+    mu_multi_model = sum(v * w for v, w in calibrated.values()) / total_weight
+
+    # ── 70% multi-model ensemble + 30% Kalman nowcast (post-11AM local) ─────
+    # Kalman is gated to hour_local >= 11: before that, the adaptive engine
+    # has insufficient diurnal data and systematically under-shoots the
+    # peak (observed: Atlanta 79.7 vs. 83+ consensus). After 11 AM local,
+    # the 30% Kalman slice acts as a nowcast correction toward the live
+    # trend. Before 11 AM we use a pure multi-model average.
+    kalman_nowcast_active = False
+    kalman_blend_high: Optional[float] = None
+    ensemble_breakdown = {
+        "multi_model": round(mu_multi_model, 2),
+        "kalman": None,
+        "mode": "pre_11am_multi_only",
+    }
+    if (
+        adaptive is not None
+        and getattr(adaptive, "predicted_daily_high", None) is not None
+        and hour_local >= 11
+    ):
+        kalman_blend_high = float(adaptive.predicted_daily_high)
+        if daily_high_metar is not None:
+            kalman_blend_high = max(kalman_blend_high, daily_high_metar)
+        mu_forecast = 0.70 * mu_multi_model + 0.30 * kalman_blend_high
+        kalman_nowcast_active = True
+        ensemble_breakdown = {
+            "multi_model": round(mu_multi_model, 2),
+            "kalman": round(kalman_blend_high, 2),
+            "mode": "70_multi_30_kalman",
+        }
+    else:
+        mu_forecast = mu_multi_model
 
     # Scale factor for Celsius
     unit_mult = 5.0 / 9.0 if unit == "C" else 1.0
@@ -461,46 +512,24 @@ def compute_model(
             current_projected = current_temp_f + remaining_rise
             projected_high = max(projected_high, current_projected)
 
-    # ── Adaptive prediction integration ──────────────────────────────────────
-    # Use Kalman + regression predicted high as an additional projected_high
-    # candidate, weighted by the adaptive engine's confidence.
+    # ── Adaptive residual blend into projected_high ──────────────────────────
+    # Kalman is already the 30% slice of mu_forecast (70/30 blend above),
+    # gated to hour_local >= 11. Here we apply only a light residual blend
+    # (<=10%) into projected_high so the METAR intraday path can still be
+    # nudged toward the Kalman nowcast without re-stacking the Kalman
+    # weight on top of the ensemble slice.
     adaptive_high = None
-    if adaptive is not None:
+    if adaptive is not None and getattr(adaptive, "predicted_daily_high", None) is not None:
         adaptive_high = adaptive.predicted_daily_high
-        if adaptive_high is not None and daily_high_metar is not None:
-            # Adaptive high can't be below already-observed high
+        if daily_high_metar is not None:
             adaptive_high = max(adaptive_high, daily_high_metar)
-        if adaptive_high is not None:
-            # Blend adaptive into projected_high: weight increases with data
+        if kalman_nowcast_active and adaptive_high is not None:
             n_obs = adaptive.kalman.n_observations if adaptive.kalman else 0
-            adaptive_w = min(0.4, n_obs * 0.02)  # caps at 0.4 with 20+ obs
-
-            # Time-of-day caps: adaptive influence varies through the day.
-            # Before peak: insufficient diurnal data, tends to under-predict.
-            # After peak: high is increasingly locked in, minimal influence needed.
-            if hour_local < 11:
-                adaptive_w = min(adaptive_w, 0.15)
-            elif hour_local < 13:
-                adaptive_w = min(adaptive_w, 0.25)
-            elif hour_local >= 19:
-                adaptive_w = min(adaptive_w, 0.05)  # high is locked
+            adaptive_w = min(0.10, n_obs * 0.01)  # caps at 0.10 with 10+ obs
+            if hour_local >= 19:
+                adaptive_w = min(adaptive_w, 0.03)  # high is locked
             elif hour_local >= 17:
-                adaptive_w = min(adaptive_w, 0.10)  # approaching lock-in
-            elif hour_local >= 15:
-                adaptive_w = min(adaptive_w, 0.25)  # peak region
-
-            # Consensus-divergence dampening: when adaptive disagrees with
-            # the forecast consensus by more than sigma, reduce its influence.
-            divergence = abs(adaptive_high - mu_forecast)
-            divergence_threshold = max(2.0 * unit_mult, sigma_raw)
-            if divergence > divergence_threshold:
-                dampening = max(0.1, 1.0 - (divergence - divergence_threshold) / (3.0 * divergence_threshold))
-                log.info(
-                    "model: adaptive dampened %.2f -> %.2f (divergence=%.1f°, threshold=%.1f°)",
-                    adaptive_w, adaptive_w * dampening, divergence, divergence_threshold,
-                )
-                adaptive_w *= dampening
-
+                adaptive_w = min(adaptive_w, 0.05)
             projected_high = (1.0 - adaptive_w) * projected_high + adaptive_w * adaptive_high
 
     # After 5 PM with declining temps, hard-cap projected_high.
@@ -583,9 +612,18 @@ def compute_model(
         "wu_hourly_peak": wu_hourly_peak,
         "hrrr_high": hrrr_high,
         "nbm_high": nbm_high,
+        "ecmwf_ifs_high": ecmwf_ifs_high,
         "daily_high_metar": daily_high_metar,
         "current_temp_f": current_temp_f,
         "mu_forecast": float(mu_forecast),
+        "mu_multi_model": float(mu_multi_model),
+        "ensemble_breakdown": ensemble_breakdown,
+        "kalman_nowcast_active": kalman_nowcast_active,
+        "kalman_divergence_f": (
+            round(abs(kalman_blend_high - mu_multi_model), 2)
+            if kalman_blend_high is not None
+            else None
+        ),
         "projected_high": float(projected_high),
         "w_metar": float(w_metar),
         "remaining_rise": remaining_rise,

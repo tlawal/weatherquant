@@ -327,6 +327,9 @@
              style="background:var(--bg-panel); border-color:var(--border);">
              <div class="font-bold mb-1 pb-1 border-b w-full" style="color:var(--cyan); border-color:var(--border)">{{ forecasts.primary.source }} Forecast</div>
              <p class="opacity-80 mb-2 mt-1 italic text-[9px]">Baseline foundational forecast.</p>
+             {% if forecasts.primary.collected_at %}
+             <p class="opacity-60 text-[9px] mb-2">Collected {{ forecasts.primary.collected_at }}</p>
+             {% endif %}
              {% if forecasts.primary.url %}
              <a href="{{ forecasts.primary.url }}" target="_blank" rel="noopener" class="text-[10px] flex items-center gap-1 hover:underline transition-colors" style="color:var(--cyan)">↗ View API Source</a>
              {% endif %}
@@ -348,6 +351,9 @@
              style="background:var(--bg-panel); border-color:var(--border);">
              <div class="font-bold mb-1 pb-1 border-b w-full" style="color:var(--cyan); border-color:var(--border)">Weather Underground Daily</div>
              <p class="opacity-80 mb-2 mt-1 italic text-[9px]">The daily highest temperature prediction directly from WU's frontend.</p>
+             {% if forecasts.wu_daily.collected_at %}
+             <p class="opacity-60 text-[9px] mb-2">Collected {{ forecasts.wu_daily.collected_at }}</p>
+             {% endif %}
              {% if forecasts.wu_daily.url %}
              <a href="{{ forecasts.wu_daily.url }}" target="_blank" rel="noopener" class="text-[10px] flex items-center gap-1 hover:underline transition-colors" style="color:var(--cyan)">↗ View WU Location Page</a>
              {% endif %}
@@ -395,7 +401,10 @@
              x-transition:enter="transition ease-out duration-100" class="absolute left-0 right-0 top-6 w-auto p-3 rounded-xl shadow-2xl z-50 border font-medium normal-case flex flex-col items-start text-left sm:right-auto sm:w-64"
              style="background:var(--bg-panel); border-color:var(--border);">
              <div class="font-bold mb-1 pb-1 border-b w-full" style="color:var(--cyan); border-color:var(--border)">HRRR (GFS+HRRR Blend)</div>
-             <p class="opacity-80 mb-2 mt-1 italic text-[9px]">GFS+HRRR seamless blend via Open-Meteo. Combines global GFS reliability with HRRR's rapid hourly updates for US regions.</p>
+             <p class="opacity-80 mb-2 mt-1 italic text-[9px]">GFS+HRRR seamless blend via Open-Meteo. Combines global GFS reliability with HRRR's rapid hourly updates for US regions. HRRR updates hourly (24/day); GFS every 6 h.</p>
+             {% if forecasts.hrrr.collected_at %}
+             <p class="opacity-60 text-[9px] mb-2">Collected {{ forecasts.hrrr.collected_at }}</p>
+             {% endif %}
              {% if forecasts.hrrr.url %}
              <a href="{{ forecasts.hrrr.url }}" target="_blank" rel="noopener" class="text-[10px] flex items-center gap-1 hover:underline transition-colors" style="color:var(--cyan)">↗ View on Open-Meteo</a>
              {% endif %}
@@ -416,8 +425,34 @@
              style="background:var(--bg-panel); border-color:var(--border);">
              <div class="font-bold mb-1 pb-1 border-b w-full" style="color:var(--cyan); border-color:var(--border)">NCEP National Blend of Models</div>
              <p class="opacity-80 mb-2 mt-1 italic text-[9px]">A statistical post-processing blend of 50+ NWP models (GFS, NAM, HRRR, ECMWF, GEM, SREF, etc.) produced by NOAA/NCEP. Peer-reviewed studies show NBM reduces MAE by 10-20% over raw GFS and outperforms individual models at 1-7 day lead times. US CONUS coverage, updated hourly.</p>
+             {% if forecasts.nbm.collected_at %}
+             <p class="opacity-60 text-[9px] mb-2">Collected {{ forecasts.nbm.collected_at }}</p>
+             {% endif %}
              {% if forecasts.nbm.url %}
              <a href="{{ forecasts.nbm.url }}" target="_blank" rel="noopener" class="text-[10px] flex items-center gap-1 hover:underline transition-colors" style="color:var(--cyan)">↗ View on Open-Meteo</a>
+             {% endif %}
+        </div>
+      </div>
+      {% endif %}
+
+      <!-- ECMWF IFS (Open-Meteo / European Centre) -->
+      {% if forecasts.ecmwf_ifs and forecasts.ecmwf_ifs.high_f is not none %}
+      <div class="group relative flex justify-between items-center cursor-pointer hover:bg-white/5 p-1 -mx-1 rounded transition-colors" x-data="{ showMeta: false }">
+        <div class="flex items-center gap-1.5" @click="showMeta = !showMeta" @click.outside="showMeta = false">
+          <span style="color:var(--text-muted)">ECMWF IFS</span>
+          <button class="hover:text-cyan-400 opacity-30 group-hover:opacity-100 transition-all">ⓘ</button>
+        </div>
+        <span class="mono font-medium text-white">{{ "%.1f"|format(forecasts.ecmwf_ifs.high_f) }}°{{ city.unit|default('F') }}</span>
+        <div x-show="showMeta" x-cloak
+             x-transition:enter="transition ease-out duration-100" class="absolute left-0 right-0 top-6 w-auto p-3 rounded-xl shadow-2xl z-50 border font-medium normal-case flex flex-col items-start text-left sm:right-auto sm:w-64"
+             style="background:var(--bg-panel); border-color:var(--border);">
+             <div class="font-bold mb-1 pb-1 border-b w-full" style="color:var(--cyan); border-color:var(--border)">ECMWF IFS (Integrated Forecast System)</div>
+             <p class="opacity-80 mb-2 mt-1 italic text-[9px]">ECMWF IFS (European Centre for Medium-Range Weather Forecasts) – 9–25 km global resolution, updated every 6 h (00/06/12/18 UTC), 15-day horizon. One of the top 2 global models. Delivered via Open-Meteo.</p>
+             {% if forecasts.ecmwf_ifs.collected_at %}
+             <p class="opacity-60 text-[9px] mb-2">Collected {{ forecasts.ecmwf_ifs.collected_at }}</p>
+             {% endif %}
+             {% if forecasts.ecmwf_ifs.url %}
+             <a href="{{ forecasts.ecmwf_ifs.url }}" target="_blank" rel="noopener" class="text-[10px] flex items-center gap-1 hover:underline transition-colors" style="color:var(--cyan)">↗ View on Open-Meteo</a>
              {% endif %}
         </div>
       </div>
@@ -599,6 +634,26 @@
   {% endif %}
 </div>
 
+<!-- ── KALMAN DIVERGENCE BANNER ──────────────────────────────────────────── -->
+{% if model and model.inputs and model.inputs.kalman_divergence_f is not none and model.inputs.kalman_divergence_f > 3.0 %}
+<div class="card p-3 mb-4 border-l-4" style="border-left-color:#FBBF24;background:rgba(234,179,8,0.08)">
+  <div class="flex items-center gap-2 text-[11px]">
+    <span class="text-[10px] uppercase tracking-widest font-bold" style="color:#FBBF24">Kalman Divergence</span>
+    <span class="mono">Δ {{ "%.1f"|format(model.inputs.kalman_divergence_f) }}°{{ city.unit|default('F') }}</span>
+  </div>
+  <p class="text-[11px] mt-1 opacity-80">
+    Kalman nowcast only — using ensemble blend (70% multi-model + 30% Kalman) for main signal.
+    {% if model.inputs.mu_multi_model is not none %}
+    Multi-model μ: <span class="mono">{{ "%.1f"|format(model.inputs.mu_multi_model) }}°</span>
+    {% endif %}
+    {% if model.inputs.ensemble_breakdown and model.inputs.ensemble_breakdown.kalman is not none %}
+    · Kalman: <span class="mono">{{ "%.1f"|format(model.inputs.ensemble_breakdown.kalman) }}°</span>
+    {% endif %}
+    · Blended: <span class="mono font-bold" style="color:var(--cyan)">{{ "%.1f"|format(model.mu) }}°{{ city.unit|default('F') }}</span>
+  </p>
+</div>
+{% endif %}
+
 <!-- ── STATION-TIME PREDICTIONS ────────────────────────────────────────────── -->
 {% if station_predictions %}
 <div class="card p-5 mb-6" x-data="{ showDetail: false }">
@@ -610,7 +665,14 @@
     </div>
     {% if adaptive_info %}
     <div class="flex flex-wrap items-center gap-3 text-[10px]">
-      {% if adaptive_info.composite_peak_timing %}
+      {% if model and model.inputs and model.inputs.mu_forecast is not none %}
+      <span class="px-2 py-0.5 rounded-full font-bold" style="background:rgba(34,211,238,0.15);color:var(--cyan)" title="Primary signal: 70% multi-model ensemble (NWS/WU/HRRR/NBM/ECMWF IFS) + 30% Kalman (post-11AM)">
+        Primary: {{ "%.1f"|format(model.mu) }}°{{ city.unit|default('F') }}{% if adaptive_info.composite_peak_timing %} @ {{ adaptive_info.composite_peak_timing }}{% endif %}
+        <span class="opacity-60 text-[9px] ml-1">
+          {% if model.inputs.kalman_nowcast_active %}70/30 blend{% else %}multi-model only{% endif %}
+        </span>
+      </span>
+      {% elif adaptive_info.composite_peak_timing %}
       <span class="px-2 py-0.5 rounded-full font-bold" style="background:rgba(234,179,8,0.15);color:#FBBF24">
         Est. Peak: {{ adaptive_info.composite_peak_timing }}
       </span>
@@ -695,6 +757,9 @@
     <div>
       <span style="color:var(--text-muted)">Predicted High</span>
       <div class="mono font-bold" style="color:var(--cyan)">{{ adaptive_info.predicted_daily_high }}°{{ city.unit|default('F') }}{% if adaptive_info.predicted_high_time %} @ {{ adaptive_info.predicted_high_time }}{% endif %}</div>
+      {% if model and model.inputs and model.inputs.kalman_divergence_f is not none and model.inputs.kalman_divergence_f > 3.0 %}
+      <div class="text-[9px] opacity-70" style="color:#FBBF24">nowcast only — see blend above</div>
+      {% endif %}
     </div>
     <div>
       <span style="color:var(--text-muted)">Kalman Trend</span>

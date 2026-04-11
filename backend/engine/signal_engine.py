@@ -179,6 +179,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         wu_history_obs = await get_latest_forecast(sess, city.id, "wu_history", today_et)
         hrrr_obs = await get_latest_forecast(sess, city.id, "hrrr", today_et)
         nbm_obs = await get_latest_forecast(sess, city.id, "nbm", today_et)
+        ecmwf_ifs_obs = await get_latest_forecast(sess, city.id, "ecmwf_ifs", today_et)
 
         cal = await get_calibration(sess, city.id)
         # NEW: Reliability metrics for probability remapping
@@ -372,6 +373,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         wu_hourly_peak=wu_hourly_obs.high_f if wu_hourly_obs else None,
         hrrr_high=hrrr_obs.high_f if hrrr_obs else None,
         nbm_high=nbm_obs.high_f if nbm_obs else None,
+        ecmwf_ifs_high=ecmwf_ifs_obs.high_f if ecmwf_ifs_obs else None,
         daily_high_metar=ground_truth_high,
         current_temp_f=metar.temp_f if metar else None,
         calibration=cal_dict,

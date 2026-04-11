@@ -256,6 +256,7 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
         wu_history = await get_latest_successful_forecast(sess, city.id, "wu_history", target_date_et)
         hrrr_fc = await get_latest_successful_forecast(sess, city.id, "hrrr", target_date_et)
         nbm_fc = await get_latest_successful_forecast(sess, city.id, "nbm", target_date_et)
+        ecmwf_ifs_fc = await get_latest_successful_forecast(sess, city.id, "ecmwf_ifs", target_date_et)
         
         primary_fc = None
         if city.is_us:
@@ -563,11 +564,13 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                     "source": "nws" if city.is_us else "Open-Meteo",
                     "high_f": primary_fc.high_f if primary_fc else None,
                     "age_s": _age(primary_fc.fetched_at if primary_fc else None),
+                    "collected_at": _fmt_time_et(primary_fc.fetched_at if primary_fc else None),
                     "url": f"https://api.weather.gov/gridpoints/{city.nws_office}/{city.nws_grid_x},{city.nws_grid_y}/forecast" if city.is_us else f"https://api.open-meteo.com/v1/forecast?latitude={city.lat}&longitude={city.lon}&hourly=temperature_2m&forecast_days=1"
                 },
                 "wu_daily": {
                     "high_f": max((v for v in [wu_d.high_f if wu_d else None, obs_high_f] if v is not None), default=None),
                     "age_s": _age(wu_d.fetched_at if wu_d else None),
+                    "collected_at": _fmt_time_et(wu_d.fetched_at if wu_d else None),
                     "url": f"https://www.wunderground.com/weather/{city.metar_station}" if city.metar_station else None
                 },
                 "wu_hourly": {
@@ -587,12 +590,24 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                 "hrrr": {
                     "high_f": hrrr_fc.high_f if hrrr_fc else None,
                     "age_s": _age(hrrr_fc.fetched_at if hrrr_fc else None),
+                    "collected_at": _fmt_time_et(hrrr_fc.fetched_at if hrrr_fc else None),
                     "url": f"https://open-meteo.com/en/docs?latitude={city.lat}&longitude={city.lon}&hourly=temperature_2m&models=gfs_hrrr&temperature_unit=fahrenheit&forecast_days=1" if city.lat else None,
                 },
                 "nbm": {
                     "high_f": nbm_fc.high_f if nbm_fc else None,
                     "age_s": _age(nbm_fc.fetched_at if nbm_fc else None),
+                    "collected_at": _fmt_time_et(nbm_fc.fetched_at if nbm_fc else None),
                     "url": f"https://open-meteo.com/en/docs?latitude={city.lat}&longitude={city.lon}&hourly=temperature_2m&models=ncep_nbm_conus&temperature_unit=fahrenheit&forecast_days=1" if city.lat else None,
+                },
+                "ecmwf_ifs": {
+                    "high_f": ecmwf_ifs_fc.high_f if ecmwf_ifs_fc else None,
+                    "age_s": _age(ecmwf_ifs_fc.fetched_at if ecmwf_ifs_fc else None),
+                    "collected_at": _fmt_time_et(ecmwf_ifs_fc.fetched_at if ecmwf_ifs_fc else None),
+                    "url": (
+                        f"https://api.open-meteo.com/v1/forecast?latitude={city.lat}"
+                        f"&longitude={city.lon}&hourly=temperature_2m&models=ecmwf_ifs"
+                        f"&forecast_days=1&temperature_unit=fahrenheit"
+                    ) if city.lat is not None else None,
                 },
             },
             "event": event,
