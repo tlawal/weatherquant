@@ -11,7 +11,7 @@ async def main():
             ("la", "KLAX", "los-angeles", "ca", True),
             ("austin", "KAUS", "austin", "tx", True),
             ("denver", "KBKF", "denver", "co", True),
-            ("houston", "KIAH", "houston", "tx", True),
+            ("houston", "KHOU", "houston", "tx", True),
             ("taipei", "RCTP", "taipei", "tw", True),
             ("hong-kong", "VHHH", "hong-kong", "hk", True),
         ]

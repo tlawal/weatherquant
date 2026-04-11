@@ -139,6 +139,24 @@ async def run_signal_engine() -> list[BucketSignal]:
     return signals
 
 
+def resolve_active_station(city: City, event: Optional[Event]) -> tuple[str, str]:
+    """Resolve which observation station is active for this city/event today.
+
+    Returns (station_id, source) where source is one of:
+      - 'event_resolution_station' — overridden by the per-event Polymarket
+        resolution source (parsed via _extract_resolution_url at ingest time)
+      - 'city_default' — falls back to City.metar_station
+
+    The override path lets us follow Polymarket's actual settlement station
+    when it differs from our city default (e.g. Houston: city default KIAH
+    vs market-resolved KHOU). The default path keeps existing behavior.
+    """
+    override = getattr(event, "resolution_station_id", None) if event is not None else None
+    if override:
+        return override.upper(), "event_resolution_station"
+    return ((city.metar_station or "").upper(), "city_default")
+
+
 async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]:
     """Compute signals for all buckets in a city's today event."""
     async with get_session() as sess:
@@ -148,6 +166,8 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
 
         if event.status not in ("ok",):
             return []
+
+        active_station_id, active_station_source = resolve_active_station(city, event)
 
         buckets = await get_buckets_for_event(sess, event.id)
         metar = await get_latest_metar(sess, city.id)
@@ -164,8 +184,9 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         # NEW: Reliability metrics for probability remapping
         reliability_bins = await get_reliability_metrics(city.id)
 
-        # Station profile for resolution-aware high
-        profile = await get_station_profile(sess, city.metar_station) if city.metar_station else None
+        # Station profile for resolution-aware high — keyed on the active
+        # station (per-event override > city default).
+        profile = await get_station_profile(sess, active_station_id) if active_station_id else None
         if profile and profile.observation_minutes:
             valid_minutes = json.loads(profile.observation_minutes)
             resolution_high = await get_resolution_high_metar(sess, city.id, today_et, valid_minutes, city_tz=getattr(city, "tz", "America/New_York"))
@@ -192,14 +213,27 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
     bucket_ranges = [(b.low_f, b.high_f) for b in buckets]
     canonical_ranges = canonical_bucket_ranges(bucket_ranges)
 
-    # Resolve ground truth: prefer WU history (settlement source),
-    # then resolution-filtered METAR, then raw METAR
-    if wu_history_obs and wu_history_obs.high_f is not None:
-        ground_truth_high = wu_history_obs.high_f
-    elif resolution_high is not None:
-        ground_truth_high = resolution_high
-    else:
-        ground_truth_high = daily_high  # raw MAX fallback
+    # Resolve ground truth: take the MAX of every observation source we trust.
+    # Using "first available in priority order" causes desync when the
+    # primary source (WU history) lags behind METAR — the model would then
+    # see a too-low observed high, fail to lock, and not zero out
+    # already-surpassed buckets even though the gates correctly do.
+    _wu_hist_high = wu_history_obs.high_f if wu_history_obs else None
+    _candidate_highs = [
+        v for v in (_wu_hist_high, resolution_high, daily_high)
+        if v is not None
+    ]
+    ground_truth_high = max(_candidate_highs) if _candidate_highs else None
+
+    # Track which source supplied the winning value for audit/debug.
+    ground_truth_source: Optional[str] = None
+    if ground_truth_high is not None:
+        if _wu_hist_high == ground_truth_high:
+            ground_truth_source = "wu_history"
+        elif resolution_high == ground_truth_high:
+            ground_truth_source = "resolution_metar"
+        else:
+            ground_truth_source = "raw_metar"
 
     # Observed high floor for conditional probabilities:
     # Use ground_truth_high if available, otherwise fall back to current METAR temp
@@ -207,6 +241,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
     observed_high_floor = ground_truth_high
     if observed_high_floor is None and metar and metar.temp_f is not None:
         observed_high_floor = metar.temp_f
+        ground_truth_source = "current_metar"
 
     # Resolution mismatch: raw_high exceeds resolution_high
     resolution_mismatch = None
@@ -361,12 +396,21 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
     prob_hotter_bucket = model.prob_hotter_bucket
     city_state = classify_city_state(prob_hotter_bucket)
     model.inputs["city_state"] = city_state
+    # Stamp the resolved station + ground-truth source onto the snapshot so
+    # /state/{city} and the dashboard can display which station/source is
+    # actually driving today's model.
+    model.inputs["active_station_id"] = active_station_id
+    model.inputs["active_station_source"] = active_station_source
+    model.inputs["ground_truth_high"] = ground_truth_high
+    model.inputs["ground_truth_source"] = ground_truth_source
 
     # Use a single session for all DB writes (model snapshot + per-bucket reads/inserts)
     signals: list[BucketSignal] = []
     async with get_session() as sess:
-        # Persist model snapshot
-        await insert_model_snapshot(
+        # Persist model snapshot — capture id so each Signal row generated
+        # in this pass can be tagged with its parent generation. This is
+        # what lets the dashboard filter to "latest snapshot only".
+        snapshot = await insert_model_snapshot(
             sess,
             event_id=event.id,
             mu=model.mu,
@@ -375,6 +419,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
             inputs_json=json.dumps(model.inputs),
             forecast_quality=model.forecast_quality,
         )
+        snapshot_id = snapshot.id if snapshot is not None else None
 
         if city_state == "resolved":
             log.info(
@@ -467,6 +512,10 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
                 "observed_bucket_upper_f": model.observed_bucket_upper_f,
                 "resolution_high": resolution_high,
                 "raw_high": daily_high,
+                "ground_truth_high": ground_truth_high,
+                "ground_truth_source": ground_truth_source,
+                "active_station_id": active_station_id,
+                "active_station_source": active_station_source,
                 "observation_minutes": valid_minutes,
                 "resolution_mismatch": resolution_mismatch,
             }
@@ -512,10 +561,12 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
             )
             signals.append(sig)
 
-            # Persist signal to DB (reuse session)
+            # Persist signal to DB (reuse session) — tag with snapshot_id so
+            # the dashboard can filter to "rows from the latest generation".
             await insert_signal(
                 sess,
                 bucket_id=bucket.id,
+                model_snapshot_id=snapshot_id,
                 model_prob=sig.model_prob,
                 mkt_prob=sig.mkt_prob,
                 raw_edge=sig.raw_edge,

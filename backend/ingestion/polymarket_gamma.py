@@ -44,6 +44,51 @@ _WU_SOURCE_PATTERNS = [
 # Regex to extract resolution URL and station ID
 _URL_PATTERN = re.compile(r'https?://[^\s<>"\']+')
 _NWS_SITE_PATTERN = re.compile(r'[?&]site=([A-Z0-9]{3,8})', re.I)
+# WU station-keyed URLs:
+#   wunderground.com/history/daily/us/tx/houston/KHOU/...
+#   wunderground.com/hourly/us/tx/houston/KHOU/...
+#   wunderground.com/history/airport/KHOU/...
+_WU_STATION_PATTERN = re.compile(
+    # `history/daily/us/tx/houston/KHOU/...` (zero or more intermediate segments),
+    # `hourly/us/tx/houston/KHOU/...`,
+    # `history/airport/KHOU/...` (station directly after `airport/`).
+    r'wunderground\.com/(?:history/daily|history/airport|hourly)/(?:[^"\s<>\'/]+/)*(K[A-Z0-9]{3,4})(?=[/"\s<>\']|$)',
+    re.I,
+)
+# weather.gov/stations/KXXX or /stations/KXXX/observations
+_WX_GOV_STATION_PATTERN = re.compile(r'weather\.gov/stations/([A-Z0-9]{3,8})', re.I)
+
+# Substring aliases for resolution-source text when no machine-parseable URL
+# is present (Polymarket sometimes only writes the airport name in prose).
+# Keys must be lower-case; values are uppercase ICAO codes.
+_STATION_ALIASES: dict[str, str] = {
+    "william p. hobby": "KHOU",
+    "william p hobby": "KHOU",
+    "hobby airport": "KHOU",
+    "houston hobby": "KHOU",
+    "george bush intercontinental": "KIAH",
+    "bush intercontinental": "KIAH",
+    "hartsfield-jackson": "KATL",
+    "hartsfield jackson": "KATL",
+    "laguardia": "KLGA",
+    "john f. kennedy": "KJFK",
+    "john f kennedy": "KJFK",
+    "jfk airport": "KJFK",
+    "newark liberty": "KEWR",
+    "o'hare": "KORD",
+    "ohare": "KORD",
+    "midway airport": "KMDW",
+    "dallas love field": "KDAL",
+    "dallas/fort worth": "KDFW",
+    "dfw airport": "KDFW",
+    "austin-bergstrom": "KAUS",
+    "los angeles international": "KLAX",
+    "san francisco international": "KSFO",
+    "seattle-tacoma": "KSEA",
+    "sea-tac": "KSEA",
+    "miami international": "KMIA",
+    "denver international": "KDEN",
+}
 
 # Regex to parse bucket temperature ranges from market labels
 _RANGE_PATTERNS = [
@@ -83,7 +128,14 @@ def _build_slugs(city_slug: str, target_date: date) -> list[str]:
 
 
 def _extract_resolution_url(event_data: dict) -> tuple[str | None, str | None]:
-    """Extract (resolution_source_url, resolution_station_id) from Gamma event data."""
+    """Extract (resolution_source_url, resolution_station_id) from Gamma event data.
+
+    Looks first for machine-parseable station-keyed URLs (NWS timeseries,
+    weather.gov station observations, Weather Underground station history).
+    Falls back to a small substring alias map keyed on airport names so that
+    markets that only mention the station in prose (e.g. "William P. Hobby
+    Airport") still resolve to a station ID.
+    """
     # Fields to search for URLs (in priority order)
     fields_to_check = [
         event_data.get("resolutionSource") or "",
@@ -93,16 +145,29 @@ def _extract_resolution_url(event_data: dict) -> tuple[str | None, str | None]:
         event_data.get("question") or "",
     ]
     for text in fields_to_check:
-        urls = _URL_PATTERN.findall(str(text))
+        text_str = str(text)
+        urls = _URL_PATTERN.findall(text_str)
         for url in urls:
             # Prefer NWS timeseries or similar station-based URLs
             m = _NWS_SITE_PATTERN.search(url)
             if m:
                 return url, m.group(1).upper()
-            # Also catch weather.gov station observation URLs
-            station_m = re.search(r'weather\.gov/stations/([A-Z0-9]{3,8})', url, re.I)
+            # weather.gov station observation URLs
+            station_m = _WX_GOV_STATION_PATTERN.search(url)
             if station_m:
                 return url, station_m.group(1).upper()
+            # Weather Underground station-keyed URLs (history/daily, hourly, airport)
+            wu_m = _WU_STATION_PATTERN.search(url)
+            if wu_m:
+                return url, wu_m.group(1).upper()
+
+    # Last-resort substring alias match against the resolution-source / question text.
+    alias_text = " ".join(str(t) for t in fields_to_check).lower()
+    for needle, station in _STATION_ALIASES.items():
+        if needle in alias_text:
+            plain = event_data.get("resolutionSource") or event_data.get("resolvedBy") or ""
+            return (plain[:500] if plain else None), station
+
     # No structured URL found — return the plain text resolutionSource as URL if present
     plain = event_data.get("resolutionSource") or event_data.get("resolvedBy") or ""
     return (plain[:500] if plain else None), None

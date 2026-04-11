@@ -5,7 +5,18 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 import backend.api.routes as api_routes
 import backend.storage.db as storage_db
-from backend.storage.models import Base, Bucket, City, Event, ForecastObs, MetarObs, ModelSnapshot, Signal, WorkerHeartbeat
+from backend.storage.models import (
+    Base,
+    Bucket,
+    City,
+    Event,
+    ForecastObs,
+    MetarObs,
+    ModelSnapshot,
+    Position,
+    Signal,
+    WorkerHeartbeat,
+)
 from backend.tz_utils import city_local_date
 
 
@@ -43,6 +54,108 @@ async def _create_city(session_factory, slug: str = "atlanta") -> City:
         await session.commit()
         await session.refresh(city)
         return city
+
+
+def test_unredeemed_wins_skips_events_without_positions(tmp_path, monkeypatch):
+    """Regression for the phantom $0 unredeemed-wins panel: a resolved event
+    with condition_ids but no Position rows must not surface as a claimable
+    winning."""
+    engine, session_factory = _run(_setup_test_db(tmp_path, monkeypatch))
+    city = _run(_create_city(session_factory))
+
+    async def seed():
+        async with session_factory() as session:
+            event = Event(
+                city_id=city.id,
+                date_et="2026-04-10",
+                status="ok",
+                trading_enabled=True,
+                resolved_at=datetime.utcnow(),
+                winning_bucket_idx=1,
+            )
+            session.add(event)
+            await session.flush()
+
+            # Two buckets, both with condition_ids (resolvable), no positions.
+            for idx, (lo, hi) in enumerate([(76.0, 77.0), (78.0, 79.0)]):
+                session.add(
+                    Bucket(
+                        event_id=event.id,
+                        bucket_idx=idx,
+                        label=f"{int(lo)}-{int(hi)}°F",
+                        low_f=lo,
+                        high_f=hi,
+                        yes_token_id=f"yes-{idx}",
+                        no_token_id=f"no-{idx}",
+                        condition_id=f"cond-{idx}",
+                    )
+                )
+            await session.commit()
+
+    _run(seed())
+    result = _run(api_routes.unredeemed_wins())
+    assert result == {"unredeemed": []}
+
+    _run(engine.dispose())
+
+
+def test_unredeemed_wins_includes_events_with_winning_position(tmp_path, monkeypatch):
+    """Counterpart: when a real winning Position exists, the event surfaces."""
+    engine, session_factory = _run(_setup_test_db(tmp_path, monkeypatch))
+    city = _run(_create_city(session_factory))
+
+    async def seed():
+        async with session_factory() as session:
+            event = Event(
+                city_id=city.id,
+                date_et="2026-04-10",
+                status="ok",
+                trading_enabled=True,
+                resolved_at=datetime.utcnow(),
+                winning_bucket_idx=1,
+            )
+            session.add(event)
+            await session.flush()
+
+            winning_bucket = None
+            for idx, (lo, hi) in enumerate([(76.0, 77.0), (78.0, 79.0)]):
+                b = Bucket(
+                    event_id=event.id,
+                    bucket_idx=idx,
+                    label=f"{int(lo)}-{int(hi)}°F",
+                    low_f=lo,
+                    high_f=hi,
+                    yes_token_id=f"yes-{idx}",
+                    no_token_id=f"no-{idx}",
+                    condition_id=f"cond-{idx}",
+                )
+                session.add(b)
+                if idx == 1:
+                    winning_bucket = b
+            await session.flush()
+
+            assert winning_bucket is not None
+            session.add(
+                Position(
+                    bucket_id=winning_bucket.id,
+                    side="YES",
+                    net_qty=10.0,
+                    avg_cost=0.42,
+                    realized_pnl=0.0,
+                    unrealized_pnl=0.0,
+                    last_mkt_price=0.99,
+                )
+            )
+            await session.commit()
+
+    _run(seed())
+    result = _run(api_routes.unredeemed_wins())
+    assert len(result["unredeemed"]) == 1
+    entry = result["unredeemed"][0]
+    assert entry["winning_bucket_idx"] == 1
+    assert entry["total_expected_payout"] == 10.0
+
+    _run(engine.dispose())
 
 
 def test_health_handles_naive_heartbeat_timestamps(tmp_path, monkeypatch):

@@ -201,14 +201,45 @@ def _late_day_lock_active(
     hour_local: int,
     unit_mult: float,
 ) -> bool:
-    if observed_high is None or adaptive is None or not adaptive.peak_already_passed:
+    """Decide whether to engage the late-day lock regime.
+
+    The lock concentrates probability on the bucket containing the observed
+    high once we are confident the day's peak is in. We do not require the
+    adaptive engine to have flagged peak_already_passed — that detector can
+    lag by an hour or more in sparse-METAR cities. Instead we add an
+    observation-grounded fallback path so the lock still engages once it is
+    physically clear we are post-peak (after 18:00 local, no residual rise,
+    current temp at least 0.5°F below observed high, trend non-rising).
+    """
+    if observed_high is None or current_temp_f is None:
         return False
-    if current_temp_f is None or remaining_rise > 0.25 * unit_mult:
+    if remaining_rise > 0.25 * unit_mult:
         return False
     if current_temp_f > observed_high - (0.5 * unit_mult):
         return False
-    trend_per_hr = adaptive.kalman.temp_trend_per_min * 60.0 if adaptive.kalman else None
-    return hour_local >= 18 or trend_per_hr is None or trend_per_hr <= 0.25
+
+    trend_per_hr = (
+        adaptive.kalman.temp_trend_per_min * 60.0
+        if adaptive is not None and adaptive.kalman is not None
+        else None
+    )
+
+    # Path 1 — adaptive engine declared peak passed (existing behavior).
+    if adaptive is not None and adaptive.peak_already_passed:
+        return hour_local >= 18 or trend_per_hr is None or trend_per_hr <= 0.25
+
+    # Path 2 — observation fallback: physically post-peak even if adaptive lags.
+    # All four floor checks above already passed, so we know:
+    #   - observed_high and current_temp_f exist
+    #   - remaining_rise <= 0.25°F
+    #   - current_temp is at least 0.5°F below observed_high
+    # The remaining condition is "we're past the typical late-day window AND
+    # the trend isn't actively rising back up". Trend may be unknown (no
+    # adaptive), in which case the time-of-day check alone is sufficient.
+    if hour_local >= 18 and (trend_per_hr is None or trend_per_hr <= 0.25):
+        return True
+
+    return False
 
 
 def _compute_lock_probs(

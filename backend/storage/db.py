@@ -143,6 +143,10 @@ async def init_db() -> None:
     await _run_ddl("ALTER TABLE orders ADD COLUMN signal_id INTEGER")
     await _run_ddl("ALTER TABLE orders ADD COLUMN gates_json TEXT")
 
+    # signals — generation tag to filter to "latest snapshot only"
+    await _run_ddl("ALTER TABLE signals ADD COLUMN model_snapshot_id INTEGER")
+    await _run_ddl("CREATE INDEX IF NOT EXISTS ix_signal_snapshot ON signals (model_snapshot_id)")
+
     # calibration_params — HRRR/GFS support
     await _run_ddl("ALTER TABLE calibration_params ADD COLUMN bias_hrrr FLOAT DEFAULT 0.0")
     await _run_ddl("ALTER TABLE calibration_params ADD COLUMN bias_gfs FLOAT DEFAULT 0.0")

@@ -151,3 +151,64 @@ def test_process_event_data_orders_open_ended_buckets(tmp_path, monkeypatch):
     ]
 
     _run(engine.dispose())
+
+
+def test_extract_resolution_url_nws_site():
+    event_data = {
+        "resolutionSource": (
+            "Resolves per https://www.weather.gov/wrh/timeseries?site=KATL&hours=48"
+        )
+    }
+    url, station = gamma_ingestion._extract_resolution_url(event_data)
+    assert station == "KATL"
+    assert url and "site=KATL" in url
+
+
+def test_extract_resolution_url_wu_history():
+    event_data = {
+        "description": (
+            "This market resolves using "
+            "https://www.wunderground.com/history/daily/us/tx/houston/KHOU/date/2026-4-10"
+        )
+    }
+    url, station = gamma_ingestion._extract_resolution_url(event_data)
+    assert station == "KHOU"
+    assert url and "wunderground.com" in url
+
+
+def test_extract_resolution_url_wu_hourly():
+    event_data = {
+        "description": (
+            "Hourly: https://www.wunderground.com/hourly/us/tx/houston/KHOU/date/2026-4-10"
+        )
+    }
+    _, station = gamma_ingestion._extract_resolution_url(event_data)
+    assert station == "KHOU"
+
+
+def test_extract_resolution_url_wu_airport_history():
+    event_data = {
+        "description": (
+            "https://www.wunderground.com/history/airport/KHOU/2026/4/10/DailyHistory.html"
+        )
+    }
+    _, station = gamma_ingestion._extract_resolution_url(event_data)
+    assert station == "KHOU"
+
+
+def test_extract_resolution_url_alias_fallback():
+    event_data = {
+        "resolutionSource": (
+            "Resolves to the daily high reported at William P. Hobby Airport."
+        )
+    }
+    _, station = gamma_ingestion._extract_resolution_url(event_data)
+    assert station == "KHOU"
+
+
+def test_extract_resolution_url_no_match_returns_none_station():
+    event_data = {
+        "resolutionSource": "Resolves at the official high temperature for the day.",
+    }
+    _, station = gamma_ingestion._extract_resolution_url(event_data)
+    assert station is None

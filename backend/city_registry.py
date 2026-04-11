@@ -53,8 +53,8 @@ CITY_REGISTRY: list[dict] = [
 
     {"priority_order": 6, "cluster": "us_central", "utc_offset": -6,
      "city_slug": "houston", "display_name": "Houston",
-     "nws_office": "HGX", "nws_grid_x": 63, "nws_grid_y": 104,
-     "lat": 29.9902, "lon": -95.3368, "metar_station": "KIAH",
+     "nws_office": "HGX", "nws_grid_x": 66, "nws_grid_y": 89,
+     "lat": 29.6375, "lon": -95.2825, "metar_station": "KHOU",
      "wu_state": "tx", "wu_city": "houston",
      "enabled": 1, "is_us": 1, "unit": "F", "tz": "America/Chicago"},
 

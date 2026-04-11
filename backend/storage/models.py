@@ -299,10 +299,20 @@ class MarketContextSnapshot(Base):
 class Signal(Base):
     """Computed edge for one bucket at one point in time."""
     __tablename__ = "signals"
-    __table_args__ = (Index("ix_signal_bucket_ts", "bucket_id", "computed_at"),)
+    __table_args__ = (
+        Index("ix_signal_bucket_ts", "bucket_id", "computed_at"),
+        Index("ix_signal_snapshot", "model_snapshot_id"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     bucket_id: Mapped[int] = mapped_column(Integer, ForeignKey("buckets.id"), nullable=False)
+    # Generation tag — every Signal row is produced inside a single
+    # _compute_city_signals() pass alongside one ModelSnapshot. Stamping the
+    # snapshot id lets reads filter to "rows from the latest generation only",
+    # so the dashboard never mixes pre/post-rerun signals for the same event.
+    model_snapshot_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("model_snapshots.id"), nullable=True
+    )
     computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     model_prob: Mapped[float] = mapped_column(Float, nullable=False)
     mkt_prob: Mapped[float] = mapped_column(Float, nullable=False)

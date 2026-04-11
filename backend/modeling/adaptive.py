@@ -498,12 +498,29 @@ def compute_peak_timing(
     }
 
     # Check if Kalman trend has been negative for extended period
-    # → peak likely already passed
-    if kalman and kalman.n_observations >= 10 and kalman.temp_trend_per_min < -0.01:
-        # Trend is clearly negative (~-0.6°/hr or steeper)
-        # Find the actual max in today's observations
-        if todays_obs:
-            max_obs = max(todays_obs, key=lambda o: o.get(temp_key, -999))
+    # → peak likely already passed.
+    #
+    # Lowered thresholds (n_observations >= 5, trend < -0.005°/min ≈ -0.3°/hr)
+    # so the lock activates earlier in cities with sparse METAR cadence —
+    # the previous gates of n>=10 and trend<-0.01 lagged by an hour or more
+    # past the actual peak. We additionally require that the day's observed
+    # max is at least 0.3°F above the current temperature, to avoid false
+    # positives during a flat plateau.
+    if (
+        kalman
+        and kalman.n_observations >= 5
+        and kalman.temp_trend_per_min < -0.005
+        and todays_obs
+    ):
+        max_obs = max(todays_obs, key=lambda o: o.get(temp_key, -999))
+        latest_obs = todays_obs[-1]
+        latest_temp = latest_obs.get(temp_key)
+        max_temp = max_obs.get(temp_key)
+        if (
+            latest_temp is not None
+            and max_temp is not None
+            and (max_temp - latest_temp) >= 0.3
+        ):
             max_dt = max_obs[dt_key]
             if max_dt.tzinfo is None:
                 max_dt = max_dt.replace(tzinfo=timezone.utc)
@@ -516,7 +533,9 @@ def compute_peak_timing(
             result["confidence"] = "high"
             result["detail"] = (
                 f"Kalman trend negative ({kalman.temp_trend_per_min * 60:.1f}°/hr) "
-                f"for {kalman.n_observations} obs — peak already reached"
+                f"for {kalman.n_observations} obs; "
+                f"max {max_temp:.1f}°F is {max_temp - latest_temp:.1f}°F above "
+                f"current {latest_temp:.1f}°F — peak already reached"
             )
             return result
 

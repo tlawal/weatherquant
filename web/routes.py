@@ -40,6 +40,7 @@ async def dashboard(request: Request):
         get_daily_realized_pnl,
         get_all_positions,
         get_latest_signals,
+        get_signals_for_latest_snapshot,
         get_position,
         get_recently_redeemed_events,
         get_unredeemed_resolved_events,
@@ -53,7 +54,10 @@ async def dashboard(request: Request):
         arming = await get_arming_state(sess)
         daily_pnl = await get_daily_realized_pnl(sess, today_et)
         positions = await get_all_positions(sess)
-        raw_signals = await get_latest_signals(sess, limit=200)
+        # Filter to "rows from the latest model snapshot per event" so a
+        # half-finished signal-engine pass can never leave stale signals
+        # alongside the freshly-written ones for the same bucket.
+        raw_signals = await get_signals_for_latest_snapshot(sess, limit=200)
 
     log.info("dashboard: data fetched: cities=%d, arming=%s, pnl=%.2f", len(cities), arming.state, daily_pnl)
 
@@ -119,30 +123,28 @@ async def dashboard(request: Request):
 
     total_exposure = sum((p.net_qty * p.avg_cost) for p in positions if p.net_qty > 0)
 
-    # Unredeemed winning positions
+    # Unredeemed winning positions — only events where the user actually holds
+    # a winning position (positive net_qty on the winning bucket).
     async with get_session() as sess:
-        unredeemed_events = await get_unredeemed_resolved_events(sess)
+        unredeemed_events = await get_unredeemed_resolved_events(sess, require_position=True)
 
     unredeemed_wins = []
     for evt in unredeemed_events:
+        if evt.winning_bucket_idx is None:
+            continue
         async with get_session() as sess:
             city = await sess.get(City, evt.city_id)
             total_payout = 0.0
             winning_label = None
-            has_conditions = False
             for bucket in evt.buckets:
-                if bucket.condition_id:
-                    has_conditions = True
-                is_winner = (
-                    evt.winning_bucket_idx is not None
-                    and bucket.bucket_idx == evt.winning_bucket_idx
-                )
-                if is_winner:
-                    winning_label = bucket.label
-                    pos = await get_position(sess, bucket.id)
-                    if pos and pos.net_qty > 0:
-                        total_payout += pos.net_qty * 1.0
-        if has_conditions:
+                if bucket.bucket_idx != evt.winning_bucket_idx:
+                    continue
+                winning_label = bucket.label
+                pos = await get_position(sess, bucket.id)
+                if pos and pos.net_qty > 0:
+                    total_payout += pos.net_qty * 1.0
+                break
+        if total_payout > 0:
             unredeemed_wins.append({
                 "event_id": evt.id,
                 "city_name": city.display_name if city else "?",
@@ -273,8 +275,9 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
             model = await get_latest_model_snapshot(sess, event.id)
             model_inputs = json.loads(model.inputs_json) if model and model.inputs_json else {}
 
+            snapshot_id = model.id if model is not None else None
             for bucket in buckets:
-                sig = await get_latest_signal_for_bucket(sess, bucket.id)
+                sig = await get_latest_signal_for_bucket(sess, bucket.id, snapshot_id=snapshot_id)
                 if model and sig and sig.computed_at < model.computed_at:
                     sig = None
                 mkt = await get_latest_market_snapshot(sess, bucket.id)
@@ -536,6 +539,10 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
             "resolution_source_url": event.resolution_source_url if event else None,
             "nws_timeseries_url": f"https://www.weather.gov/wrh/timeseries?site={city.metar_station.lower()}" if city.metar_station else None,
             "resolution_station_id": event.resolution_station_id if event else None,
+            "active_station_id": model_inputs.get("active_station_id") if isinstance(model_inputs, dict) else None,
+            "active_station_source": model_inputs.get("active_station_source") if isinstance(model_inputs, dict) else None,
+            "ground_truth_high": model_inputs.get("ground_truth_high") if isinstance(model_inputs, dict) else None,
+            "ground_truth_source": model_inputs.get("ground_truth_source") if isinstance(model_inputs, dict) else None,
             "settlement_source_verified": event.settlement_source_verified if event else None,
             "metar": {
                 "temp_f": metar.temp_f if (metar and target_date_et == real_today_et) else None,
@@ -641,12 +648,12 @@ async def cities_admin(request: Request):
 async def htmx_signals_table(request: Request):
     """HTMX partial — refreshes only the signals table body."""
     from backend.storage.db import get_session
-    from backend.storage.repos import get_latest_signals
+    from backend.storage.repos import get_signals_for_latest_snapshot
     from backend.storage.models import Bucket, Event, City
 
     today_et = et_today()
     async with get_session() as sess:
-        raw_signals = await get_latest_signals(sess, limit=200)
+        raw_signals = await get_signals_for_latest_snapshot(sess, limit=200)
 
     rows = []
     seen = {}

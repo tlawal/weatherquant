@@ -45,6 +45,7 @@ from backend.storage.repos import (
     get_latest_metar,
     get_latest_model_snapshot,
     get_latest_signals,
+    get_signals_for_latest_snapshot,
     get_position,
     get_recent_orders,
     get_recently_redeemed_events,
@@ -383,7 +384,11 @@ async def get_city_state(city_slug: str):
     return {
         "city_slug": city_slug,
         "display_name": city.display_name,
-        "metar_station": city.metar_station,
+        "metar_station": city.metar_station,  # city default — backwards compat
+        "active_station_id": model_inputs.get("active_station_id"),
+        "active_station_source": model_inputs.get("active_station_source"),
+        "ground_truth_high": model_inputs.get("ground_truth_high"),
+        "ground_truth_source": model_inputs.get("ground_truth_source"),
         "current_temp_f": metar.temp_f if metar else None,
         "daily_high_f": daily_high,
         "metar_observed_at": metar.observed_at.isoformat() if metar else None,
@@ -549,7 +554,9 @@ async def get_markets(city_slug: str):
 async def get_all_signals():
     """Return latest signals across all cities, ranked by true_edge."""
     async with get_session() as sess:
-        raw_signals = await get_latest_signals(sess, limit=200)
+        # Filter to "rows from the latest model snapshot per event" so a
+        # mid-rerun pass can never expose stale signals alongside fresh ones.
+        raw_signals = await get_signals_for_latest_snapshot(sess, limit=200)
 
     out = []
     for sig in raw_signals:
@@ -604,12 +611,16 @@ async def get_city_signals(city_slug: str):
         if not event:
             return []
         buckets = await get_buckets_for_event(sess, event.id)
+        # Latest snapshot for this event — passed into the per-bucket
+        # signal lookup so it stays pinned to the same generation.
+        latest_snapshot = await get_latest_model_snapshot(sess, event.id)
+    snapshot_id = latest_snapshot.id if latest_snapshot else None
 
     result = []
     for b in buckets:
         async with get_session() as sess:
             from backend.storage.repos import get_latest_signal_for_bucket
-            sig = await get_latest_signal_for_bucket(sess, b.id)
+            sig = await get_latest_signal_for_bucket(sess, b.id, snapshot_id=snapshot_id)
         if sig:
             reason = json.loads(sig.reason_json) if sig.reason_json else {}
             result.append({
@@ -672,27 +683,28 @@ async def get_positions():
 
 @router.get("/api/unredeemed-wins")
 async def unredeemed_wins():
-    """Unredeemed winning positions from resolved events."""
+    """Unredeemed winning positions from resolved events.
+
+    Only includes events where the user actually holds a winning position
+    (positive net_qty on the winning bucket).
+    """
     async with get_session() as sess:
-        events = await get_unredeemed_resolved_events(sess)
+        events = await get_unredeemed_resolved_events(sess, require_position=True)
 
     result = []
     for event in events:
+        if event.winning_bucket_idx is None:
+            continue
         async with get_session() as sess:
             from backend.storage.models import City
             city = await sess.get(City, event.city_id)
             buckets_info = []
             total_payout = 0.0
-            has_conditions = False
             for bucket in event.buckets:
                 if not bucket.condition_id:
                     continue
-                has_conditions = True
                 pos = await get_position(sess, bucket.id)
-                is_winner = (
-                    event.winning_bucket_idx is not None
-                    and bucket.bucket_idx == event.winning_bucket_idx
-                )
+                is_winner = bucket.bucket_idx == event.winning_bucket_idx
                 net_qty = pos.net_qty if pos else 0.0
                 avg_cost = pos.avg_cost if pos else 0.0
                 payout = net_qty * 1.0 if is_winner else 0.0
@@ -706,7 +718,7 @@ async def unredeemed_wins():
                 })
                 total_payout += payout
 
-        if has_conditions:
+        if total_payout > 0:
             result.append({
                 "event_id": event.id,
                 "city_name": city.display_name if city else "Unknown",

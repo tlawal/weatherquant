@@ -19,6 +19,7 @@ from backend.storage.models import City
 from backend.storage.repos import (
     get_all_cities,
     get_daily_high_metar,
+    get_event,
     get_metar_obs_by_key,
     get_recent_metar_obs_missing_extended,
     insert_metar_obs,
@@ -540,12 +541,17 @@ async def fetch_metar_all() -> None:
     # International cities without a station code use Open-Meteo
     intl_openmeteo_cities = [c for c in cities if not c.is_us and not c.metar_station and c.lat and c.lon]
 
-    if us_cities:
-        await _fetch_us_metars(us_cities)
+    # Per-event override stations: poll Polymarket's resolution station too
+    # whenever it differs from the city default. Stored under the same city_id.
+    us_extra = await _resolve_extra_event_stations(us_cities) if us_cities else []
+    intl_extra = await _resolve_extra_event_stations(intl_metar_cities) if intl_metar_cities else []
 
-    if intl_metar_cities:
+    if us_cities or us_extra:
+        await _fetch_us_metars(us_cities, extra_pairs=us_extra)
+
+    if intl_metar_cities or intl_extra:
         # ICAO stations are global — aviationweather.gov covers all of them
-        await _fetch_us_metars(intl_metar_cities)
+        await _fetch_us_metars(intl_metar_cities, extra_pairs=intl_extra)
 
     # Supplementary: weather.gov observations as fallback/cross-validation
     nws_obs_cities = us_cities + intl_metar_cities
@@ -559,8 +565,44 @@ async def fetch_metar_all() -> None:
         await _fetch_intl_open_meteo(intl_openmeteo_cities)
 
 
-async def _fetch_us_metars(cities: list[City]) -> None:
-    station_map = {c.metar_station: c for c in cities if c.metar_station}
+async def _resolve_extra_event_stations(cities: list[City]) -> list[tuple[City, str]]:
+    """For each city, return (city, override_station) pairs where the active
+    event names a resolution station that differs from the city default.
+
+    These are polled in addition to the default station so the model can
+    settle on Polymarket's actual resolution source. Observations are stored
+    under the same city_id but with the override station_id, so existing
+    queries (get_daily_high_metar / get_resolution_high_metar) see both
+    streams.
+    """
+    pairs: list[tuple[City, str]] = []
+    for city in cities:
+        if not city.metar_station:
+            continue
+        default_station = city.metar_station.upper()
+        today_local = city_local_date(city)
+        async with get_session() as sess:
+            event = await get_event(sess, city.id, today_local)
+        override = getattr(event, "resolution_station_id", None) if event is not None else None
+        if not override:
+            continue
+        override = override.upper()
+        if override == default_station:
+            continue
+        pairs.append((city, override))
+    return pairs
+
+
+async def _fetch_us_metars(cities: list[City], extra_pairs: Optional[list[tuple[City, str]]] = None) -> None:
+    """Fetch METARs for the given cities (using each city's default station),
+    plus any optional extra (city, override_station) pairs that should be
+    stored under the same city_id."""
+    station_map: dict[str, City] = {c.metar_station.upper(): c for c in cities if c.metar_station}
+    if extra_pairs:
+        for city, station in extra_pairs:
+            station_map.setdefault(station.upper(), city)
+    if not station_map:
+        return
     stations = ",".join(station_map.keys())
     url = f"{METAR_URL}?ids={stations}&format=json&latest=1"
 
@@ -759,10 +801,27 @@ async def fetch_metar_smart() -> None:
         if should_poll_station(valid_minutes, now_minute):
             in_window.append(city)
 
-    if in_window:
-        await _fetch_us_metars(in_window)
-        log.info("smart_poll: fetched %d/%d METAR stations at minute :%02d",
-                 len(in_window), len(metar_cities), now_minute)
+    # Per-event override stations: include any station Polymarket points at,
+    # gated by the override station's own profile (or always poll if unknown).
+    extra_pairs: list[tuple[City, str]] = []
+    if metar_cities:
+        all_overrides = await _resolve_extra_event_stations(metar_cities)
+        for city, override in all_overrides:
+            async with get_session() as sess:
+                profile = await get_station_profile(sess, override)
+            if not profile or not profile.observation_minutes or (profile.confidence or 0) < 0.7:
+                extra_pairs.append((city, override))
+                continue
+            valid_minutes = json.loads(profile.observation_minutes)
+            if should_poll_station(valid_minutes, now_minute):
+                extra_pairs.append((city, override))
+
+    if in_window or extra_pairs:
+        await _fetch_us_metars(in_window, extra_pairs=extra_pairs)
+        log.info(
+            "smart_poll: fetched %d/%d METAR stations (+%d event-overrides) at minute :%02d",
+            len(in_window), len(metar_cities), len(extra_pairs), now_minute,
+        )
 
     # International cities without METAR station use Open-Meteo (always polled)
     intl_openmeteo_cities = [c for c in cities if not c.is_us and not c.metar_station and c.lat and c.lon]

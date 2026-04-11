@@ -686,6 +686,7 @@ async def insert_model_snapshot(session: AsyncSession, **kwargs) -> ModelSnapsho
     snap = ModelSnapshot(**kwargs)
     session.add(snap)
     await session.commit()
+    await session.refresh(snap)
     return snap
 
 
@@ -770,9 +771,77 @@ async def get_latest_signals(
     return list(result.scalars().all())
 
 
+async def get_signals_for_latest_snapshot(
+    session: AsyncSession, limit: int = 200
+) -> list[Signal]:
+    """Return Signal rows belonging to the **latest model_snapshot per event**.
+
+    The dashboard mixes signals across all enabled cities; without this
+    filter, a fresh model rerun briefly lives alongside the previous run's
+    rows (any bucket whose new generation hasn't been written yet still
+    surfaces its old generation). Filtering on
+    `signals.model_snapshot_id == max(model_snapshots.id) per event_id`
+    eliminates that staleness.
+
+    Falls back gracefully for legacy Signal rows where model_snapshot_id is
+    NULL: those are still returned by computed_at ordering, so the
+    dashboard never goes blank during the rollout window.
+    """
+    # Subquery: latest snapshot id per event
+    latest_per_event = (
+        select(
+            ModelSnapshot.event_id.label("event_id"),
+            func.max(ModelSnapshot.id).label("max_id"),
+        )
+        .group_by(ModelSnapshot.event_id)
+        .subquery()
+    )
+
+    # Join Signal -> Bucket -> Event so we can match snapshots by event
+    stmt = (
+        select(Signal)
+        .join(Bucket, Bucket.id == Signal.bucket_id)
+        .join(
+            latest_per_event,
+            latest_per_event.c.event_id == Bucket.event_id,
+        )
+        .where(
+            (Signal.model_snapshot_id == latest_per_event.c.max_id)
+            | (Signal.model_snapshot_id.is_(None))
+        )
+        .order_by(desc(Signal.computed_at))
+        .limit(limit)
+    )
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
 async def get_latest_signal_for_bucket(
-    session: AsyncSession, bucket_id: int
+    session: AsyncSession,
+    bucket_id: int,
+    snapshot_id: Optional[int] = None,
 ) -> Optional[Signal]:
+    """Most recent Signal for a bucket, optionally pinned to a snapshot.
+
+    Pass `snapshot_id` (e.g. from `get_latest_model_snapshot(event_id)`) to
+    guarantee the row belongs to the latest generation. Falls back to the
+    plain "latest by computed_at" behavior if no row exists for that
+    snapshot (e.g. legacy rows with NULL model_snapshot_id).
+    """
+    if snapshot_id is not None:
+        result = await session.execute(
+            select(Signal)
+            .where(
+                Signal.bucket_id == bucket_id,
+                Signal.model_snapshot_id == snapshot_id,
+            )
+            .order_by(desc(Signal.computed_at))
+            .limit(1)
+        )
+        snap_row = result.scalar_one_or_none()
+        if snap_row is not None:
+            return snap_row
+
     result = await session.execute(
         select(Signal)
         .where(Signal.bucket_id == bucket_id)
@@ -1044,14 +1113,32 @@ async def get_unresolved_events_with_gamma_id(session: AsyncSession) -> list[Eve
     return list(result.scalars().all())
 
 
-async def get_unredeemed_resolved_events(session: AsyncSession) -> list[Event]:
-    """Events that are resolved but not yet redeemed."""
+async def get_unredeemed_resolved_events(
+    session: AsyncSession,
+    require_position: bool = False,
+) -> list[Event]:
+    """Events that are resolved but not yet redeemed.
+
+    If require_position=True, only return events that have at least one bucket
+    with a Position whose net_qty > 0 (i.e. the user actually holds something
+    redeemable). This prevents phantom rows for resolved markets the user never
+    traded.
+    """
     from sqlalchemy.orm import selectinload
-    result = await session.execute(
+    stmt = (
         select(Event)
         .where(Event.resolved_at.isnot(None), Event.redeemed_at.is_(None))
         .options(selectinload(Event.buckets))
     )
+    if require_position:
+        has_pos = (
+            select(Position.id)
+            .join(Bucket, Bucket.id == Position.bucket_id)
+            .where(Bucket.event_id == Event.id, Position.net_qty > 0)
+            .exists()
+        )
+        stmt = stmt.where(has_pos)
+    result = await session.execute(stmt)
     return list(result.scalars().all())
 
 

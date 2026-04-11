@@ -453,7 +453,15 @@
     </div>
     <div>
       <div style="color:var(--text-muted)" class="mb-1">Resolution Station</div>
-      <div class="mono font-medium">{{ resolution_station_id or city.metar_station or '—' }}</div>
+      <div class="mono font-medium">
+        {{ active_station_id or resolution_station_id or city.metar_station or '—' }}
+        {% if active_station_source == 'event_resolution_station' and active_station_id and active_station_id != (city.metar_station or '')|upper %}
+          <span class="text-[9px] px-1.5 py-0.5 rounded ml-1" style="background:rgba(96,165,250,0.18);color:#60a5fa">Event Override</span>
+        {% endif %}
+      </div>
+      {% if active_station_id and city.metar_station and active_station_id != (city.metar_station or '')|upper %}
+      <div class="text-[9px] mt-0.5" style="color:var(--text-muted)">city default: {{ city.metar_station }}</div>
+      {% endif %}
     </div>
     <div>
       <div style="color:var(--text-muted)" class="mb-1">Obs Pattern</div>
