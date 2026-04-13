@@ -172,7 +172,7 @@ function renderTable() {
       const isLose = evt.winning_bucket_idx !== null && !isWin;
       const qtyStr = b.net_qty > 0 ? `${b.net_qty.toFixed(0)} sh` : '-';
       
-      const currentPrice = b.is_winner ? 1.0 : (evt.winning_bucket_idx !== null ? 0.0 : b.avg_cost);
+      const currentPrice = b.is_winner ? 1.0 : (evt.winning_bucket_idx !== null ? 0.0 : (b.last_mkt_price > 0 ? b.last_mkt_price : b.avg_cost));
       const pnl = (currentPrice - b.avg_cost) * b.net_qty;
       const pnlPct = b.avg_cost > 0 ? ((currentPrice / b.avg_cost) - 1) * 100 : 0;
       

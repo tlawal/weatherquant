@@ -989,6 +989,7 @@ async def redemptions_list():
                     "condition_id": bucket.condition_id,
                     "net_qty": pos.net_qty if pos else 0,
                     "avg_cost": pos.avg_cost if pos else 0,
+                    "last_mkt_price": pos.last_mkt_price if pos else 0,
                     "is_winner": is_winner,
                     "on_chain_determined": determined_map.get(bucket.condition_id),
                     "exit_strategy": exit_strategy,
