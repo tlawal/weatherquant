@@ -1908,6 +1908,10 @@ async def list_station_calibrations():
             "best_source": c.best_source,
             "best_source_mae": c.best_source_mae,
             "source_mae_json": c.source_mae_json,
+            "mae_ecmwf_f": c.mae_ecmwf_f,
+            "mae_gfs_hrrr_f": c.mae_gfs_hrrr_f,
+            "mae_nws_f": c.mae_nws_f,
+            "winner": c.winner,
             "updated_at": c.updated_at.isoformat() if c.updated_at else None,
         }
         for c in cals
@@ -1977,8 +1981,71 @@ async def get_station_calibration_detail(station_id: str):
         "best_source": c.best_source,
         "best_source_mae": c.best_source_mae,
         "source_mae_json": c.source_mae_json,
+        "mae_ecmwf_f": c.mae_ecmwf_f,
+        "mae_gfs_hrrr_f": c.mae_gfs_hrrr_f,
+        "mae_nws_f": c.mae_nws_f,
+        "winner": c.winner,
         "updated_at": c.updated_at.isoformat() if c.updated_at else None,
     }
+
+
+# ─── Station Calibration Diagnostics & Auto-Refresh ─────────────────────────
+
+_cal_refresh_in_progress = False
+
+
+@router.get("/api/station-calibrations/diagnostics")
+async def station_calibration_diagnostics():
+    """Debug info: table row count, last updated, refresh status."""
+    from sqlalchemy import func, select
+    from backend.storage.models import StationCalibration
+
+    error = None
+    row_count = 0
+    last_updated = None
+    try:
+        async with get_session() as sess:
+            count_q = await sess.execute(
+                select(func.count(StationCalibration.id))
+            )
+            row_count = count_q.scalar_one()
+            last_q = await sess.execute(
+                select(func.max(StationCalibration.updated_at))
+            )
+            last_updated = last_q.scalar_one_or_none()
+    except Exception as e:
+        error = str(e)
+
+    return {
+        "table_exists": True,
+        "row_count": row_count,
+        "last_updated": last_updated.isoformat() if last_updated else None,
+        "refresh_in_progress": _cal_refresh_in_progress,
+        "error": error,
+    }
+
+
+@router.post("/api/station-calibrations/auto-refresh")
+async def auto_refresh_station_calibrations():
+    """Auto-triggered refresh (no admin token). Returns immediately if already running."""
+    global _cal_refresh_in_progress
+    if _cal_refresh_in_progress:
+        return {"ok": True, "status": "already_running"}
+    _cal_refresh_in_progress = True
+    asyncio.create_task(_do_cal_auto_refresh())
+    return {"ok": True, "status": "started"}
+
+
+async def _do_cal_auto_refresh():
+    global _cal_refresh_in_progress
+    try:
+        from backend.modeling.station_calibration import refresh_all_station_calibrations
+        count = await refresh_all_station_calibrations()
+        log.info("auto-refresh station calibrations: updated %d stations", count)
+    except Exception as e:
+        log.error("auto-refresh station calibrations failed: %s", e, exc_info=True)
+    finally:
+        _cal_refresh_in_progress = False
 
 
 @router.post("/api/station-calibrations/refresh")

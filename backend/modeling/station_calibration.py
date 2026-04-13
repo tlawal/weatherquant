@@ -186,8 +186,8 @@ async def compute_station_calibration(city: City) -> Optional[dict]:
         log.info("station_cal: %s only %d observed highs, skipping", station_id, len(obs_highs))
         return None
 
-    # Fetch per-source forecast highs
-    sources = ["nws", "wu_daily", "wu_hourly", "hrrr", "nbm"]
+    # Fetch per-source forecast highs (includes ecmwf_ifs for model comparison)
+    sources = ["nws", "wu_daily", "wu_hourly", "hrrr", "nbm", "ecmwf_ifs"]
     fc_highs = await _get_forecast_highs(city.id, dates, sources)
 
     # Fetch model mu (fused ensemble)
@@ -236,6 +236,26 @@ async def compute_station_calibration(city: City) -> Optional[dict]:
     best_source = min(source_mae, key=source_mae.get, default=None) if source_mae else None
     best_source_mae = source_mae.get(best_source) if best_source else None
 
+    # Per-model MAE for 3-way comparison (ECMWF vs GFS+HRRR vs NWS)
+    mae_ecmwf = source_mae.get("ecmwf_ifs")
+    mae_gfs_hrrr = source_mae.get("hrrr")     # hrrr = GFS+HRRR blend via Open-Meteo
+    mae_nws = source_mae.get("nws")            # NWS WFO human-adjusted forecast
+
+    # Determine 3-way winner (lowest MAE; TIE if within 0.05°F)
+    candidates: dict[str, float] = {}
+    if mae_ecmwf is not None:
+        candidates["ECMWF"] = mae_ecmwf
+    if mae_gfs_hrrr is not None:
+        candidates["GFS_HRRR"] = mae_gfs_hrrr
+    if mae_nws is not None:
+        candidates["NWS"] = mae_nws
+
+    winner = None
+    if candidates:
+        min_mae = min(candidates.values())
+        winners = [k for k, v in candidates.items() if abs(v - min_mae) < 0.05]
+        winner = "TIE" if len(winners) > 1 else winners[0]
+
     # Tradeability
     tradeability = _classify_tradeability(mae)
 
@@ -256,6 +276,10 @@ async def compute_station_calibration(city: City) -> Optional[dict]:
         "best_source": best_source,
         "best_source_mae": best_source_mae,
         "source_mae_json": json.dumps(source_mae) if source_mae else None,
+        "mae_ecmwf_f": mae_ecmwf,
+        "mae_gfs_hrrr_f": mae_gfs_hrrr,
+        "mae_nws_f": mae_nws,
+        "winner": winner,
     }
 
 

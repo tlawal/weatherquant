@@ -608,6 +608,10 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                 "tradeability": station_cal_row.tradeability,
                 "best_source": station_cal_row.best_source,
                 "best_source_mae": station_cal_row.best_source_mae,
+                "mae_ecmwf_f": station_cal_row.mae_ecmwf_f,
+                "mae_gfs_hrrr_f": station_cal_row.mae_gfs_hrrr_f,
+                "mae_nws_f": station_cal_row.mae_nws_f,
+                "winner": station_cal_row.winner,
             }
 
     return templates.TemplateResponse(

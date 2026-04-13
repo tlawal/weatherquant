@@ -579,6 +579,11 @@ class StationCalibration(Base):
     best_source_mae: Mapped[Optional[float]] = mapped_column(Float)
     # Per-source MAE breakdown (JSON dict)
     source_mae_json: Mapped[Optional[str]] = mapped_column(Text)
+    # Per-model 30-day MAE for side-by-side comparison
+    mae_ecmwf_f: Mapped[Optional[float]] = mapped_column(Float)       # ECMWF IFS
+    mae_gfs_hrrr_f: Mapped[Optional[float]] = mapped_column(Float)    # GFS+HRRR blend
+    mae_nws_f: Mapped[Optional[float]] = mapped_column(Float)         # NWS WFO official
+    winner: Mapped[Optional[str]] = mapped_column(String(10))          # "ECMWF"|"GFS_HRRR"|"NWS"|"TIE"
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
     )

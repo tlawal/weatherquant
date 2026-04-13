@@ -21,10 +21,26 @@
   .badge-green { background: rgba(34,197,94,0.15); color: #86EFAC; border: 1px solid rgba(34,197,94,0.3); }
   .badge-amber { background: rgba(234,179,8,0.15); color: #FDE047; border: 1px solid rgba(234,179,8,0.3); }
   .badge-red { background: rgba(239,68,68,0.15); color: #FCA5A5; border: 1px solid rgba(239,68,68,0.3); }
+  .badge-blue { background: rgba(59,130,246,0.15); color: #93C5FD; border: 1px solid rgba(59,130,246,0.3); }
+  .badge-orange { background: rgba(249,115,22,0.15); color: #FDBA74; border: 1px solid rgba(249,115,22,0.3); }
+  .badge-gray { background: rgba(107,114,128,0.15); color: #D1D5DB; border: 1px solid rgba(107,114,128,0.3); }
+  .model-btn { padding: 4px 12px; border-radius: 6px; font-size: 10px; font-weight: 700; letter-spacing: 0.05em; border: 1px solid var(--border); background: transparent; color: var(--text-muted); cursor: pointer; transition: all 0.15s; }
+  .model-btn:hover { border-color: var(--cyan); color: var(--cyan); }
+  .model-btn.active { background: rgba(34,211,238,0.12); border-color: var(--cyan); color: var(--cyan); }
+  .mae-info-tooltip { position: relative; display: inline-block; cursor: pointer; }
+  .mae-info-tooltip .mae-info-content { display: none; position: absolute; bottom: 130%; left: 50%; transform: translateX(-50%); width: 280px; padding: 10px 12px; border-radius: 8px; background: var(--bg-panel); border: 1px solid var(--border); color: var(--text-main); font-size: 11px; line-height: 1.5; z-index: 100; box-shadow: 0 4px 12px rgba(0,0,0,0.4); }
+  .mae-info-tooltip:hover .mae-info-content, .mae-info-tooltip:focus .mae-info-content { display: block; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .spinner { width: 20px; height: 20px; border: 2px solid var(--border); border-top-color: var(--cyan); border-radius: 50%; animation: spin 0.8s linear infinite; display: inline-block; }
 </style>
 {% endblock %}
 
 {% block content %}
+<!-- Header note -->
+<div class="text-[10px] mb-3 px-1 tracking-wide" style="color:var(--text-muted)">
+  Station Calibration Engine — 30-day rolling MAE/bias from MetarObs (auto-refreshes daily)
+</div>
+
 <div class="flex flex-wrap items-start justify-between gap-4 mb-6">
   <div class="flex items-center gap-3">
     <a href="/" class="text-sm hover:underline" style="color:var(--text-muted)">← Signals</a>
@@ -37,7 +53,7 @@
     <button onclick="refreshCalibrations(this)"
             class="px-3 py-1.5 rounded-lg text-[10px] font-bold tracking-widest transition-all border"
             style="background:var(--bg-panel);border-color:var(--cyan);color:var(--cyan)">
-      REFRESH
+      REFRESH CALIBRATION NOW
     </button>
     <a href="/api/station-calibrations/csv"
        class="px-3 py-1.5 rounded-lg text-[10px] font-bold tracking-widest transition-all border"
@@ -47,16 +63,36 @@
   </div>
 </div>
 
-<!-- Summary Stats -->
+<!-- Main Alpine component -->
 <div x-data="stationData()" x-init="init()" class="space-y-6">
 
-  <div class="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-3">
+  <!-- Loading state -->
+  <template x-if="loading && stations.length === 0">
+    <div class="card p-8 text-center space-y-3">
+      <div class="spinner mx-auto"></div>
+      <div class="text-sm font-medium" style="color:var(--cyan)" x-text="refreshing ? 'Computing 30-day station calibration... (this happens automatically on first load and daily thereafter)' : 'Loading station data...'"></div>
+      <div class="text-[10px]" style="color:var(--text-muted)" x-show="refreshing">This may take a minute. The page will update automatically when complete.</div>
+    </div>
+  </template>
+
+  <!-- Summary Stats -->
+  <div class="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-3" x-show="stations.length > 0 || !loading">
     <div class="card p-3">
       <div class="text-[10px] uppercase tracking-widest" style="color:var(--text-muted)">Total Stations</div>
       <div class="mono text-lg font-bold" style="color:var(--cyan)" x-text="stations.length">—</div>
     </div>
     <div class="card p-3">
-      <div class="text-[10px] uppercase tracking-widest" style="color:var(--text-muted)">Avg MAE</div>
+      <div class="text-[10px] uppercase tracking-widest flex items-center gap-1" style="color:var(--text-muted)">
+        Avg MAE
+        <span class="mae-info-tooltip" tabindex="0">
+          <span class="text-[9px] inline-flex items-center justify-center w-3.5 h-3.5 rounded-full border" style="border-color:var(--text-muted);color:var(--text-muted)">?</span>
+          <span class="mae-info-content">
+            <strong style="color:var(--cyan)">Mean Absolute Error (MAE)</strong><br>
+            Average of |forecast &minus; observed| over the last 30 days, in degrees Fahrenheit.
+            Lower is better. Green &le;1.5°F, Amber 1.5&ndash;3.0°F, Red &gt;3.0°F.
+          </span>
+        </span>
+      </div>
       <div class="mono text-lg font-bold" x-text="avgMae !== null ? avgMae.toFixed(2) + '°' : '—'">—</div>
     </div>
     <div class="card p-3">
@@ -77,8 +113,17 @@
     </div>
   </div>
 
+  <!-- Model Toggle -->
+  <div class="flex flex-wrap items-center gap-2" x-show="stations.length > 0">
+    <span class="text-[10px] uppercase tracking-widest font-bold mr-1" style="color:var(--text-muted)">View:</span>
+    <button class="model-btn" :class="activeModel === 'blended' && 'active'" @click="setModel('blended')">Blended Ensemble</button>
+    <button class="model-btn" :class="activeModel === 'ecmwf' && 'active'" @click="setModel('ecmwf')">ECMWF IFS</button>
+    <button class="model-btn" :class="activeModel === 'gfs_hrrr' && 'active'" @click="setModel('gfs_hrrr')">GFS+HRRR</button>
+    <button class="model-btn" :class="activeModel === 'nws' && 'active'" @click="setModel('nws')">NWS</button>
+  </div>
+
   <!-- Leaflet Map -->
-  <div class="card p-4">
+  <div class="card p-4" x-show="stations.length > 0 || !loading">
     <div class="flex items-center justify-between mb-3">
       <h2 class="font-semibold text-sm">Station Map</h2>
       <div class="flex items-center gap-3 text-[10px]">
@@ -91,7 +136,7 @@
   </div>
 
   <!-- Sortable Table -->
-  <div class="card overflow-hidden">
+  <div class="card overflow-hidden" x-show="stations.length > 0 || !loading">
     <div class="px-4 py-3 border-b flex items-center justify-between gap-3" style="border-color:var(--border)">
       <h2 class="font-semibold text-sm">All Stations</h2>
       <div class="flex items-center gap-2">
@@ -108,7 +153,7 @@
       </div>
     </div>
     <div class="overflow-x-auto">
-      <table class="w-full text-xs" style="min-width:56rem">
+      <table class="w-full text-xs" style="min-width:72rem">
         <thead>
           <tr class="text-[10px] uppercase tracking-widest" style="color:var(--text-muted);border-bottom:1px solid var(--border)">
             <th class="px-3 py-2 text-left sort-header" :class="sortCol === 'station_id' ? (sortDir === 'asc' ? 'sort-asc' : 'sort-desc') : ''"
@@ -116,11 +161,17 @@
             <th class="px-2 py-2 text-left sort-header" :class="sortCol === 'city_name' ? (sortDir === 'asc' ? 'sort-asc' : 'sort-desc') : ''"
                 @click="toggleSort('city_name')">City</th>
             <th class="px-2 py-2 text-right sort-header" :class="sortCol === 'mae_f' ? (sortDir === 'asc' ? 'sort-asc' : 'sort-desc') : ''"
-                @click="toggleSort('mae_f')">MAE</th>
+                @click="toggleSort('mae_f')">MAE (Blend)</th>
+            <th class="px-2 py-2 text-right sort-header" :class="sortCol === 'mae_ecmwf_f' ? (sortDir === 'asc' ? 'sort-asc' : 'sort-desc') : ''"
+                @click="toggleSort('mae_ecmwf_f')">MAE ECMWF</th>
+            <th class="px-2 py-2 text-right sort-header" :class="sortCol === 'mae_gfs_hrrr_f' ? (sortDir === 'asc' ? 'sort-asc' : 'sort-desc') : ''"
+                @click="toggleSort('mae_gfs_hrrr_f')">MAE GFS+HRRR</th>
+            <th class="px-2 py-2 text-right sort-header" :class="sortCol === 'mae_nws_f' ? (sortDir === 'asc' ? 'sort-asc' : 'sort-desc') : ''"
+                @click="toggleSort('mae_nws_f')">MAE NWS</th>
+            <th class="px-2 py-2 text-center sort-header" :class="sortCol === 'winner' ? (sortDir === 'asc' ? 'sort-asc' : 'sort-desc') : ''"
+                @click="toggleSort('winner')">Winner</th>
             <th class="px-2 py-2 text-right sort-header" :class="sortCol === 'bias_f' ? (sortDir === 'asc' ? 'sort-asc' : 'sort-desc') : ''"
                 @click="toggleSort('bias_f')">Bias</th>
-            <th class="px-2 py-2 text-right sort-header" :class="sortCol === 'rmse_f' ? (sortDir === 'asc' ? 'sort-asc' : 'sort-desc') : ''"
-                @click="toggleSort('rmse_f')">RMSE</th>
             <th class="px-2 py-2 text-right sort-header" :class="sortCol === 'n_samples' ? (sortDir === 'asc' ? 'sort-asc' : 'sort-desc') : ''"
                 @click="toggleSort('n_samples')">Samples</th>
             <th class="px-2 py-2 text-right sort-header" :class="sortCol === 'pct_days_traded' ? (sortDir === 'asc' ? 'sort-asc' : 'sort-desc') : ''"
@@ -138,12 +189,25 @@
               <td class="px-3 py-2.5 mono font-semibold" x-text="s.station_id"></td>
               <td class="px-2 py-2.5 font-medium" x-text="s.city_name"></td>
               <td class="px-2 py-2.5 text-right mono font-bold"
-                  :style="s.mae_f <= 1.5 ? 'color:#22C55E' : (s.mae_f <= 3.0 ? 'color:#EAB308' : 'color:#EF4444')"
-                  x-text="s.mae_f.toFixed(2) + '°'"></td>
+                  :style="maeColor(s.mae_f)"
+                  x-text="fmtMae(s.mae_f)"></td>
+              <td class="px-2 py-2.5 text-right mono font-bold"
+                  :style="maeColor(s.mae_ecmwf_f)"
+                  x-text="fmtMae(s.mae_ecmwf_f)"></td>
+              <td class="px-2 py-2.5 text-right mono font-bold"
+                  :style="maeColor(s.mae_gfs_hrrr_f)"
+                  x-text="fmtMae(s.mae_gfs_hrrr_f)"></td>
+              <td class="px-2 py-2.5 text-right mono font-bold"
+                  :style="maeColor(s.mae_nws_f)"
+                  x-text="fmtMae(s.mae_nws_f)"></td>
+              <td class="px-2 py-2.5 text-center">
+                <span class="text-[10px] font-bold px-2 py-0.5 rounded-full"
+                      :class="winnerBadge(s.winner)"
+                      x-text="s.winner || '—'"></span>
+              </td>
               <td class="px-2 py-2.5 text-right mono"
                   :style="s.bias_f > 0 ? 'color:#F97316' : 'color:#60A5FA'"
                   x-text="(s.bias_f > 0 ? '+' : '') + s.bias_f.toFixed(2) + '°'"></td>
-              <td class="px-2 py-2.5 text-right mono" style="color:var(--text-muted)" x-text="s.rmse_f.toFixed(2) + '°'"></td>
               <td class="px-2 py-2.5 text-right mono" style="color:var(--text-muted)" x-text="s.n_samples"></td>
               <td class="px-2 py-2.5 text-right mono" style="color:var(--text-muted)" x-text="s.pct_days_traded.toFixed(0) + '%'"></td>
               <td class="px-2 py-2.5 text-center">
@@ -159,14 +223,28 @@
           </template>
           <template x-if="filteredStations.length === 0">
             <tr>
-              <td colspan="9" class="px-4 py-8 text-center" style="color:var(--text-muted)">
-                <span x-show="stations.length === 0">No calibration data yet. Press REFRESH to compute.</span>
+              <td colspan="12" class="px-4 py-8 text-center" style="color:var(--text-muted)">
+                <span x-show="stations.length === 0 && !loading">No calibration data yet. Press REFRESH CALIBRATION NOW to compute.</span>
                 <span x-show="stations.length > 0">No stations match filter.</span>
               </td>
             </tr>
           </template>
         </tbody>
       </table>
+    </div>
+  </div>
+
+  <!-- Diagnostics (collapsible) -->
+  <div class="card p-4" x-data="{ open: false }">
+    <button @click="open = !open" class="flex items-center gap-2 text-[10px] uppercase tracking-widest font-bold w-full" style="color:var(--text-muted)">
+      <span x-text="open ? '▼' : '▶'"></span> Diagnostics
+    </button>
+    <div x-show="open" x-collapse class="mt-3 text-xs mono space-y-1" style="color:var(--text-muted)">
+      <div>Table exists: <span style="color:var(--cyan)" x-text="diag.table_exists ?? '—'"></span></div>
+      <div>Row count: <span style="color:var(--cyan)" x-text="diag.row_count ?? '—'"></span></div>
+      <div>Last updated: <span style="color:var(--cyan)" x-text="diag.last_updated ? new Date(diag.last_updated).toLocaleString() : 'never'"></span></div>
+      <div>Refresh in progress: <span style="color:var(--cyan)" x-text="diag.refresh_in_progress ?? '—'"></span></div>
+      <div x-show="diag.error">Error: <span style="color:#EF4444" x-text="diag.error"></span></div>
     </div>
   </div>
 
@@ -179,6 +257,9 @@
         integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 
 <script>
+  // Leaflet load check
+  if (!window.L) { console.error('Leaflet failed to load — map will be blank'); }
+
   let _leafletMap = null;
   let _markerLayer = null;
 
@@ -189,11 +270,48 @@
       tradeFilter: '',
       sortCol: 'mae_f',
       sortDir: 'asc',
+      activeModel: 'blended',
+      loading: true,
+      refreshing: false,
       avgMae: null,
       avgTraded: null,
       countGreen: 0,
       countAmber: 0,
       countRed: 0,
+      diag: {},
+      _pollTimer: null,
+
+      maeForModel(s) {
+        if (this.activeModel === 'ecmwf') return s.mae_ecmwf_f;
+        if (this.activeModel === 'gfs_hrrr') return s.mae_gfs_hrrr_f;
+        if (this.activeModel === 'nws') return s.mae_nws_f;
+        return s.mae_f;
+      },
+
+      maeColor(v) {
+        if (v == null) return 'color:var(--text-muted)';
+        if (v <= 1.5) return 'color:#22C55E';
+        if (v <= 3.0) return 'color:#EAB308';
+        return 'color:#EF4444';
+      },
+
+      fmtMae(v) {
+        if (v == null) return '—';
+        return v.toFixed(2) + '°';
+      },
+
+      winnerBadge(w) {
+        if (w === 'ECMWF') return 'badge-green';
+        if (w === 'NWS') return 'badge-blue';
+        if (w === 'GFS_HRRR') return 'badge-orange';
+        if (w === 'TIE') return 'badge-gray';
+        return 'badge-gray';
+      },
+
+      setModel(m) {
+        this.activeModel = m;
+        this.updateMap();
+      },
 
       get filteredStations() {
         let list = this.stations;
@@ -208,7 +326,6 @@
         if (this.tradeFilter) {
           list = list.filter(s => s.tradeability === this.tradeFilter);
         }
-        // Sort
         const col = this.sortCol;
         const dir = this.sortDir === 'asc' ? 1 : -1;
         list = [...list].sort((a, b) => {
@@ -230,11 +347,13 @@
       },
 
       async init() {
+        this.fetchDiagnostics();
         await this.fetchData();
         this.initMap();
       },
 
       async fetchData() {
+        this.loading = true;
         try {
           const res = await fetch('/api/station-calibrations');
           if (res.ok) {
@@ -243,6 +362,41 @@
             this.updateMap();
           }
         } catch (e) { console.error('Failed to fetch calibrations:', e); }
+
+        if (this.stations.length === 0) {
+          // Auto-trigger refresh on empty table
+          this.refreshing = true;
+          try {
+            await fetch('/api/station-calibrations/auto-refresh', { method: 'POST' });
+          } catch (e) { console.error('Auto-refresh trigger failed:', e); }
+          // Poll every 5s until data appears
+          this._pollTimer = setInterval(async () => {
+            try {
+              const res = await fetch('/api/station-calibrations');
+              if (res.ok) {
+                const data = await res.json();
+                if (data.length > 0) {
+                  this.stations = data;
+                  this.computeStats();
+                  this.updateMap();
+                  this.refreshing = false;
+                  this.loading = false;
+                  clearInterval(this._pollTimer);
+                  this.fetchDiagnostics();
+                }
+              }
+            } catch (e) { /* keep polling */ }
+          }, 5000);
+        } else {
+          this.loading = false;
+        }
+      },
+
+      async fetchDiagnostics() {
+        try {
+          const res = await fetch('/api/station-calibrations/diagnostics');
+          if (res.ok) this.diag = await res.json();
+        } catch (e) { /* non-critical */ }
       },
 
       computeStats() {
@@ -255,6 +409,7 @@
       },
 
       initMap() {
+        if (!window.L) { console.error('Leaflet failed to load'); return; }
         _leafletMap = L.map('station-map', {
           center: [39.5, -98.5],
           zoom: 4,
@@ -262,7 +417,6 @@
           attributionControl: false,
         });
 
-        // CartoDB dark tiles
         L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
           maxZoom: 19,
           subdomains: 'abcd',
@@ -276,11 +430,12 @@
         if (!_markerLayer) return;
         _markerLayer.clearLayers();
 
+        const self = this;
         for (const s of this.stations) {
           if (s.lat == null || s.lon == null) continue;
 
-          const color = s.mae_f <= 1.5 ? '#22C55E' : (s.mae_f <= 3.0 ? '#EAB308' : '#EF4444');
-          const tradeClass = s.tradeability === 'GREEN' ? 'tt-green' : (s.tradeability === 'AMBER' ? 'tt-amber' : 'tt-red');
+          const activeMae = self.maeForModel(s);
+          const color = activeMae == null ? '#6B7280' : (activeMae <= 1.5 ? '#22C55E' : (activeMae <= 3.0 ? '#EAB308' : '#EF4444'));
 
           const marker = L.circleMarker([s.lat, s.lon], {
             radius: 8,
@@ -291,14 +446,18 @@
             fillOpacity: 0.6,
           });
 
+          const fmtV = (v) => v != null ? v.toFixed(2) + '°F' : '—';
+          const tradeClass = s.tradeability === 'GREEN' ? 'tt-green' : (s.tradeability === 'AMBER' ? 'tt-amber' : 'tt-red');
+
           const tooltip = `
             <div class="station-tooltip">
               <div class="tt-station">${s.station_id} — ${s.city_name}</div>
-              <div class="tt-label">MAE: <span class="${tradeClass}">${s.mae_f.toFixed(2)}°F</span></div>
+              <div class="tt-label">ECMWF MAE: <span class="${fmtV(s.mae_ecmwf_f) !== '—' ? (s.mae_ecmwf_f <= 1.5 ? 'tt-green' : s.mae_ecmwf_f <= 3.0 ? 'tt-amber' : 'tt-red') : ''}">${fmtV(s.mae_ecmwf_f)}</span></div>
+              <div class="tt-label">GFS+HRRR MAE: <span class="${fmtV(s.mae_gfs_hrrr_f) !== '—' ? (s.mae_gfs_hrrr_f <= 1.5 ? 'tt-green' : s.mae_gfs_hrrr_f <= 3.0 ? 'tt-amber' : 'tt-red') : ''}">${fmtV(s.mae_gfs_hrrr_f)}</span></div>
+              <div class="tt-label">NWS MAE: <span class="${fmtV(s.mae_nws_f) !== '—' ? (s.mae_nws_f <= 1.5 ? 'tt-green' : s.mae_nws_f <= 3.0 ? 'tt-amber' : 'tt-red') : ''}">${fmtV(s.mae_nws_f)}</span></div>
+              <div class="tt-label">Blended MAE: <span class="${tradeClass}">${fmtV(s.mae_f)}</span></div>
               <div class="tt-label">Bias: ${s.bias_f > 0 ? '+' : ''}${s.bias_f.toFixed(2)}°F</div>
-              <div class="tt-label">RMSE: ${s.rmse_f.toFixed(2)}°F</div>
-              <div class="tt-label">Samples: ${s.n_samples} days</div>
-              <div class="tt-label">Best: ${(s.best_source || '—').toUpperCase()}${s.best_source_mae ? ' (' + s.best_source_mae.toFixed(1) + '°)' : ''}</div>
+              <div class="tt-label">Winner: <strong>${s.winner || '—'}</strong></div>
               <div class="tt-label" style="margin-top:2px">Status: <span class="${tradeClass}">${s.tradeability}</span></div>
             </div>`;
 
@@ -315,7 +474,6 @@
           marker.addTo(_markerLayer);
         }
 
-        // Fit bounds if we have markers
         if (this.stations.length > 0) {
           const lats = this.stations.filter(s => s.lat != null).map(s => s.lat);
           const lons = this.stations.filter(s => s.lon != null).map(s => s.lon);
@@ -335,7 +493,7 @@
     btn.textContent = 'REFRESHING...';
     try {
       const token = getAdminToken() || promptForToken();
-      if (!token) { btn.disabled = false; btn.textContent = 'REFRESH'; return; }
+      if (!token) { btn.disabled = false; btn.textContent = 'REFRESH CALIBRATION NOW'; return; }
       const res = await fetch('/api/station-calibrations/refresh', {
         method: 'POST',
         headers: { 'X-Admin-Token': token },
@@ -346,11 +504,11 @@
         setTimeout(() => location.reload(), 1000);
       } else {
         btn.textContent = 'FAILED';
-        setTimeout(() => { btn.textContent = 'REFRESH'; btn.disabled = false; }, 2000);
+        setTimeout(() => { btn.textContent = 'REFRESH CALIBRATION NOW'; btn.disabled = false; }, 2000);
       }
     } catch (e) {
       btn.textContent = 'ERROR';
-      setTimeout(() => { btn.textContent = 'REFRESH'; btn.disabled = false; }, 2000);
+      setTimeout(() => { btn.textContent = 'REFRESH CALIBRATION NOW'; btn.disabled = false; }, 2000);
     }
   }
 </script>
