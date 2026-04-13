@@ -21,6 +21,14 @@
       {{ event.forecast_quality|upper }}
     </span>
     {% endif %}
+    {% if twe is defined and twe is not none %}
+    <span class="text-xs mono font-bold px-2 py-0.5 rounded-full"
+      style="background:{% if twe >= 0.08 %}rgba(34,197,94,0.15){% elif twe > 0 %}rgba(234,179,8,0.15){% else %}rgba(239,68,68,0.15){% endif %};
+             color:{% if twe >= 0.08 %}#86efac{% elif twe > 0 %}#fbbf24{% else %}#fca5a5{% endif %}"
+      title="Trading Window Edge: sum of positive after-cost edges on liquid buckets (mkt prob >= 5%)">
+      TWE {{ "%.1f"|format(twe * 100) }}%
+    </span>
+    {% endif %}
   </div>
 
   <div class="flex w-full flex-col gap-3 sm:ml-auto sm:w-auto sm:flex-row sm:items-center sm:justify-end sm:gap-4">

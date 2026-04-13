@@ -20,8 +20,76 @@ from backend.market_context.service import serialize_market_context_snapshot
 from backend.tz_utils import city_local_date, city_local_now, city_local_tomorrow, et_today
 from backend.strategy.kelly import calculate_expected_value, calculate_kelly_fraction
 from backend.modeling.calibration_engine import get_reliability_metrics
+from collections import defaultdict
 
 log = logging.getLogger(__name__)
+
+
+# ── Non-weather METAR conditions (no anomaly badge needed) ────────────────
+_NORMAL_CONDITIONS = frozenset({
+    "Fair", "Partly Cloudy", "Mostly Cloudy", "Cloudy", "Clear",
+})
+
+
+def _build_city_groups(
+    signal_rows: list[dict],
+    max_initial_buckets: int = 8,
+) -> list[dict]:
+    """Group flat signal rows by city, compute city-level aggregates (TWE, etc.).
+
+    Returns list of city group dicts sorted by timezone priority then TWE desc.
+    """
+    groups_map: dict[str, dict] = {}
+
+    for row in signal_rows:
+        slug = row["city_slug"]
+        if slug not in groups_map:
+            reason = row.get("_reason") or {}
+            ensemble = reason.get("ensemble_breakdown") or {}
+            groups_map[slug] = {
+                "city_slug": slug,
+                "city_display": row["city_display"],
+                "unit": row.get("unit", "F"),
+                "city_state": row.get("city_state", "early"),
+                "prob_up": row.get("prob_hotter_bucket", row.get("prob_new_high", 1.0)),
+                "prob_new_high_raw": row.get("prob_new_high_raw"),
+                "lock_regime": row.get("lock_regime", False),
+                "consensus_temp": reason.get("mu_forecast"),
+                "kalman_divergence": reason.get("kalman_divergence_f"),
+                "kalman_nowcast_active": reason.get("kalman_nowcast_active", False),
+                "ensemble_breakdown": ensemble,
+                "metar_condition": reason.get("metar_condition"),
+                "resolution_high": reason.get("resolution_high"),
+                "raw_high": reason.get("raw_high"),
+                "observation_minutes": reason.get("observation_minutes"),
+                "resolution_mismatch": reason.get("resolution_mismatch"),
+                "buckets": [],
+            }
+        groups_map[slug]["buckets"].append(row)
+
+    for slug, group in groups_map.items():
+        buckets = group["buckets"]
+        # TWE: sum of positive after-cost edges on liquid buckets (mkt_prob >= 5%)
+        group["twe"] = round(sum(
+            max(0.0, b.get("true_edge", 0.0))
+            for b in buckets
+            if (b.get("mkt_prob") or 0) >= 0.05
+        ), 4)
+        # Sort buckets by bucket_idx for sparkline and display
+        buckets.sort(key=lambda b: b.get("bucket_idx", 0))
+        group["sparkline_probs"] = [b.get("model_prob", 0) or 0 for b in buckets]
+        group["max_initial"] = max_initial_buckets
+        group["has_more"] = len(buckets) > max_initial_buckets
+        group["twe_highlight"] = group["twe"] >= 0.08  # green highlight threshold
+        group["is_anomaly"] = (
+            group["metar_condition"] is not None
+            and group["metar_condition"] not in _NORMAL_CONDITIONS
+        )
+
+    return sorted(
+        groups_map.values(),
+        key=lambda g: (get_city_priority(g["city_slug"]), -g["twe"]),
+    )
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _TEMPLATES_DIR = os.path.join(_HERE, "templates")
@@ -107,6 +175,7 @@ async def dashboard(request: Request):
             "raw_high": reason.get("raw_high"),
             "observation_minutes": reason.get("observation_minutes"),
             "resolution_mismatch": reason.get("resolution_mismatch"),
+            "_reason": reason,
         })
 
     # Deduplicate — keep latest signal per (city, bucket_idx)
@@ -118,8 +187,8 @@ async def dashboard(request: Request):
             seen[key] = True
             deduped.append(row)
 
-    # Sort: timezone (east → west) then market probability descending within each city
-    deduped.sort(key=lambda r: (get_city_priority(r["city_slug"]), -(r.get("mkt_prob") if r.get("mkt_prob") is not None else -1.0)))
+    # Group by city for the redesigned signals table
+    city_groups = _build_city_groups(deduped)
 
     total_exposure = sum((p.net_qty * p.avg_cost) for p in positions if p.net_qty > 0)
 
@@ -180,6 +249,7 @@ async def dashboard(request: Request):
         {
             "request": request,
             "signal_rows": deduped,
+            "city_groups": city_groups,
             "arming_state": arming.state,
             "daily_pnl": round(daily_pnl, 2),
             "total_exposure": round(total_exposure, 2),
@@ -640,6 +710,11 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
             "city_tomorrow": city_local_tomorrow(city),
             "city_tz": getattr(city, "tz", "America/New_York"),
             "buckets": buckets_with_signals,
+            "twe": round(sum(
+                max(0.0, b["true_edge"])
+                for b in buckets_with_signals
+                if b.get("true_edge") is not None and (b.get("mkt_prob") or 0) >= 0.05
+            ), 4),
             "reliability_json": json.dumps([
                 {"expected": b.expected_prob, "observed": b.observed_prob, "count": b.count}
                 for b in reliability_bins
@@ -739,10 +814,11 @@ async def htmx_signals_table(request: Request):
             "raw_high": reason.get("raw_high"),
             "observation_minutes": reason.get("observation_minutes"),
             "resolution_mismatch": reason.get("resolution_mismatch"),
+            "_reason": reason,
         })
 
-    rows.sort(key=lambda r: (get_city_priority(r["city_slug"]), -(r.get("mkt_prob") if r.get("mkt_prob") is not None else -1.0)))
-    return templates.TemplateResponse("partials/signals_table.html", {"request": request, "signal_rows": rows})
+    city_groups = _build_city_groups(rows)
+    return templates.TemplateResponse("partials/signals_table.html", {"request": request, "city_groups": city_groups})
 
 
 @dashboard_router.get("/stations", response_class=HTMLResponse)

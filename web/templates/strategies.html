@@ -10,7 +10,8 @@
       <h1 class="text-2xl font-bold tracking-tight" style="color:var(--cyan)">Strategies</h1>
       <p class="text-sm mt-1" style="color:var(--text-muted)">
         Configure trading strategies, Kelly sizing, exit rules, and gate thresholds.
-        Weather buckets are binary contracts — they resolve to $1 or $0, unlike stocks.
+        Weather buckets are binary contracts — they resolve to $1 or $0. Use Trading Window Edge
+        (TWE) on the dashboard to rank cities by total exploitable mispricing.
       </p>
     </div>
     <div class="flex items-center gap-2">
@@ -43,7 +44,7 @@
         </div>
         <p class="text-xs" style="color:var(--text-muted)">
           Scalp $0.05/share profit on high-confidence entries. Sell at bid when entry + 5c reached.
-          Best during active repricing windows (7-10 AM ET).
+          Best during active repricing windows (7-10 AM ET). Focus on cities with highest TWE.
         </p>
         <div class="flex gap-3">
           <span class="text-[10px] mono px-2 py-0.5 rounded" style="background:var(--bg-panel);color:var(--green)">
@@ -96,8 +97,8 @@
                   x-text="activeStrategy === 'hold_to_settlement' ? 'Active' : 'Enable'"></button>
         </div>
         <p class="text-xs" style="color:var(--text-muted)">
-          Buy high-edge buckets and hold to resolution ($0 or $1). Maximum convexity on tail buckets
-          priced 5-15c with model agreement. Binary payout means no partial exits needed.
+          Buy high-edge buckets and hold to resolution ($0 or $1). Target cities with TWE &gt; 8%
+          for maximum opportunity. Maximum convexity on tail buckets priced 5-15c with model agreement.
         </p>
         <div class="flex gap-3">
           <span class="text-[10px] mono px-2 py-0.5 rounded" style="background:var(--bg-panel);color:var(--green)">
@@ -157,7 +158,8 @@
     <div class="flex items-center justify-between">
       <p class="text-[10px]" style="color:var(--text-muted)">
         Monte Carlo simulation: 100 trades, 52% win rate, avg win +35c, avg loss -15c.
-        Weather buckets are binary ($0 or $1) — Kelly sizes to edge, not volatility.
+        Weather buckets are binary ($0 or $1) — Kelly sizes to per-bucket edge, not volatility.
+        Use Trading Window Edge (TWE) to rank cities by total opportunity before sizing individual trades.
       </p>
       <button @click="applyKelly()" class="text-xs px-3 py-1.5 rounded font-semibold cursor-pointer transition-colors"
               style="background:var(--cyan);color:#000"

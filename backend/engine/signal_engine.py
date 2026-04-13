@@ -96,6 +96,21 @@ def classify_city_state(prob_new_high: float) -> str:
         return "resolved"
 
 
+def compute_twe(signals: list[BucketSignal]) -> float:
+    """Trading Window Edge: sum of positive after-cost edges across liquid buckets.
+
+    TWE = sum(max(0, true_edge_i)) for all buckets where mkt_prob_i >= 0.05
+
+    Higher TWE = more total exploitable mispricing in the active trading window.
+    Adapts to anomalous weather: more liquid buckets = wider window = higher TWE.
+    """
+    return round(sum(
+        max(0.0, sig.true_edge)
+        for sig in signals
+        if sig.mkt_prob >= 0.05
+    ), 4)
+
+
 def _execution_cost(spread: Optional[float], ask_depth: float) -> float:
     """
     Estimate total execution cost = half_spread + slippage.
@@ -205,6 +220,11 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         todays_obs_rows = await get_todays_metar_obs(
             sess, city.id, today_et, city_tz=getattr(city, "tz", "America/New_York")
         )
+
+    # Extract weather condition from METAR extended data for anomaly badges
+    metar_condition = None
+    if metar and metar.extended:
+        metar_condition = getattr(metar.extended, "condition", None)
 
     if not buckets:
         log.debug("signal: %s — no buckets", city.city_slug)
@@ -520,6 +540,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
                 "active_station_source": active_station_source,
                 "observation_minutes": valid_minutes,
                 "resolution_mismatch": resolution_mismatch,
+                "metar_condition": metar_condition,
             }
 
             actionable = (

@@ -168,33 +168,18 @@
       <span class="text-xs" style="color:var(--text-muted)">auto-refresh 15s</span>
       <span class="htmx-indicator w-1.5 h-1.5 rounded-full bg-yellow-400 animate-pulse inline-block"></span>
     </div>
-    <span class="text-xs" style="color:var(--text-muted)">{{ signal_rows|length }} buckets tracked</span>
+    <span class="text-xs" style="color:var(--text-muted)">{{ city_groups|length }} cities tracked</span>
   </div>
 
   <!-- Table container with HTMX auto-refresh -->
   <div hx-get="/htmx/signals-table"
        hx-trigger="every 15s"
-       hx-target="#signals-tbody"
+       hx-target="#signals-table-wrap"
        hx-swap="innerHTML"
        hx-indicator=".htmx-indicator">
-    <table class="w-full text-sm">
-      <thead>
-        <tr class="text-xs uppercase tracking-widest" style="color:var(--text-muted);border-bottom:1px solid var(--border)">
-          <th class="px-3 py-3 text-left">City</th>
-          <th class="px-3 py-3 text-left">Bucket</th>
-          <th class="px-3 py-3 text-right font-bold" style="color:var(--cyan)">Model</th>
-          <th class="px-3 py-3 text-right font-bold" style="color:var(--yellow)">Market</th>
-          <th class="px-3 py-3 text-right">Diff</th>
-          <th class="px-3 py-3 text-right">Edge</th>
-          <th class="px-3 py-3 text-center">State</th>
-          <th class="px-3 py-3 text-right">P(UP)</th>
-          <th class="px-3 py-3 text-center">Action</th>
-        </tr>
-      </thead>
-      <tbody id="signals-tbody">
-        {% include "partials/signals_table.html" %}
-      </tbody>
-    </table>
+    <div id="signals-table-wrap">
+      {% include "partials/signals_table.html" %}
+    </div>
   </div>
 </div>
 

@@ -11,7 +11,21 @@ Quantitative prediction market trading system for weather events on Polymarket.
 - **Market Context Agent**: An autonomous tool-calling agent (LLM) with 5 tools (HRRR, NBM, Semantic Scholar, NWS AFD, Polymarket) that resolves forecast discrepancies and produces independent temperature assessments.
 - **Dashboard**: HTMX-powered real-time monitoring of edges, calibration, and portfolio state.
 
-## 🚀 Deployment (Railway)
+## � TWE (Total Weighted Edge)
+
+TWE is a **city-level opportunity metric** used for **display and ranking** on the dashboard.
+
+Definition:
+
+- **TWE** = sum of **positive** after-cost edges across **liquid** buckets where `mkt_prob >= 5%`.
+
+Important:
+
+- **TWE is not used for execution decisions.** Trading gates and actions remain bucket-level.
+- **Per-bucket `true_edge` remains the operational metric** for gating and trade decisions.
+- **Kelly sizing is unchanged**: it uses per-bucket `model_prob` and `yes_price` (not TWE).
+
+## �🚀 Deployment (Railway)
 
 ### 1. Persistence (Critical)
 The system uses SQLite (`state.db`) and local logs. On Railway, you **must** mount a Volume to `/app/data` to prevent data loss on redeploys.
@@ -51,6 +65,16 @@ If you need to sweep a negative risk outcome that isn't cleanly resolving, or ju
 - **Kelly Criterion**: Position sizes are scaled by `(Edge / Odds) * FractionalMult`.
 - **Daily Loss Limit**: Automated halt if realized daily loss exceeds 2% of bankroll.
 - **Gating**: System prevents trading on "degraded" forecast quality or thin liquidity (<100 shares).
+
+## 🧭 Dashboard Signals (City-Grouped View)
+
+The dashboard signal table is grouped by **city** (with per-city header rows) and includes:
+
+- City-level metrics (including **TWE**, consensus temperature, Kalman divergence)
+- A compact probability sparkline for the city
+- METAR-derived anomaly badges (e.g., Rain / Snow / Blizzard)
+
+The per-city group expands into bucket-level sub-rows showing model vs market probability, diff, and action.
 
 ## 📊 Evaluation
 

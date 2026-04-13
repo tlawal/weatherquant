@@ -284,8 +284,11 @@ async def get_todays_extended_obs(
 async def get_latest_metar(
     session: AsyncSession, city_id: int
 ) -> Optional[MetarObs]:
+    from sqlalchemy.orm import selectinload
+
     result = await session.execute(
         select(MetarObs)
+        .options(selectinload(MetarObs.extended))
         .where(MetarObs.city_id == city_id)
         .order_by(desc(MetarObs.observed_at))
         .limit(1)
