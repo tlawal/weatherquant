@@ -1307,71 +1307,12 @@ async def get_bucket_position(city_slug: str, bucket_idx: int, date_et: str | No
 @router.post("/api/sync-positions")
 async def sync_positions_from_api(actor: str = Depends(require_admin)):
     """Sync DB positions from Polymarket data API (restores incorrectly zeroed positions)."""
-    import aiohttp
-    from backend.execution.chain_utils import get_wallet_address
+    from backend.execution.position_sync import sync_positions_from_chain
+    res = await sync_positions_from_chain()
+    if not res.get("ok"):
+        raise HTTPException(status_code=502, detail=res.get("error", "Unknown error"))
+    return res
 
-    addr = get_wallet_address()
-    timeout = aiohttp.ClientTimeout(total=15)
-    async with aiohttp.ClientSession(timeout=timeout) as http:
-        url = f"https://data-api.polymarket.com/positions?user={addr}"
-        async with http.get(url) as resp:
-            if resp.status != 200:
-                raise HTTPException(status_code=502, detail=f"Polymarket API returned {resp.status}")
-            api_positions = await resp.json()
-
-    corrections = []
-    for api_pos in api_positions:
-        size = float(api_pos.get("size", 0))
-        if size <= 0:
-            continue
-        asset = api_pos.get("asset", "")
-        avg_price = float(api_pos.get("avgPrice", 0))
-        title = api_pos.get("title", "")
-
-        # Find matching bucket by yes_token_id
-        async with get_session() as sess:
-            from sqlalchemy import select
-            from backend.storage.models import Bucket, Position
-            result = await sess.execute(
-                select(Bucket).where(Bucket.yes_token_id == asset)
-            )
-            bucket = result.scalar_one_or_none()
-            if not bucket:
-                continue
-
-            pos = await get_position(sess, bucket.id)
-            if pos and abs(pos.net_qty - size) < 0.01:
-                continue  # already correct
-
-            if pos:
-                old_qty = pos.net_qty
-                pos.net_qty = size
-                pos.avg_cost = avg_price
-                if pos.last_mkt_price:
-                    pos.unrealized_pnl = size * (pos.last_mkt_price - avg_price)
-                await sess.commit()
-            else:
-                new_pos = Position(
-                    bucket_id=bucket.id,
-                    side="yes",
-                    net_qty=size,
-                    avg_cost=avg_price,
-                    last_mkt_price=avg_price,
-                    unrealized_pnl=0.0,
-                )
-                sess.add(new_pos)
-                old_qty = 0
-                await sess.commit()
-
-            corrections.append({
-                "bucket_id": bucket.id,
-                "title": title,
-                "old_qty": old_qty,
-                "new_qty": size,
-                "avg_price": avg_price,
-            })
-
-    return {"ok": True, "synced": len(corrections), "corrections": corrections}
 
 
 # ─── Orders ───────────────────────────────────────────────────────────────────

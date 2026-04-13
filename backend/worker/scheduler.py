@@ -195,6 +195,12 @@ async def job_refresh_station_calibrations():
     await refresh_all_station_calibrations()
 
 
+async def job_sync_positions():
+    """Automatically synchronizes database positions with on-chain truth periodically."""
+    from backend.execution.position_sync import sync_positions_from_chain
+    await sync_positions_from_chain()
+
+
 async def job_heartbeat():
     """Write a heartbeat so API server can detect worker liveness."""
     from backend.storage.db import get_session
@@ -237,6 +243,7 @@ def create_scheduler() -> AsyncIOScheduler:
     add(job_check_resolved,          seconds=300,   name="check_resolved")  # 5 min
     add(job_auto_redeem,             seconds=43200, name="auto_redeem")  # 12h
     add(job_refresh_station_calibrations, seconds=21600, name="refresh_station_cal")  # 6h
+    add(job_sync_positions,          seconds=600,   name="sync_positions") # 10 min
 
     return scheduler
 
