@@ -138,6 +138,16 @@ async def run_exit_engine() -> None:
                 cascade["level"], pos.bucket_id, pos.net_qty, sell_price
             )
             
+            # Save exit triggered status
+            async with get_session() as sess:
+                from sqlalchemy import update
+                import backend.storage.models as m
+                await sess.execute(
+                    update(m.Position).where(m.Position.bucket_id == pos.bucket_id)
+                    .values(current_exit_status=f"{cascade['level']} exit triggered: {cascade['reason']}")
+                )
+                await sess.commit()
+
             await execute_signal(
                 signal=signal,
                 bankroll=0.0, # Not used for sells
@@ -148,5 +158,17 @@ async def run_exit_engine() -> None:
                 limit_price_override=sell_price,
                 qty_override=pos.net_qty # Dump the whole position
             )
+        else:
+            # Save active monitoring status
+            target_price = pos.avg_cost + 0.05
+            bid = signal.yes_bid or 0.0
+            async with get_session() as sess:
+                from sqlalchemy import update
+                import backend.storage.models as m
+                await sess.execute(
+                    update(m.Position).where(m.Position.bucket_id == pos.bucket_id)
+                    .values(current_exit_status=f"Monitoring: await +5¢ Quick-Flip (target ${target_price:.2f}, bid ${bid:.2f}) or Shift")
+                )
+                await sess.commit()
             
     log.info("exit_engine: complete (%d exits triggered)", exits_triggered)

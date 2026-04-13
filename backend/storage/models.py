@@ -389,6 +389,15 @@ class Position(Base):
     realized_pnl: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     unrealized_pnl: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     last_mkt_price: Mapped[Optional[float]] = mapped_column(Float)
+    
+    # Traceability and execution logging
+    entry_type: Mapped[Optional[str]] = mapped_column(String(16)) # "AUTOMATIC" | "MANUAL"
+    strategy: Mapped[Optional[str]] = mapped_column(String(64))
+    governing_exit_conditions: Mapped[Optional[str]] = mapped_column(Text)
+    current_exit_status: Mapped[Optional[str]] = mapped_column(String(256))
+    entry_time: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    entry_price: Mapped[Optional[float]] = mapped_column(Float)
+
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
     )
@@ -422,6 +431,7 @@ class ArmingState(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
     # "DISARMED" | "ARMING_PENDING" | "ARMED"
     state: Mapped[str] = mapped_column(String(16), default="DISARMED", nullable=False)
+    auto_redeem_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     arming_token: Mapped[Optional[str]] = mapped_column(String(64))
     token_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     armed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))

@@ -237,7 +237,7 @@ async def execute_signal(
     result["estimated_cost"] = cost
 
     log.info(
-        "trade: %s bucket=%d %.2f shares @ $%.4f = $%.2f (edge=%.3f %s)",
+        "trade: %s bucket=%d %.2f shares @ $%.4f = $%.2f (edge=%.3f)",
         signal.city_slug,
         signal.bucket_idx,
         shares,
@@ -245,6 +245,16 @@ async def execute_signal(
         cost,
         signal.true_edge,
     )
+
+    # Calculate governing exit conditions
+    governing_exit_conditions = None
+    if side == "BUY":
+        governing_exit_conditions = json.dumps({
+            "cut_temp_high": round(signal.high_f + 1, 1) if signal.high_f is not None else None,
+            "cut_temp_low": round(signal.low_f - 3, 1) if signal.low_f is not None else None,
+            "take_profit_price": round(limit_price + 0.05, 3),
+            "expiry_time": "19:30 ET"
+        })
 
     # ── Look up token ID for this bucket ────────────────────────────────────
     from backend.storage.repos import get_buckets_for_event
@@ -421,6 +431,9 @@ async def execute_signal(
                 fill_qty=fill_result["qty"] if side == "BUY" else -fill_result["qty"],
                 fill_price=fill_result["price"],
                 last_mkt_price=fill_result["price"],
+                entry_type="MANUAL" if manual else "AUTOMATIC",
+                strategy=strategy,
+                governing_exit_conditions=governing_exit_conditions,
             )
             await append_audit(
                 sess,

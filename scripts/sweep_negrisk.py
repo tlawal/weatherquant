@@ -171,9 +171,45 @@ async def sweep_market(condition_id_hex: str, market_id_hex: str, yes_token_id: 
     tx_hash = await _rpc("eth_sendRawTransaction", ["0x" + signed_tx.raw_transaction.hex()])
     print(f"Transaction broadcasting... Hash: {tx_hash}")
 
+async def sweep_all_markets():
+    """Find all unresolved/unredeemed positions and sweep them."""
+    from backend.storage.db import get_session
+    from backend.storage.repos import get_unredeemed_resolved_events
+    
+    async with get_session() as sess:
+        events = await get_unredeemed_resolved_events(sess, require_position=True)
+    
+    if not events:
+        print("No unredeemed winning positions found in DB.")
+        return
+        
+    import aiohttp
+    timeout = aiohttp.ClientTimeout(total=15)
+    async with aiohttp.ClientSession(timeout=timeout) as http:
+        for event in events:
+            # Check Gama to get NegRiskMarketID
+            market_id = None
+            if event.gamma_event_id:
+                url = f"https://gamma-api.polymarket.com/events/{event.gamma_event_id}"
+                async with http.get(url) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        market_id = data.get("negRiskMarketID")
+            
+            for bucket in event.buckets:
+                if bucket.condition_id:
+                    print(f"\nEvaluating bucket {bucket.id} ({bucket.label}) for event {event.id}")
+                    await sweep_market(
+                        condition_id_hex=bucket.condition_id,
+                        market_id_hex=market_id,
+                        yes_token_id=bucket.yes_token_id,
+                        no_token_id=bucket.no_token_id
+                    )
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
+    parser.add_argument("--all", action="store_true", help="Sweep all unredeemed positions intelligently")
     parser.add_argument("--condition-id", default="0xf407680f8a8aaeae83098a6e8f55e180592063e521f3597ccb36f22041de0511", help="Condition ID to redeem")
     parser.add_argument("--market-id", default="0x91ac5e1269cdf591cac9969de234a2fdd40038f23d837bcdb052b3e6ed721300", help="NegRisk Parent Market ID from Gamma API")
     parser.add_argument("--yes", default="68464819232927294590340903739217335680789125025992638975000171096382629434455", help="Yes Token ID")
@@ -181,4 +217,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     logging.basicConfig(level=logging.INFO)
-    asyncio.run(sweep_market(args.condition_id, args.market_id, args.yes, args.no))
+    if args.all:
+        asyncio.run(sweep_all_markets())
+    else:
+        asyncio.run(sweep_market(args.condition_id, args.market_id, getattr(args, 'yes', None), getattr(args, 'no', None)))

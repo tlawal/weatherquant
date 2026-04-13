@@ -69,14 +69,13 @@ async def check_resolved_markets() -> int:
                 # Find winning bucket by checking which market resolved YES
                 markets = data.get("markets", [])
                 winning_idx = None
-                for mkt in markets:
+                for i, mkt in enumerate(markets):
                     outcome = mkt.get("outcome")
-                    resolved_to = mkt.get("resolvedTo")
-                    if resolved_to == "Yes" or resolved_to == 1 or resolved_to == "1":
-                        # Match by groupItemTitle or position in list
-                        # Markets are ordered by bucket index
-                        idx = markets.index(mkt)
-                        winning_idx = idx
+                    if outcome and str(outcome).lower() == "yes":
+                        winning_idx = i
+                        break
+                    if mkt.get("winner") is True:
+                        winning_idx = i
                         break
 
                 async with get_session() as sess:
@@ -375,6 +374,13 @@ async def redeem_positions() -> int:
 
 async def run_auto_redeem() -> None:
     """Combined check + redeem pass. Called by scheduler."""
+    from backend.storage.repos import get_arming_state
+    
+    async with get_session() as sess:
+        arming = await get_arming_state(sess)
+        if not arming or not arming.auto_redeem_enabled:
+            return
+
     resolved = await check_resolved_markets()
     if resolved:
         log.info("redeemer: found %d newly resolved events", resolved)

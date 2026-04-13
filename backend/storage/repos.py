@@ -920,9 +920,14 @@ async def upsert_position(
     fill_qty: float,
     fill_price: float,
     last_mkt_price: float | None = None,
+    entry_type: str | None = None,
+    strategy: str | None = None,
+    governing_exit_conditions: str | None = None,
+    current_exit_status: str | None = None,
 ) -> Position:
     """Update position with a fill. fill_qty positive=buy, negative=sell."""
     pos = await get_position(session, bucket_id)
+    now = datetime.now(timezone.utc)
     if pos is None:
         pos = Position(
             bucket_id=bucket_id,
@@ -930,6 +935,12 @@ async def upsert_position(
             net_qty=max(fill_qty, 0),
             avg_cost=fill_price if fill_qty > 0 else 0.0,
             last_mkt_price=last_mkt_price or fill_price,
+            entry_type=entry_type,
+            strategy=strategy,
+            governing_exit_conditions=governing_exit_conditions,
+            current_exit_status=current_exit_status,
+            entry_time=now if fill_qty > 0 else None,
+            entry_price=fill_price if fill_qty > 0 else None,
         )
         session.add(pos)
     else:
@@ -944,12 +955,29 @@ async def upsert_position(
             sold = abs(fill_qty)
             pos.realized_pnl += sold * (fill_price - pos.avg_cost)
         pos.net_qty = max(new_qty, 0)
+        
+        # If building a larger position, update the entry metadata
+        if fill_qty > 0:
+            if not pos.entry_time:
+                pos.entry_time = now
+            if not pos.entry_price:
+                pos.entry_price = fill_price
+            if entry_type:
+                pos.entry_type = entry_type
+            if strategy:
+                pos.strategy = strategy
+            if governing_exit_conditions:
+                pos.governing_exit_conditions = governing_exit_conditions
+            if current_exit_status:
+                pos.current_exit_status = current_exit_status
+
         if last_mkt_price is not None:
             pos.last_mkt_price = last_mkt_price
         if pos.net_qty > 0 and pos.last_mkt_price:
             pos.unrealized_pnl = pos.net_qty * (pos.last_mkt_price - pos.avg_cost)
         else:
             pos.unrealized_pnl = 0.0
+
     await session.commit()
     await session.refresh(pos)
     return pos

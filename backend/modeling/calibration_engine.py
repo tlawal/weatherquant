@@ -89,7 +89,10 @@ async def get_reliability_metrics(city_id: int, days_back: int = 30) -> List[Rel
         )
 
         results = (await sess.execute(query)).all()
-        log.info("calibration: city_id=%d found %d settled events with wu_history", city_id, len(results))
+        if len(results) == 0:
+            log.debug("calibration: city_id=%d found 0 settled events with wu_history", city_id)
+        else:
+            log.info("calibration: city_id=%d found %d settled events with wu_history", city_id, len(results))
 
         # We also need the bucket boundaries for each event to check for "hits"
         event_ids = list(set([r[2] for r in results]))

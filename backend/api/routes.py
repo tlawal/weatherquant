@@ -864,6 +864,26 @@ async def redeem_by_condition(condition_id: str, actor: str = Depends(require_ad
         "to": NEG_RISK_ADAPTER,
     }
 
+@router.post("/api/redemptions/toggle-auto-redeem")
+async def toggle_auto_redeem(enabled: bool = Body(..., embed=True), actor: str = Depends(require_admin)):
+    from backend.storage.models import ArmingState
+    from sqlalchemy import update
+    async with get_session() as sess:
+        await sess.execute(update(ArmingState).where(ArmingState.id == 1).values(auto_redeem_enabled=enabled))
+        await sess.commit()
+    return {"ok": True, "auto_redeem_enabled": enabled}
+
+@router.post("/api/sweep-all")
+async def sweep_all(actor: str = Depends(require_admin)):
+    import asyncio
+    proc = await asyncio.create_subprocess_exec(
+        ".venv/bin/python", "scripts/sweep_negrisk.py", "--all",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
+    stdout, stderr = await proc.communicate()
+    return {"ok": proc.returncode == 0, "logs": stdout.decode(), "error": stderr.decode()}
+
 
 @router.get("/api/redemptions")
 async def redemptions_list():
@@ -950,6 +970,19 @@ async def redemptions_list():
                     evt.winning_bucket_idx is not None
                     and bucket.bucket_idx == evt.winning_bucket_idx
                 )
+                exit_strategy = None
+                if pos and pos.net_qty > 0:
+                    from backend.storage.repos import get_latest_signal_for_bucket
+                    sig = await get_latest_signal_for_bucket(sess, bucket.id)
+                    if sig:
+                        exit_strategy = {
+                            "type": "default",
+                            "cut_loss_temp_high": sig.high_f + 1.0 if sig.high_f is not None else None,
+                            "cut_loss_temp_low": sig.low_f - 3.0 if sig.low_f is not None else None,
+                            "take_profit_price": round(pos.avg_cost + 0.05, 3),
+                            "expiry_time": "19:30 Local",
+                        }
+
                 buckets_info.append({
                     "bucket_idx": bucket.bucket_idx,
                     "label": bucket.label,
@@ -958,6 +991,13 @@ async def redemptions_list():
                     "avg_cost": pos.avg_cost if pos else 0,
                     "is_winner": is_winner,
                     "on_chain_determined": determined_map.get(bucket.condition_id),
+                    "exit_strategy": exit_strategy,
+                    # New Position Tracking Metadata
+                    "entry_type": pos.entry_type if pos else None,
+                    "strategy": pos.strategy if pos else None,
+                    "governing_exit_conditions": pos.governing_exit_conditions if pos else None,
+                    "current_exit_status": pos.current_exit_status if pos else None,
+                    "entry_time": pos.entry_time.isoformat() if pos and pos.entry_time else None,
                 })
 
         # Overall on-chain status: determined if ANY bucket with position is determined
@@ -1086,7 +1126,13 @@ async def redemptions_list():
         except Exception as e:
             log.warning("redemptions: failed to fetch on-chain positions: %s", e)
 
-    return {"events": rows}
+    # Fetch Auto Redeem Status
+    async with get_session() as sess:
+        from backend.storage.repos import get_arming_state
+        arming = await get_arming_state(sess)
+        auto_redeem_enabled = arming.auto_redeem_enabled if arming else False
+
+    return {"events": rows, "auto_redeem_enabled": auto_redeem_enabled}
 
 
 @router.get("/api/redeem-diag")

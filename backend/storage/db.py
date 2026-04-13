@@ -143,6 +143,17 @@ async def init_db() -> None:
     await _run_ddl("ALTER TABLE orders ADD COLUMN signal_id INTEGER")
     await _run_ddl("ALTER TABLE orders ADD COLUMN gates_json TEXT")
 
+    # arming_state
+    await _run_ddl("ALTER TABLE arming_state ADD COLUMN auto_redeem_enabled BOOLEAN NOT NULL DEFAULT 0")
+
+    # positions
+    await _run_ddl("ALTER TABLE positions ADD COLUMN entry_type VARCHAR(16)")
+    await _run_ddl("ALTER TABLE positions ADD COLUMN strategy VARCHAR(64)")
+    await _run_ddl("ALTER TABLE positions ADD COLUMN governing_exit_conditions TEXT")
+    await _run_ddl("ALTER TABLE positions ADD COLUMN current_exit_status VARCHAR(256)")
+    await _run_ddl("ALTER TABLE positions ADD COLUMN entry_time TIMESTAMP WITH TIME ZONE")
+    await _run_ddl("ALTER TABLE positions ADD COLUMN entry_price FLOAT")
+
     # signals — generation tag to filter to "latest snapshot only"
     await _run_ddl("ALTER TABLE signals ADD COLUMN model_snapshot_id INTEGER")
     await _run_ddl("CREATE INDEX IF NOT EXISTS ix_signal_snapshot ON signals (model_snapshot_id)")
