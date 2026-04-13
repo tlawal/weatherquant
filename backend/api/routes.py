@@ -671,7 +671,7 @@ async def get_positions():
             "last_mkt_price": p.last_mkt_price,
             "unrealized_pnl": p.unrealized_pnl,
             "realized_pnl": p.realized_pnl,
-            "updated_at": p.updated_at.isoformat(),
+            "updated_at": p.updated_at.isoformat() if hasattr(p.updated_at, 'isoformat') else p.updated_at,
         })
 
     return {
@@ -997,7 +997,7 @@ async def redemptions_list():
                     "strategy": pos.strategy if pos else None,
                     "governing_exit_conditions": pos.governing_exit_conditions if pos else None,
                     "current_exit_status": pos.current_exit_status if pos else None,
-                    "entry_time": pos.entry_time.isoformat() if pos and pos.entry_time else None,
+                    "entry_time": pos.entry_time.isoformat() if pos and pos.entry_time and hasattr(pos.entry_time, 'isoformat') else (pos.entry_time if pos else None),
                 })
 
         # Overall on-chain status: determined if ANY bucket with position is determined
