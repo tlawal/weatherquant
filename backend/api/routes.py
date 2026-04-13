@@ -977,8 +977,8 @@ async def redemptions_list():
                     if sig:
                         exit_strategy = {
                             "type": "default",
-                            "cut_loss_temp_high": sig.high_f + 1.0 if sig.high_f is not None else None,
-                            "cut_loss_temp_low": sig.low_f - 3.0 if sig.low_f is not None else None,
+                            "cut_loss_temp_high": bucket.high_f + 1.0 if bucket.high_f is not None else None,
+                            "cut_loss_temp_low": bucket.low_f - 3.0 if bucket.low_f is not None else None,
                             "take_profit_price": round(pos.avg_cost + 0.05, 3),
                             "expiry_time": "19:30 Local",
                         }
