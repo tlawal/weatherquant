@@ -107,25 +107,32 @@
 
   {% block extra_head %}{% endblock %}
 </head>
-<body class="min-h-screen" x-data="{ theme: localStorage.getItem('theme') || 'dark' }">
+<body class="min-h-screen" x-data="{ theme: localStorage.getItem('theme') || 'dark', mobileNav: false }">
 
   <!-- ── HEADER ─────────────────────────────────────────────────────────────── -->
   <header class="sticky top-0 z-50 border-b" style="background:var(--bg-card);border-color:var(--border)">
     <div class="max-w-screen-2xl mx-auto px-4 h-14 flex items-center justify-between">
 
-      <!-- Logo -->
+      <!-- Logo + Nav -->
       <div class="flex items-center gap-3">
+        <!-- Mobile hamburger -->
+        <button @click="mobileNav = !mobileNav" class="md:hidden p-1 cursor-pointer" style="color:var(--text-muted)">
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/>
+          </svg>
+        </button>
         <a href="/" class="flex items-center gap-2 no-underline">
           <span class="text-2xl">🌡️</span>
           <span class="font-bold text-lg tracking-tight" style="color:var(--cyan)">WeatherQuant</span>
         </a>
-        <span class="text-xs px-2 py-0.5 rounded font-mono" style="background:var(--bg-panel);color:var(--text-muted)">v1</span>
+        <span class="text-xs px-2 py-0.5 rounded font-mono hidden sm:inline" style="background:var(--bg-panel);color:var(--text-muted)">v1</span>
         <nav class="hidden md:flex gap-4 ml-4">
           <a href="/" class="text-sm hover:text-white transition-colors" style="color:var(--text-muted)">Signals</a>
           <a href="/redemptions" class="text-sm hover:text-white transition-colors" style="color:var(--text-muted)">Redemptions</a>
           <a href="/stations" class="text-sm hover:text-white transition-colors" style="color:var(--text-muted)">Stations</a>
           <a href="/strategies" class="text-sm hover:text-white transition-colors" style="color:var(--text-muted)">Strategies</a>
           <a href="/admin/cities" class="text-sm hover:text-white transition-colors" style="color:var(--text-muted)">Cities</a>
+          <a href="/backtest" class="text-sm hover:text-white transition-colors" style="color:var(--text-muted)">Backtest</a>
         </nav>
       </div>
 
@@ -174,6 +181,21 @@
       </div>
     </div>
   </header>
+
+  <!-- ── MOBILE NAV DRAWER ─────────────────────────────────────────────────── -->
+  <div x-show="mobileNav" x-cloak x-transition
+       @click.outside="mobileNav = false"
+       class="md:hidden border-b sticky top-14 z-40"
+       style="background:var(--bg-card);border-color:var(--border)">
+    <nav class="max-w-screen-2xl mx-auto px-4 py-3 flex flex-col gap-2">
+      <a href="/" @click="mobileNav = false" class="text-sm py-1.5 px-2 rounded hover:text-white transition-colors" style="color:var(--text-muted)">Signals</a>
+      <a href="/redemptions" @click="mobileNav = false" class="text-sm py-1.5 px-2 rounded hover:text-white transition-colors" style="color:var(--text-muted)">Redemptions</a>
+      <a href="/stations" @click="mobileNav = false" class="text-sm py-1.5 px-2 rounded hover:text-white transition-colors" style="color:var(--text-muted)">Stations</a>
+      <a href="/strategies" @click="mobileNav = false" class="text-sm py-1.5 px-2 rounded hover:text-white transition-colors" style="color:var(--text-muted)">Strategies</a>
+      <a href="/admin/cities" @click="mobileNav = false" class="text-sm py-1.5 px-2 rounded hover:text-white transition-colors" style="color:var(--text-muted)">Cities</a>
+      <a href="/backtest" @click="mobileNav = false" class="text-sm py-1.5 px-2 rounded hover:text-white transition-colors" style="color:var(--text-muted)">Backtest</a>
+    </nav>
+  </div>
 
   <!-- ── MAIN CONTENT ────────────────────────────────────────────────────────── -->
   <main class="max-w-screen-2xl mx-auto px-4 py-6">

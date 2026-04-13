@@ -476,6 +476,78 @@ class WorkerHeartbeat(Base):
     error_count: Mapped[int] = mapped_column(Integer, default=0)
 
 
+# ─── Backtesting ─────────────────────────────────────────────────────────────
+
+class BacktestRun(Base):
+    """One complete backtest execution with parameters and summary metrics."""
+    __tablename__ = "backtest_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    # Parameters used (JSON dict of BacktestParams)
+    params_json: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # Date range covered
+    start_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    end_date: Mapped[str] = mapped_column(String(10), nullable=False)
+
+    # Summary metrics
+    total_trades: Mapped[int] = mapped_column(Integer, default=0)
+    winning_trades: Mapped[int] = mapped_column(Integer, default=0)
+    total_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    max_drawdown: Mapped[float] = mapped_column(Float, default=0.0)
+    sharpe_ratio: Mapped[Optional[float]] = mapped_column(Float)
+    brier_score: Mapped[Optional[float]] = mapped_column(Float)
+    brier_skill_score: Mapped[Optional[float]] = mapped_column(Float)
+    win_rate: Mapped[Optional[float]] = mapped_column(Float)
+    avg_edge: Mapped[Optional[float]] = mapped_column(Float)
+
+    # Full results: equity_curve, daily_pnl, per_city_stats, reliability_bins
+    results_json: Mapped[Optional[str]] = mapped_column(Text)
+
+    # "running" | "completed" | "failed"
+    status: Mapped[str] = mapped_column(String(16), default="running", nullable=False)
+    error_msg: Mapped[Optional[str]] = mapped_column(Text)
+
+    trades: Mapped[list["BacktestTrade"]] = relationship(
+        "BacktestTrade", back_populates="run", cascade="all, delete-orphan"
+    )
+
+
+class BacktestTrade(Base):
+    """One simulated trade within a backtest run."""
+    __tablename__ = "backtest_trades"
+    __table_args__ = (Index("ix_bt_trade_run", "run_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[int] = mapped_column(Integer, ForeignKey("backtest_runs.id"), nullable=False)
+
+    city_slug: Mapped[str] = mapped_column(String(64), nullable=False)
+    date_et: Mapped[str] = mapped_column(String(10), nullable=False)
+    bucket_idx: Mapped[int] = mapped_column(Integer, nullable=False)
+    bucket_label: Mapped[Optional[str]] = mapped_column(String(256))
+
+    # Signal at entry time
+    model_prob: Mapped[float] = mapped_column(Float, nullable=False)
+    mkt_prob: Mapped[float] = mapped_column(Float, nullable=False)
+    true_edge: Mapped[float] = mapped_column(Float, nullable=False)
+
+    # Simulated execution
+    side: Mapped[str] = mapped_column(String(8), nullable=False)   # "buy_yes" | "buy_no"
+    entry_price: Mapped[float] = mapped_column(Float, nullable=False)
+    shares: Mapped[float] = mapped_column(Float, nullable=False)
+    cost: Mapped[float] = mapped_column(Float, nullable=False)
+
+    # Outcome
+    won: Mapped[Optional[bool]] = mapped_column(Boolean)
+    pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    # "resolved_win" | "resolved_loss" | "quick_flip" | "expiry"
+    exit_reason: Mapped[Optional[str]] = mapped_column(String(32))
+
+    run: Mapped["BacktestRun"] = relationship("BacktestRun", back_populates="trades")
+
+
 class StationCalibration(Base):
     """Per-station 30-day rolling forecast calibration metrics.
 

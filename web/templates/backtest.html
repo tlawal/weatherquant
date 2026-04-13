@@ -1,0 +1,548 @@
+{% extends "base.html" %}
+{% block title %}Backtest — WeatherQuant{% endblock %}
+
+{% block content %}
+<div x-data="backtestPage()" x-init="init()" class="space-y-6">
+
+  <!-- ── PAGE HEADER ─────────────────────────────────────────────────────────── -->
+  <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+    <div>
+      <h1 class="text-2xl font-bold tracking-tight" style="color:var(--cyan)">Walk-Forward Backtester</h1>
+      <p class="text-sm mt-1" style="color:var(--text-muted)">
+        Replay historical trading decisions against resolved Polymarket outcomes.
+        Walk-forward optimization trains on rolling windows — no lookahead bias.
+      </p>
+    </div>
+    <div class="flex items-center gap-2">
+      <span class="text-xs mono px-2 py-1 rounded" style="background:var(--bg-panel);color:var(--text-muted)">
+        Resolved Events: <strong style="color:var(--cyan)">{{ resolved_count }}</strong>
+      </span>
+      <button @click="enrichGamma()" class="text-xs px-3 py-1.5 rounded cursor-pointer transition-colors"
+              style="background:var(--bg-panel);color:var(--text-muted);border:1px solid var(--border)"
+              :disabled="enriching">
+        <span x-show="!enriching">Enrich from Gamma</span>
+        <span x-show="enriching" x-cloak>Fetching...</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- ── HOW IT WORKS (collapsible, for beginners) ───────────────────────────── -->
+  <details class="card p-4">
+    <summary class="text-sm font-bold cursor-pointer" style="color:var(--cyan)">How does this work?</summary>
+    <div class="mt-3 text-xs space-y-2" style="color:var(--text-muted)">
+      <p><strong>1.</strong> We load every resolved market from your database (events where the winning bucket is known).</p>
+      <p><strong>2.</strong> For each event, we replay the model's probability forecast + market prices that existed at the time.</p>
+      <p><strong>3.</strong> We simulate trades using Kelly sizing, check for quick-flip exits, then resolve at the actual outcome.</p>
+      <p><strong>4.</strong> Walk-forward mode splits data into rolling train/test windows and optimizes parameters on the training set before testing — this prevents overfitting.</p>
+      <p><strong>Tip:</strong> If "Resolved Events" shows 0, click <em>Enrich from Gamma</em> to pull historical outcomes from the Polymarket API.</p>
+    </div>
+  </details>
+
+  <!-- ── PARAMETER CONTROLS ──────────────────────────────────────────────────── -->
+  <div class="card p-4 space-y-4">
+    <h2 class="text-sm font-bold uppercase tracking-widest" style="color:var(--text-muted)">Parameters</h2>
+
+    <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
+      <!-- Kelly Fraction -->
+      <div>
+        <label class="text-[10px] uppercase tracking-widest font-bold block mb-1" style="color:var(--text-muted)">Kelly Fraction</label>
+        <input type="range" min="0.02" max="0.25" step="0.01" x-model.number="params.kelly_fraction"
+               class="w-full accent-cyan-400">
+        <span class="mono text-xs" style="color:var(--cyan)" x-text="(params.kelly_fraction * 100).toFixed(0) + '%'"></span>
+      </div>
+      <!-- Max Entry Price -->
+      <div>
+        <label class="text-[10px] uppercase tracking-widest font-bold block mb-1" style="color:var(--text-muted)">Max Entry Price</label>
+        <input type="range" min="0.15" max="0.60" step="0.01" x-model.number="params.max_entry_price"
+               class="w-full accent-cyan-400">
+        <span class="mono text-xs" style="color:var(--cyan)" x-text="(params.max_entry_price * 100).toFixed(0) + '&#162;'"></span>
+      </div>
+      <!-- Quick Flip Target -->
+      <div>
+        <label class="text-[10px] uppercase tracking-widest font-bold block mb-1" style="color:var(--text-muted)">Quick Flip Target</label>
+        <input type="range" min="0.02" max="0.15" step="0.01" x-model.number="params.quick_flip_target"
+               class="w-full accent-cyan-400">
+        <span class="mono text-xs" style="color:var(--cyan)" x-text="(params.quick_flip_target * 100).toFixed(0) + '&#162;'"></span>
+      </div>
+      <!-- Min True Edge -->
+      <div>
+        <label class="text-[10px] uppercase tracking-widest font-bold block mb-1" style="color:var(--text-muted)">Min True Edge</label>
+        <input type="range" min="0.03" max="0.25" step="0.01" x-model.number="params.min_true_edge"
+               class="w-full accent-cyan-400">
+        <span class="mono text-xs" style="color:var(--cyan)" x-text="(params.min_true_edge * 100).toFixed(0) + '%'"></span>
+      </div>
+      <!-- Bankroll -->
+      <div>
+        <label class="text-[10px] uppercase tracking-widest font-bold block mb-1" style="color:var(--text-muted)">Bankroll</label>
+        <input type="range" min="5" max="100" step="5" x-model.number="params.bankroll"
+               class="w-full accent-cyan-400">
+        <span class="mono text-xs" style="color:var(--cyan)" x-text="'$' + params.bankroll"></span>
+      </div>
+      <!-- Max Position % -->
+      <div>
+        <label class="text-[10px] uppercase tracking-widest font-bold block mb-1" style="color:var(--text-muted)">Max Position %</label>
+        <input type="range" min="0.05" max="0.30" step="0.01" x-model.number="params.max_position_pct"
+               class="w-full accent-cyan-400">
+        <span class="mono text-xs" style="color:var(--cyan)" x-text="(params.max_position_pct * 100).toFixed(0) + '%'"></span>
+      </div>
+      <!-- Train Days -->
+      <div>
+        <label class="text-[10px] uppercase tracking-widest font-bold block mb-1" style="color:var(--text-muted)">Train Window (days)</label>
+        <input type="range" min="7" max="60" step="1" x-model.number="params.walk_forward_train_days"
+               class="w-full accent-cyan-400">
+        <span class="mono text-xs" style="color:var(--cyan)" x-text="params.walk_forward_train_days + 'd'"></span>
+      </div>
+      <!-- Test Days -->
+      <div>
+        <label class="text-[10px] uppercase tracking-widest font-bold block mb-1" style="color:var(--text-muted)">Test Window (days)</label>
+        <input type="range" min="1" max="14" step="1" x-model.number="params.walk_forward_test_days"
+               class="w-full accent-cyan-400">
+        <span class="mono text-xs" style="color:var(--cyan)" x-text="params.walk_forward_test_days + 'd'"></span>
+      </div>
+    </div>
+
+    <!-- Night Owl toggle -->
+    <div class="flex items-center gap-3">
+      <label class="text-[10px] uppercase tracking-widest font-bold" style="color:var(--text-muted)">Night Owl</label>
+      <button @click="params.night_owl_enabled = !params.night_owl_enabled"
+              class="w-10 h-5 rounded-full relative transition-colors cursor-pointer"
+              :style="params.night_owl_enabled ? 'background:var(--cyan)' : 'background:var(--border)'">
+        <div class="w-4 h-4 rounded-full bg-white absolute top-0.5 transition-transform"
+             :style="params.night_owl_enabled ? 'transform:translateX(20px)' : 'transform:translateX(2px)'"></div>
+      </button>
+      <span class="text-xs" style="color:var(--text-muted)" x-text="params.night_owl_enabled ? 'Enabled (23:00–06:00 ET)' : 'Disabled'"></span>
+    </div>
+
+    <!-- Run button -->
+    <div class="flex gap-3 pt-2">
+      <button @click="runBacktest()" :disabled="running"
+              class="px-6 py-2.5 rounded-lg font-bold text-sm cursor-pointer transition-all"
+              :class="running ? 'opacity-50' : 'glow-cyan'"
+              style="background:var(--cyan);color:#000">
+        <span x-show="!running">Run Full Walk-Forward</span>
+        <span x-show="running" x-cloak>Running...</span>
+      </button>
+      <button x-show="prevResult && !running" x-cloak
+              @click="runBacktest()"
+              class="px-4 py-2.5 rounded-lg text-sm cursor-pointer transition-colors"
+              style="background:var(--bg-panel);color:var(--text-muted);border:1px solid var(--border)">
+        Re-run with Changes
+      </button>
+    </div>
+  </div>
+
+  <!-- ── PROGRESS / STATUS ───────────────────────────────────────────────────── -->
+  <div x-show="running" x-cloak class="card p-4">
+    <div class="flex items-center gap-3">
+      <div class="animate-spin w-5 h-5 border-2 border-t-transparent rounded-full" style="border-color:var(--cyan);border-top-color:transparent"></div>
+      <span class="text-sm" style="color:var(--text-muted)">Processing backtest...</span>
+    </div>
+  </div>
+
+  <!-- ── ERROR ───────────────────────────────────────────────────────────────── -->
+  <div x-show="error" x-cloak class="card p-4" style="border-color:var(--red)">
+    <p class="text-sm" style="color:var(--red)" x-text="error"></p>
+  </div>
+
+  <!-- ── RESULTS ─────────────────────────────────────────────────────────────── -->
+  <template x-if="result && result.status === 'completed'">
+    <div class="space-y-6">
+
+      <!-- Summary Metrics Cards -->
+      <div class="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
+        <div class="card p-3 text-center">
+          <div class="text-[10px] uppercase tracking-widest font-bold" style="color:var(--text-muted)">Total P&L</div>
+          <div class="mono text-lg font-bold mt-1"
+               :style="result.metrics.total_pnl >= 0 ? 'color:var(--green)' : 'color:var(--red)'"
+               x-text="'$' + result.metrics.total_pnl.toFixed(2)"></div>
+        </div>
+        <div class="card p-3 text-center">
+          <div class="text-[10px] uppercase tracking-widest font-bold" style="color:var(--text-muted)">Sharpe</div>
+          <div class="mono text-lg font-bold mt-1" style="color:var(--cyan)" x-text="result.metrics.sharpe_ratio.toFixed(2)"></div>
+        </div>
+        <div class="card p-3 text-center">
+          <div class="text-[10px] uppercase tracking-widest font-bold" style="color:var(--text-muted)">Win Rate</div>
+          <div class="mono text-lg font-bold mt-1" style="color:var(--cyan)" x-text="(result.metrics.win_rate * 100).toFixed(1) + '%'"></div>
+        </div>
+        <div class="card p-3 text-center">
+          <div class="text-[10px] uppercase tracking-widest font-bold" style="color:var(--text-muted)">Max DD</div>
+          <div class="mono text-lg font-bold mt-1" style="color:var(--red)" x-text="'$' + result.metrics.max_drawdown.toFixed(2)"></div>
+        </div>
+        <div class="card p-3 text-center">
+          <div class="text-[10px] uppercase tracking-widest font-bold" style="color:var(--text-muted)">Brier Score</div>
+          <div class="mono text-lg font-bold mt-1" style="color:var(--cyan)" x-text="result.metrics.brier_score.toFixed(4)"></div>
+        </div>
+        <div class="card p-3 text-center">
+          <div class="text-[10px] uppercase tracking-widest font-bold" style="color:var(--text-muted)">BSS</div>
+          <div class="mono text-lg font-bold mt-1" style="color:var(--cyan)" x-text="result.metrics.brier_skill_score.toFixed(3)"></div>
+        </div>
+        <div class="card p-3 text-center">
+          <div class="text-[10px] uppercase tracking-widest font-bold" style="color:var(--text-muted)">Profit Factor</div>
+          <div class="mono text-lg font-bold mt-1" style="color:var(--cyan)" x-text="result.metrics.profit_factor === Infinity ? '&#8734;' : result.metrics.profit_factor.toFixed(2)"></div>
+        </div>
+        <div class="card p-3 text-center">
+          <div class="text-[10px] uppercase tracking-widest font-bold" style="color:var(--text-muted)">Trades</div>
+          <div class="mono text-lg font-bold mt-1" style="color:var(--cyan)" x-text="result.metrics.total_trades"></div>
+        </div>
+      </div>
+
+      <!-- What-If Comparison -->
+      <template x-if="prevResult">
+        <div class="card p-4">
+          <h3 class="text-sm font-bold mb-2" style="color:var(--yellow)">What-If Comparison</h3>
+          <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+            <div>
+              <span style="color:var(--text-muted)">P&L:</span>
+              <span class="mono" style="color:var(--text-muted)" x-text="'$' + prevResult.metrics.total_pnl.toFixed(2)"></span>
+              <span class="mono mx-1">&rarr;</span>
+              <span class="mono font-bold" :style="result.metrics.total_pnl >= prevResult.metrics.total_pnl ? 'color:var(--green)' : 'color:var(--red)'"
+                    x-text="'$' + result.metrics.total_pnl.toFixed(2)"></span>
+            </div>
+            <div>
+              <span style="color:var(--text-muted)">Sharpe:</span>
+              <span class="mono" style="color:var(--text-muted)" x-text="prevResult.metrics.sharpe_ratio.toFixed(2)"></span>
+              <span class="mono mx-1">&rarr;</span>
+              <span class="mono font-bold" style="color:var(--cyan)" x-text="result.metrics.sharpe_ratio.toFixed(2)"></span>
+            </div>
+            <div>
+              <span style="color:var(--text-muted)">Win Rate:</span>
+              <span class="mono" style="color:var(--text-muted)" x-text="(prevResult.metrics.win_rate * 100).toFixed(1) + '%'"></span>
+              <span class="mono mx-1">&rarr;</span>
+              <span class="mono font-bold" style="color:var(--cyan)" x-text="(result.metrics.win_rate * 100).toFixed(1) + '%'"></span>
+            </div>
+            <div>
+              <span style="color:var(--text-muted)">Max DD:</span>
+              <span class="mono" style="color:var(--text-muted)" x-text="'$' + prevResult.metrics.max_drawdown.toFixed(2)"></span>
+              <span class="mono mx-1">&rarr;</span>
+              <span class="mono font-bold" style="color:var(--red)" x-text="'$' + result.metrics.max_drawdown.toFixed(2)"></span>
+            </div>
+          </div>
+        </div>
+      </template>
+
+      <!-- Charts: Equity Curve + Daily P&L -->
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div class="card p-4">
+          <h3 class="text-sm font-bold mb-3" style="color:var(--text-muted)">Equity Curve</h3>
+          <div id="equity-chart" style="height:300px"></div>
+        </div>
+        <div class="card p-4">
+          <h3 class="text-sm font-bold mb-3" style="color:var(--text-muted)">Daily P&L</h3>
+          <div id="daily-pnl-chart" style="height:300px"></div>
+        </div>
+      </div>
+
+      <!-- Reliability Diagram -->
+      <div class="card p-4">
+        <h3 class="text-sm font-bold mb-3" style="color:var(--text-muted)">Reliability Diagram</h3>
+        <div id="reliability-chart" style="height:300px"></div>
+      </div>
+
+      <!-- Per-City Breakdown -->
+      <div class="card p-4">
+        <h3 class="text-sm font-bold mb-3" style="color:var(--text-muted)">Per-City Breakdown</h3>
+        <div class="overflow-x-auto">
+          <table class="w-full text-xs">
+            <thead>
+              <tr style="color:var(--text-muted)">
+                <th class="text-left py-2 px-2">City</th>
+                <th class="text-right py-2 px-2">Trades</th>
+                <th class="text-right py-2 px-2">Win Rate</th>
+                <th class="text-right py-2 px-2">P&L</th>
+                <th class="text-right py-2 px-2">Avg Edge</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="[slug, data] in Object.entries(result.per_city).sort((a,b) => b[1].pnl - a[1].pnl)" :key="slug">
+                <tr class="border-t" style="border-color:var(--border)">
+                  <td class="py-2 px-2 font-medium" x-text="slug"></td>
+                  <td class="py-2 px-2 text-right mono" x-text="data.trades"></td>
+                  <td class="py-2 px-2 text-right mono" x-text="(data.win_rate * 100).toFixed(1) + '%'"></td>
+                  <td class="py-2 px-2 text-right mono font-bold"
+                      :style="data.pnl >= 0 ? 'color:var(--green)' : 'color:var(--red)'"
+                      x-text="'$' + data.pnl.toFixed(2)"></td>
+                  <td class="py-2 px-2 text-right mono" x-text="(data.avg_edge * 100).toFixed(1) + '%'"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Trade Log (collapsible) -->
+      <details class="card">
+        <summary class="p-4 text-sm font-bold cursor-pointer" style="color:var(--text-muted)">
+          Trade Log (<span x-text="result.trade_log.length"></span> trades)
+        </summary>
+        <div class="overflow-x-auto px-4 pb-4">
+          <table class="w-full text-xs">
+            <thead>
+              <tr style="color:var(--text-muted)">
+                <th class="text-left py-1.5 px-1">Date</th>
+                <th class="text-left py-1.5 px-1">City</th>
+                <th class="text-left py-1.5 px-1">Bucket</th>
+                <th class="text-right py-1.5 px-1">Model</th>
+                <th class="text-right py-1.5 px-1">Market</th>
+                <th class="text-right py-1.5 px-1">Edge</th>
+                <th class="text-right py-1.5 px-1">Entry</th>
+                <th class="text-right py-1.5 px-1">Shares</th>
+                <th class="text-center py-1.5 px-1">Won</th>
+                <th class="text-right py-1.5 px-1">P&L</th>
+                <th class="text-left py-1.5 px-1">Exit</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="t in result.trade_log" :key="t.date_et + t.city_slug + t.bucket_idx">
+                <tr class="border-t" style="border-color:var(--border)">
+                  <td class="py-1.5 px-1 mono" x-text="t.date_et"></td>
+                  <td class="py-1.5 px-1" x-text="t.city_slug"></td>
+                  <td class="py-1.5 px-1" x-text="t.bucket_label"></td>
+                  <td class="py-1.5 px-1 text-right mono" x-text="(t.model_prob * 100).toFixed(1) + '%'"></td>
+                  <td class="py-1.5 px-1 text-right mono" x-text="(t.mkt_prob * 100).toFixed(1) + '%'"></td>
+                  <td class="py-1.5 px-1 text-right mono" x-text="(t.true_edge * 100).toFixed(1) + '%'"></td>
+                  <td class="py-1.5 px-1 text-right mono" x-text="(t.entry_price * 100).toFixed(0) + '&#162;'"></td>
+                  <td class="py-1.5 px-1 text-right mono" x-text="t.shares.toFixed(1)"></td>
+                  <td class="py-1.5 px-1 text-center" x-text="t.won ? '&#10003;' : '&#10007;'"
+                      :style="t.won ? 'color:var(--green)' : 'color:var(--red)'"></td>
+                  <td class="py-1.5 px-1 text-right mono font-bold"
+                      :style="t.pnl >= 0 ? 'color:var(--green)' : 'color:var(--red)'"
+                      x-text="'$' + t.pnl.toFixed(2)"></td>
+                  <td class="py-1.5 px-1 text-xs" style="color:var(--text-muted)" x-text="t.exit_reason"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+      </details>
+    </div>
+  </template>
+
+  <!-- ── PAST RUNS ───────────────────────────────────────────────────────────── -->
+  {% if runs %}
+  <div class="card p-4">
+    <h3 class="text-sm font-bold mb-3" style="color:var(--text-muted)">Previous Runs</h3>
+    <div class="overflow-x-auto">
+      <table class="w-full text-xs">
+        <thead>
+          <tr style="color:var(--text-muted)">
+            <th class="text-left py-2 px-2">#</th>
+            <th class="text-left py-2 px-2">Date</th>
+            <th class="text-left py-2 px-2">Status</th>
+            <th class="text-right py-2 px-2">Trades</th>
+            <th class="text-right py-2 px-2">P&L</th>
+            <th class="text-right py-2 px-2">Sharpe</th>
+            <th class="text-right py-2 px-2">Win Rate</th>
+            <th class="text-center py-2 px-2">Load</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for run in runs %}
+          <tr class="border-t" style="border-color:var(--border)">
+            <td class="py-2 px-2 mono">{{ run.id }}</td>
+            <td class="py-2 px-2 mono">{{ run.created_at.strftime('%Y-%m-%d %H:%M') if run.created_at else '-' }}</td>
+            <td class="py-2 px-2">
+              {% if run.status == 'completed' %}
+              <span class="px-1.5 py-0.5 rounded text-[10px] font-bold" style="background:rgba(34,197,94,0.15);color:var(--green)">DONE</span>
+              {% elif run.status == 'running' %}
+              <span class="px-1.5 py-0.5 rounded text-[10px] font-bold" style="background:rgba(234,179,8,0.15);color:var(--yellow)">RUNNING</span>
+              {% else %}
+              <span class="px-1.5 py-0.5 rounded text-[10px] font-bold" style="background:rgba(239,68,68,0.15);color:var(--red)">FAILED</span>
+              {% endif %}
+            </td>
+            <td class="py-2 px-2 text-right mono">{{ run.total_trades }}</td>
+            <td class="py-2 px-2 text-right mono font-bold"
+                style="color:{{ 'var(--green)' if (run.total_pnl or 0) >= 0 else 'var(--red)' }}">
+              ${{ "%.2f"|format(run.total_pnl or 0) }}
+            </td>
+            <td class="py-2 px-2 text-right mono">{{ "%.2f"|format(run.sharpe_ratio or 0) }}</td>
+            <td class="py-2 px-2 text-right mono">{{ "%.1f"|format((run.win_rate or 0) * 100) }}%</td>
+            <td class="py-2 px-2 text-center">
+              <button @click="loadRun({{ run.id }})"
+                      class="text-xs px-2 py-1 rounded cursor-pointer"
+                      style="background:var(--bg-panel);color:var(--cyan);border:1px solid var(--border)">
+                View
+              </button>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% endif %}
+
+</div>
+
+<script>
+function backtestPage() {
+  return {
+    params: {{ default_params | tojson }},
+    running: false,
+    enriching: false,
+    error: null,
+    result: null,
+    prevResult: null,
+    runId: null,
+    pollTimer: null,
+
+    init() {},
+
+    async enrichGamma() {
+      this.enriching = true;
+      this.error = null;
+      try {
+        const res = await fetch('/api/backtest/enrich-gamma', { method: 'POST' });
+        const data = await res.json();
+        if (data.enriched !== undefined) {
+          alert('Enriched ' + data.enriched + ' events from Gamma API. Reload to update count.');
+        }
+      } catch (e) {
+        this.error = 'Gamma enrichment failed: ' + e.message;
+      }
+      this.enriching = false;
+    },
+
+    async runBacktest() {
+      this.running = true;
+      this.error = null;
+      if (this.result) this.prevResult = this.result;
+      this.result = null;
+
+      try {
+        const res = await fetch('/api/backtest/run', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(this.params),
+        });
+        const data = await res.json();
+        this.runId = data.run_id;
+        this.pollForResults();
+      } catch (e) {
+        this.error = 'Failed to start backtest: ' + e.message;
+        this.running = false;
+      }
+    },
+
+    pollForResults() {
+      if (this.pollTimer) clearInterval(this.pollTimer);
+      this.pollTimer = setInterval(async () => {
+        try {
+          const res = await fetch('/api/backtest/' + this.runId);
+          const data = await res.json();
+
+          if (data.status === 'completed') {
+            clearInterval(this.pollTimer);
+            this.result = data;
+            this.running = false;
+            this.$nextTick(() => this.renderCharts());
+          } else if (data.status === 'failed') {
+            clearInterval(this.pollTimer);
+            this.error = data.error || 'Backtest failed';
+            this.running = false;
+          }
+        } catch (e) {
+          // Retry on network error
+        }
+      }, 2000);
+    },
+
+    async loadRun(id) {
+      this.running = true;
+      this.error = null;
+      try {
+        const res = await fetch('/api/backtest/' + id);
+        const data = await res.json();
+        if (data.status === 'completed') {
+          this.result = data;
+          this.$nextTick(() => this.renderCharts());
+        } else if (data.status === 'failed') {
+          this.error = data.error || 'Run failed';
+        } else {
+          this.error = 'Run is still ' + data.status;
+        }
+      } catch (e) {
+        this.error = 'Failed to load run: ' + e.message;
+      }
+      this.running = false;
+    },
+
+    renderCharts() {
+      if (!this.result || !this.result.equity_curve) return;
+
+      const darkLayout = {
+        paper_bgcolor: 'transparent',
+        plot_bgcolor: 'transparent',
+        font: { color: '#94A3B8', family: 'JetBrains Mono, monospace', size: 11 },
+        margin: { t: 10, b: 40, l: 50, r: 20 },
+        xaxis: { gridcolor: '#1A3A6B', linecolor: '#1A3A6B' },
+        yaxis: { gridcolor: '#1A3A6B', linecolor: '#1A3A6B' },
+      };
+      const config = { responsive: true, displayModeBar: false };
+
+      // Equity Curve
+      const ec = this.result.equity_curve;
+      Plotly.newPlot('equity-chart', [
+        {
+          x: ec.map(p => p.date),
+          y: ec.map(p => p.equity),
+          type: 'scatter',
+          mode: 'lines',
+          line: { color: '#22D3EE', width: 2 },
+          name: 'Equity',
+        },
+        {
+          x: ec.map(p => p.date),
+          y: ec.map(p => -p.drawdown),
+          type: 'scatter',
+          fill: 'tozeroy',
+          fillcolor: 'rgba(239,68,68,0.15)',
+          line: { color: 'rgba(239,68,68,0.5)', width: 1 },
+          name: 'Drawdown',
+        },
+      ], { ...darkLayout, yaxis: { ...darkLayout.yaxis, title: '$' } }, config);
+
+      // Daily P&L
+      const dp = this.result.daily_pnl;
+      Plotly.newPlot('daily-pnl-chart', [{
+        x: dp.map(p => p.date),
+        y: dp.map(p => p.pnl),
+        type: 'bar',
+        marker: {
+          color: dp.map(p => p.pnl >= 0 ? '#22C55E' : '#EF4444'),
+        },
+      }], { ...darkLayout, yaxis: { ...darkLayout.yaxis, title: '$' } }, config);
+
+      // Reliability Diagram
+      const rb = this.result.reliability_bins;
+      Plotly.newPlot('reliability-chart', [
+        {
+          x: rb.map(b => b.mean_predicted),
+          y: rb.map(b => b.observed_frequency),
+          type: 'scatter',
+          mode: 'markers+lines',
+          marker: { color: '#22D3EE', size: 8 },
+          line: { color: '#22D3EE', width: 2 },
+          name: 'Model',
+          text: rb.map(b => 'n=' + b.count),
+          hovertemplate: 'Predicted: %{x:.0%}<br>Observed: %{y:.0%}<br>%{text}',
+        },
+        {
+          x: [0, 1],
+          y: [0, 1],
+          type: 'scatter',
+          mode: 'lines',
+          line: { color: '#6B7280', dash: 'dash', width: 1 },
+          name: 'Perfect',
+          showlegend: false,
+        },
+      ], {
+        ...darkLayout,
+        xaxis: { ...darkLayout.xaxis, title: 'Predicted Probability', range: [0, 1] },
+        yaxis: { ...darkLayout.yaxis, title: 'Observed Frequency', range: [0, 1] },
+        showlegend: false,
+      }, config);
+    },
+  };
+}
+</script>
+{% endblock %}

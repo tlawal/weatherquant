@@ -915,3 +915,117 @@ async def strategies_page(request: Request):
             "heatmap_data": heatmap_data,
         },
     )
+
+
+# ─── Backtest ────────────────────────────────────────────────────────────────
+
+@dashboard_router.get("/backtest", response_class=HTMLResponse)
+async def backtest_page(request: Request):
+    """Walk-forward backtester dashboard."""
+    from backend.storage.db import get_session
+    from backend.storage.models import BacktestRun, Event
+    from sqlalchemy import select, desc, func
+
+    async with get_session() as sess:
+        # Recent runs
+        runs_q = select(BacktestRun).order_by(desc(BacktestRun.created_at)).limit(20)
+        runs = (await sess.execute(runs_q)).scalars().all()
+
+        # Count resolved events
+        count_q = select(func.count(Event.id)).where(Event.winning_bucket_idx.isnot(None))
+        resolved_count = (await sess.execute(count_q)).scalar() or 0
+
+    arming_state = "DISARMED"
+    try:
+        from backend.storage.repos import get_arming_state
+        async with get_session() as sess:
+            arm = await get_arming_state(sess)
+            arming_state = arm.state
+    except Exception:
+        pass
+
+    from backend.backtesting.engine import BacktestParams
+    from dataclasses import asdict
+
+    return templates.TemplateResponse(
+        "backtest.html",
+        {
+            "request": request,
+            "arming_state": arming_state,
+            "runs": runs,
+            "resolved_count": resolved_count,
+            "default_params": asdict(BacktestParams()),
+        },
+    )
+
+
+@dashboard_router.post("/api/backtest/run")
+async def api_run_backtest(request: Request):
+    """Launch a backtest run (async background task)."""
+    import asyncio
+    from backend.backtesting.engine import BacktestEngine, BacktestParams
+    from backend.storage.models import BacktestRun
+    from backend.storage.db import get_session
+    from dataclasses import fields, asdict
+
+    body = await request.json()
+
+    # Build params from request, only accepting known fields
+    valid_keys = {f.name for f in fields(BacktestParams)}
+    filtered = {}
+    for k, v in body.items():
+        if k in valid_keys:
+            filtered[k] = v
+    params = BacktestParams(**filtered)
+
+    # Create run record
+    async with get_session() as sess:
+        run = BacktestRun(
+            params_json=json.dumps(asdict(params)),
+            start_date="pending",
+            end_date="pending",
+            status="running",
+        )
+        sess.add(run)
+        await sess.commit()
+        await sess.refresh(run)
+        run_id = run.id
+
+    # Run in background
+    async def _bg():
+        engine = BacktestEngine(params)
+        await engine.run(run_id=run_id)
+
+    asyncio.create_task(_bg())
+
+    return {"run_id": run_id, "status": "running"}
+
+
+@dashboard_router.get("/api/backtest/{run_id}")
+async def api_get_backtest(run_id: int):
+    """Poll backtest status/results."""
+    from backend.storage.models import BacktestRun
+    from backend.storage.db import get_session
+
+    async with get_session() as sess:
+        run = await sess.get(BacktestRun, run_id)
+
+    if not run:
+        return {"error": "not_found"}
+
+    result = {"status": run.status, "run_id": run.id}
+
+    if run.status == "completed" and run.results_json:
+        result.update(json.loads(run.results_json))
+    elif run.status == "failed":
+        result["error"] = run.error_msg
+
+    return result
+
+
+@dashboard_router.post("/api/backtest/enrich-gamma")
+async def api_enrich_gamma():
+    """Fetch resolved weather markets from Gamma API to enrich local DB."""
+    from backend.backtesting.engine import enrich_from_gamma
+    count = await enrich_from_gamma()
+    return {"enriched": count}

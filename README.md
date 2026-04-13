@@ -511,3 +511,39 @@ The system features:
 - **Sortable Analytics**: Deep dive into Bias, RMSE, and Sample Count to identify specific NWP model failures.
 - **Compact UI Integration**: Every city page displays a real-time calibration card, allowing traders to verify station-specific edge before execution.
 - **CSV Export**: Automated reporting for external audit and backtesting.
+
+---
+
+## Backtester
+
+One-click walk-forward backtester at `/backtest`. Replays stored model snapshots and market data against resolved Polymarket outcomes to measure historical P&L.
+
+### How it works
+
+1. Loads every resolved event from the database (events where `winning_bucket_idx` is known).
+2. For each event, replays the model's probability forecast + market prices that existed at the time.
+3. Simulates trades using Kelly sizing, checks for quick-flip exits, then resolves at the actual outcome.
+4. **Walk-forward mode**: Splits data into rolling train/test windows (default 21d train / 7d test) and optimizes Kelly fraction, max entry price, and quick-flip target on the training set before testing — prevents overfitting. `min_true_edge` is excluded from optimization because the probability calibration engine already adapts the model surface.
+5. Computes: equity curve, Sharpe ratio, Brier score & skill score, max drawdown, reliability diagram, per-city breakdown.
+
+### Quick start
+
+1. Start the dashboard: `python -m backend.main` (SERVICE_TYPE=api or all)
+2. Navigate to `/backtest`
+3. (Optional) Click **Enrich from Gamma** to pull resolved market outcomes from the Polymarket Gamma API
+4. Click **Run Full Walk-Forward** — results appear in ~30 seconds
+5. Adjust parameter sliders and click **Re-run with Changes** to compare ("What-if" mode)
+
+### What-if mode
+
+Change any parameter slider (Kelly fraction, entry price, quick-flip target, etc.) and re-run. The dashboard shows a side-by-side comparison: old P&L vs. new P&L, old Sharpe vs. new Sharpe.
+
+### Key files
+
+| File | Purpose |
+|---|---|
+| `backend/backtesting/engine.py` | BacktestEngine, walk-forward optimization, Gamma API enrichment |
+| `backend/backtesting/metrics.py` | Sharpe, Brier, drawdown, reliability diagram computation |
+| `backend/storage/models.py` | `BacktestRun` + `BacktestTrade` ORM tables |
+| `web/templates/backtest.html` | HTMX/Plotly dashboard with parameter sliders |
+| `web/routes.py` | `/backtest`, `/api/backtest/run`, `/api/backtest/{id}` routes |
