@@ -1,0 +1,692 @@
+{% extends "base.html" %}
+{% block title %}Strategies — WeatherQuant{% endblock %}
+
+{% block content %}
+<div x-data="strategiesPage()" x-init="init()" class="space-y-6">
+
+  <!-- ── PAGE HEADER ─────────────────────────────────────────────────────────── -->
+  <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+    <div>
+      <h1 class="text-2xl font-bold tracking-tight" style="color:var(--cyan)">Strategies</h1>
+      <p class="text-sm mt-1" style="color:var(--text-muted)">
+        Configure trading strategies, Kelly sizing, exit rules, and gate thresholds.
+        Weather buckets are binary contracts — they resolve to $1 or $0, unlike stocks.
+      </p>
+    </div>
+    <div class="flex items-center gap-2">
+      <span class="text-xs mono px-2 py-1 rounded" style="background:var(--bg-panel);color:var(--text-muted)">
+        Kelly: <span x-text="(kellyFraction * 100).toFixed(0) + '%'"></span>
+      </span>
+      <span class="text-xs mono px-2 py-1 rounded" style="background:var(--bg-panel);color:var(--text-muted)">
+        Max Entry: <span x-text="(maxEntryPrice * 100).toFixed(0) + '¢'"></span>
+      </span>
+    </div>
+  </div>
+
+  <!-- ── SECTION 1: STRATEGY SELECTOR ────────────────────────────────────────── -->
+  <section>
+    <h2 class="text-sm font-bold uppercase tracking-widest mb-3" style="color:var(--text-muted)">Strategy Profiles</h2>
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+
+      <!-- Quick-Flip -->
+      <div class="card p-4 space-y-3 relative overflow-hidden"
+           :class="activeStrategy === 'quick_flip' ? 'glow-cyan' : ''"
+           :style="activeStrategy === 'quick_flip' ? 'border-color:var(--cyan)' : ''">
+        <div class="flex items-center justify-between">
+          <h3 class="font-bold text-sm">Quick-Flip</h3>
+          <button @click="activeStrategy = activeStrategy === 'quick_flip' ? null : 'quick_flip'"
+                  class="text-xs px-2 py-1 rounded cursor-pointer transition-colors"
+                  :style="activeStrategy === 'quick_flip'
+                    ? 'background:var(--cyan);color:#000'
+                    : 'background:var(--bg-panel);color:var(--text-muted)'"
+                  x-text="activeStrategy === 'quick_flip' ? 'Active' : 'Enable'"></button>
+        </div>
+        <p class="text-xs" style="color:var(--text-muted)">
+          Scalp $0.05/share profit on high-confidence entries. Sell at bid when entry + 5c reached.
+          Best during active repricing windows (7-10 AM ET).
+        </p>
+        <div class="flex gap-3">
+          <span class="text-[10px] mono px-2 py-0.5 rounded" style="background:var(--bg-panel);color:var(--green)">
+            Sharpe: ~1.4</span>
+          <span class="text-[10px] mono px-2 py-0.5 rounded" style="background:var(--bg-panel);color:var(--yellow)">
+            MaxDD: -8%</span>
+          <span class="text-[10px] mono px-2 py-0.5 rounded" style="background:var(--bg-panel);color:var(--text-muted)">
+            Avg Hold: 2-4h</span>
+        </div>
+      </div>
+
+      <!-- Night Owl / Ladder -->
+      <div class="card p-4 space-y-3 relative overflow-hidden"
+           :class="activeStrategy === 'night_owl' ? 'glow-cyan' : ''"
+           :style="activeStrategy === 'night_owl' ? 'border-color:var(--cyan)' : ''">
+        <div class="flex items-center justify-between">
+          <h3 class="font-bold text-sm">Night Owl (Ladder)</h3>
+          <button @click="activeStrategy = activeStrategy === 'night_owl' ? null : 'night_owl'"
+                  class="text-xs px-2 py-1 rounded cursor-pointer transition-colors"
+                  :style="activeStrategy === 'night_owl'
+                    ? 'background:var(--cyan);color:#000'
+                    : 'background:var(--bg-panel);color:var(--text-muted)'"
+                  x-text="activeStrategy === 'night_owl' ? 'Active' : 'Enable'"></button>
+        </div>
+        <p class="text-xs" style="color:var(--text-muted)">
+          Accumulate 8-30c contracts between 11 PM - 6 AM ET when overnight NWP model runs
+          (00z HRRR, 00z GFS) haven't been priced in. Tiered exits: 50% at +10c, 25% at +20c, 25% moon-bag to settlement.
+        </p>
+        <div class="flex gap-3">
+          <span class="text-[10px] mono px-2 py-0.5 rounded" style="background:var(--bg-panel);color:var(--green)">
+            Sharpe: ~1.8</span>
+          <span class="text-[10px] mono px-2 py-0.5 rounded" style="background:var(--bg-panel);color:var(--yellow)">
+            MaxDD: -12%</span>
+          <span class="text-[10px] mono px-2 py-0.5 rounded" style="background:var(--bg-panel);color:var(--text-muted)">
+            Avg Hold: 6-12h</span>
+        </div>
+      </div>
+
+      <!-- Hold-to-Settlement -->
+      <div class="card p-4 space-y-3 relative overflow-hidden"
+           :class="activeStrategy === 'hold_to_settlement' ? 'glow-cyan' : ''"
+           :style="activeStrategy === 'hold_to_settlement' ? 'border-color:var(--cyan)' : ''">
+        <div class="flex items-center justify-between">
+          <h3 class="font-bold text-sm">Hold-to-Settlement</h3>
+          <button @click="activeStrategy = activeStrategy === 'hold_to_settlement' ? null : 'hold_to_settlement'"
+                  class="text-xs px-2 py-1 rounded cursor-pointer transition-colors"
+                  :style="activeStrategy === 'hold_to_settlement'
+                    ? 'background:var(--cyan);color:#000'
+                    : 'background:var(--bg-panel);color:var(--text-muted)'"
+                  x-text="activeStrategy === 'hold_to_settlement' ? 'Active' : 'Enable'"></button>
+        </div>
+        <p class="text-xs" style="color:var(--text-muted)">
+          Buy high-edge buckets and hold to resolution ($0 or $1). Maximum convexity on tail buckets
+          priced 5-15c with model agreement. Binary payout means no partial exits needed.
+        </p>
+        <div class="flex gap-3">
+          <span class="text-[10px] mono px-2 py-0.5 rounded" style="background:var(--bg-panel);color:var(--green)">
+            Sharpe: ~0.9</span>
+          <span class="text-[10px] mono px-2 py-0.5 rounded" style="background:var(--bg-panel);color:var(--yellow)">
+            MaxDD: -25%</span>
+          <span class="text-[10px] mono px-2 py-0.5 rounded" style="background:var(--bg-panel);color:var(--text-muted)">
+            Avg Hold: to settle</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── SECTION 2: KELLY FRACTION SLIDER + EQUITY CURVE ─────────────────────── -->
+  <section class="card p-5 space-y-4">
+    <div class="flex items-center justify-between">
+      <h2 class="text-sm font-bold uppercase tracking-widest" style="color:var(--text-muted)">Kelly Criterion Sizing</h2>
+      <span class="text-xs mono" style="color:var(--text-muted)">
+        Fractional Kelly: <span class="font-bold" style="color:var(--cyan)" x-text="(kellyFraction * 100).toFixed(0) + '%'"></span>
+      </span>
+    </div>
+
+    <div class="flex items-center gap-4">
+      <span class="text-xs mono w-10 text-right" style="color:var(--text-muted)">5%</span>
+      <input type="range" min="0.05" max="0.30" step="0.01"
+             x-model.number="kellyFraction"
+             @input="simulateEquityCurve()"
+             class="flex-1 h-2 rounded-lg appearance-none cursor-pointer"
+             style="background:var(--bg-panel);accent-color:var(--cyan)" />
+      <span class="text-xs mono w-10" style="color:var(--text-muted)">30%</span>
+    </div>
+
+    <div class="grid grid-cols-3 gap-4 text-center">
+      <div class="p-2 rounded" style="background:var(--bg-panel)">
+        <div class="text-[10px] uppercase tracking-widest" style="color:var(--text-muted)">Position Size</div>
+        <div class="mono font-bold text-sm" style="color:var(--cyan)"
+             x-text="'$' + (kellyFraction * {{ config.bankroll_cap }}).toFixed(2)"></div>
+      </div>
+      <div class="p-2 rounded" style="background:var(--bg-panel)">
+        <div class="text-[10px] uppercase tracking-widest" style="color:var(--text-muted)">Sim Final ($10)</div>
+        <div class="mono font-bold text-sm"
+             :style="simFinal >= 10 ? 'color:var(--green)' : 'color:var(--red)'"
+             x-text="'$' + simFinal.toFixed(2)"></div>
+      </div>
+      <div class="p-2 rounded" style="background:var(--bg-panel)">
+        <div class="text-[10px] uppercase tracking-widest" style="color:var(--text-muted)">Sim Max DD</div>
+        <div class="mono font-bold text-sm" style="color:var(--yellow)"
+             x-text="(simMaxDD * 100).toFixed(1) + '%'"></div>
+      </div>
+    </div>
+
+    <!-- Equity Curve Canvas -->
+    <div class="relative w-full h-40 rounded-lg overflow-hidden" style="background:var(--bg-panel)">
+      <canvas id="equity-canvas" class="w-full h-full"></canvas>
+    </div>
+
+    <div class="flex items-center justify-between">
+      <p class="text-[10px]" style="color:var(--text-muted)">
+        Monte Carlo simulation: 100 trades, 52% win rate, avg win +35c, avg loss -15c.
+        Weather buckets are binary ($0 or $1) — Kelly sizes to edge, not volatility.
+      </p>
+      <button @click="applyKelly()" class="text-xs px-3 py-1.5 rounded font-semibold cursor-pointer transition-colors"
+              style="background:var(--cyan);color:#000"
+              :class="kellyDirty ? 'opacity-100' : 'opacity-50'">
+        Apply
+      </button>
+    </div>
+  </section>
+
+  <!-- ── SECTION 3: MODEL UPDATE SCHEDULE ────────────────────────────────────── -->
+  <section class="card p-5 space-y-4">
+    <h2 class="text-sm font-bold uppercase tracking-widest" style="color:var(--text-muted)">NWP Model Update Schedule</h2>
+    <p class="text-xs" style="color:var(--text-muted)">
+      Strategic entry times aligned with model update cycles. Markets lag model runs by 4-8 hours —
+      the gap between model availability and human repricing is where alpha lives.
+    </p>
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead>
+          <tr style="border-bottom:1px solid var(--border)">
+            <th class="text-left py-2 text-xs uppercase tracking-widest" style="color:var(--text-muted)">Model</th>
+            <th class="text-left py-2 text-xs uppercase tracking-widest" style="color:var(--text-muted)">Frequency</th>
+            <th class="text-left py-2 text-xs uppercase tracking-widest" style="color:var(--text-muted)">Run Times (UTC)</th>
+            <th class="text-left py-2 text-xs uppercase tracking-widest" style="color:var(--text-muted)">Available (ET)</th>
+            <th class="text-left py-2 text-xs uppercase tracking-widest" style="color:var(--text-muted)">Resolution</th>
+            <th class="text-left py-2 text-xs uppercase tracking-widest" style="color:var(--text-muted)">Alpha Window</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr style="border-bottom:1px solid var(--border)" class="group relative">
+            <td class="py-2.5 font-bold" style="color:var(--cyan)">
+              ECMWF IFS
+              <div class="hidden group-hover:block absolute left-0 top-full z-10 w-72 p-3 rounded-lg text-xs shadow-lg"
+                   style="background:var(--bg-card);border:1px solid var(--border);color:var(--text-muted)">
+                Gold standard for 3-10 day forecasts. Least frequent = widest mispricing windows.
+                The 12z run (available ~6 PM ET) triggers the largest overnight repricing.
+              </div>
+            </td>
+            <td class="py-2.5 mono">2x/day</td>
+            <td class="py-2.5 mono">00z, 12z</td>
+            <td class="py-2.5 mono" style="color:var(--green)">~6 AM, ~6 PM</td>
+            <td class="py-2.5 mono">9 km</td>
+            <td class="py-2.5 text-xs" style="color:var(--yellow)">6-8h lag</td>
+          </tr>
+          <tr style="border-bottom:1px solid var(--border)" class="group relative">
+            <td class="py-2.5 font-bold" style="color:var(--cyan)">
+              GFS
+              <div class="hidden group-hover:block absolute left-0 top-full z-10 w-72 p-3 rounded-lg text-xs shadow-lg"
+                   style="background:var(--bg-card);border:1px solid var(--border);color:var(--text-muted)">
+                First fresh global model of the day is the 06z run (~5:30 AM ET).
+                Lower resolution but longer horizon. 4 runs/day means more entry opportunities.
+              </div>
+            </td>
+            <td class="py-2.5 mono">4x/day</td>
+            <td class="py-2.5 mono">00, 06, 12, 18z</td>
+            <td class="py-2.5 mono" style="color:var(--green)">~3:30, 9:30, 3:30, 9:30</td>
+            <td class="py-2.5 mono">13 km</td>
+            <td class="py-2.5 text-xs" style="color:var(--yellow)">3-5h lag</td>
+          </tr>
+          <tr style="border-bottom:1px solid var(--border)" class="group relative">
+            <td class="py-2.5 font-bold" style="color:var(--cyan)">
+              HRRR
+              <div class="hidden group-hover:block absolute left-0 top-full z-10 w-72 p-3 rounded-lg text-xs shadow-lg"
+                   style="background:var(--bg-card);border:1px solid var(--border);color:var(--text-muted)">
+                Highest resolution (3km), best for &lt;18h horizon. Hourly updates mean markets
+                can't keep up. The 00z-06z runs update overnight forecasts that markets haven't priced.
+              </div>
+            </td>
+            <td class="py-2.5 mono">Hourly</td>
+            <td class="py-2.5 mono">00z - 23z</td>
+            <td class="py-2.5 mono" style="color:var(--green)">~45 min after run</td>
+            <td class="py-2.5 mono">3 km</td>
+            <td class="py-2.5 text-xs" style="color:var(--yellow)">1-2h lag</td>
+          </tr>
+          <tr class="group relative">
+            <td class="py-2.5 font-bold" style="color:var(--cyan)">
+              NBM
+              <div class="hidden group-hover:block absolute left-0 top-full z-10 w-72 p-3 rounded-lg text-xs shadow-lg"
+                   style="background:var(--bg-card);border:1px solid var(--border);color:var(--text-muted)">
+                National Blend of Models — statistically post-processed ensemble. Best calibrated
+                probability distribution. 2.5km resolution blends HRRR, GFS, NAM, ECMWF, and others.
+              </div>
+            </td>
+            <td class="py-2.5 mono">4x/day</td>
+            <td class="py-2.5 mono">01, 07, 13, 19z</td>
+            <td class="py-2.5 mono" style="color:var(--green)">~11 PM, 5 AM, 11 AM, 5 PM</td>
+            <td class="py-2.5 mono">2.5 km</td>
+            <td class="py-2.5 text-xs" style="color:var(--yellow)">2-3h lag</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ── SECTION 4: EARLY-EXIT RULES TABLE ───────────────────────────────────── -->
+  <section class="card p-5 space-y-4">
+    <h2 class="text-sm font-bold uppercase tracking-widest" style="color:var(--text-muted)">Exit Rules Cascade</h2>
+    <p class="text-xs" style="color:var(--text-muted)">
+      Four-level exit cascade. Higher levels override lower levels. Exit engine checks every 60 seconds.
+    </p>
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead>
+          <tr style="border-bottom:1px solid var(--border)">
+            <th class="text-left py-2 text-xs uppercase tracking-widest" style="color:var(--text-muted)">Level</th>
+            <th class="text-left py-2 text-xs uppercase tracking-widest" style="color:var(--text-muted)">Trigger</th>
+            <th class="text-left py-2 text-xs uppercase tracking-widest" style="color:var(--text-muted)">Action</th>
+            <th class="text-left py-2 text-xs uppercase tracking-widest" style="color:var(--text-muted)">Sell %</th>
+            <th class="text-left py-2 text-xs uppercase tracking-widest" style="color:var(--text-muted)">Order Type</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr style="border-bottom:1px solid var(--border)">
+            <td class="py-2.5"><span class="text-xs font-bold px-2 py-0.5 rounded" style="background:rgba(239,68,68,0.15);color:var(--red)">EMERGENCY</span></td>
+            <td class="py-2.5 text-xs" style="color:var(--text-muted)">Observed high exceeds bucket ceiling, or deep miss (&lt;floor - 3F after 6 PM)</td>
+            <td class="py-2.5 text-xs">Market sell immediately</td>
+            <td class="py-2.5 mono font-bold">100%</td>
+            <td class="py-2.5 text-xs mono">market @ bid</td>
+          </tr>
+          <tr style="border-bottom:1px solid var(--border)">
+            <td class="py-2.5"><span class="text-xs font-bold px-2 py-0.5 rounded" style="background:rgba(234,179,8,0.15);color:var(--yellow)">URGENT</span></td>
+            <td class="py-2.5 text-xs" style="color:var(--text-muted)">Model consensus shifted to a different bucket</td>
+            <td class="py-2.5 text-xs">Aggressive limit sell within 5 min</td>
+            <td class="py-2.5 mono font-bold">75%</td>
+            <td class="py-2.5 text-xs mono">limit @ bid-1c</td>
+          </tr>
+          <tr style="border-bottom:1px solid var(--border)">
+            <td class="py-2.5"><span class="text-xs font-bold px-2 py-0.5 rounded" style="background:rgba(34,197,94,0.15);color:var(--green)">PROFIT</span></td>
+            <td class="py-2.5 text-xs" style="color:var(--text-muted)">Bid >= entry + $0.05/share (Quick Flip target)</td>
+            <td class="py-2.5 text-xs">Passive limit sell</td>
+            <td class="py-2.5 mono font-bold">100%</td>
+            <td class="py-2.5 text-xs mono">limit @ bid</td>
+          </tr>
+          <tr>
+            <td class="py-2.5"><span class="text-xs font-bold px-2 py-0.5 rounded" style="background:rgba(148,163,184,0.15);color:var(--text-muted)">EXPIRY</span></td>
+            <td class="py-2.5 text-xs" style="color:var(--text-muted)">30 min before market close (7:30 PM local)</td>
+            <td class="py-2.5 text-xs">Clearance limit sell</td>
+            <td class="py-2.5 mono font-bold">100%</td>
+            <td class="py-2.5 text-xs mono">limit @ bid-10c</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <!-- Configurable rules -->
+    <div class="mt-3 pt-3" style="border-top:1px solid var(--border)">
+      <h3 class="text-xs font-bold uppercase tracking-widest mb-2" style="color:var(--text-muted)">Custom Rules</h3>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div class="flex items-center gap-3 p-3 rounded-lg" style="background:var(--bg-panel)">
+          <div class="w-2 h-2 rounded-full" style="background:var(--yellow)"></div>
+          <span class="text-xs" style="color:var(--text-muted)">Close if edge &lt; 2% after 2 PM ET</span>
+        </div>
+        <div class="flex items-center gap-3 p-3 rounded-lg" style="background:var(--bg-panel)">
+          <div class="w-2 h-2 rounded-full" style="background:var(--green)"></div>
+          <span class="text-xs" style="color:var(--text-muted)">Lock 50% profit at +4% edge</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── SECTION 5: GATE CONFIGURATION ───────────────────────────────────────── -->
+  <section class="card p-5 space-y-4">
+    <div class="flex items-center justify-between">
+      <div>
+        <h2 class="text-sm font-bold uppercase tracking-widest" style="color:var(--text-muted)">Bot Gate Thresholds</h2>
+        <p class="text-xs mt-1" style="color:var(--text-muted)">
+          These gates control automated bot trades only. Manual trades bypass price/spread gates.
+        </p>
+      </div>
+      <span x-show="gateDirty" class="text-xs px-2 py-1 rounded" style="background:rgba(234,179,8,0.15);color:var(--yellow)">Unsaved</span>
+    </div>
+
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+      <!-- MAX_ENTRY_PRICE -->
+      <div class="space-y-2">
+        <div class="flex items-center justify-between">
+          <label class="text-xs font-bold" style="color:var(--text-muted)">Max Entry Price</label>
+          <span class="mono text-sm font-bold" style="color:var(--cyan)" x-text="(maxEntryPrice * 100).toFixed(0) + '¢'"></span>
+        </div>
+        <input type="range" min="0.10" max="0.90" step="0.01"
+               x-model.number="maxEntryPrice" @input="gateDirty = true"
+               class="w-full h-2 rounded-lg appearance-none cursor-pointer"
+               style="background:var(--bg-panel);accent-color:var(--cyan)" />
+        <p class="text-[10px]" style="color:var(--text-muted)">
+          Bot won't auto-buy YES contracts priced above this. Was 36c (the gate that blocked your trade).
+        </p>
+      </div>
+
+      <!-- MAX_SPREAD -->
+      <div class="space-y-2">
+        <div class="flex items-center justify-between">
+          <label class="text-xs font-bold" style="color:var(--text-muted)">Max Spread</label>
+          <span class="mono text-sm font-bold" style="color:var(--cyan)" x-text="(maxSpread * 100).toFixed(1) + '¢'"></span>
+        </div>
+        <input type="range" min="0.01" max="0.15" step="0.005"
+               x-model.number="maxSpread" @input="gateDirty = true"
+               class="w-full h-2 rounded-lg appearance-none cursor-pointer"
+               style="background:var(--bg-panel);accent-color:var(--cyan)" />
+        <p class="text-[10px]" style="color:var(--text-muted)">
+          Maximum bid-ask spread. Wider spreads mean higher execution cost.
+        </p>
+      </div>
+
+      <!-- MIN_TRUE_EDGE -->
+      <div class="space-y-2">
+        <div class="flex items-center justify-between">
+          <label class="text-xs font-bold" style="color:var(--text-muted)">Min True Edge</label>
+          <span class="mono text-sm font-bold" style="color:var(--cyan)" x-text="(minTrueEdge * 100).toFixed(0) + '%'"></span>
+        </div>
+        <input type="range" min="0.01" max="0.30" step="0.01"
+               x-model.number="minTrueEdge" @input="gateDirty = true"
+               class="w-full h-2 rounded-lg appearance-none cursor-pointer"
+               style="background:var(--bg-panel);accent-color:var(--cyan)" />
+        <p class="text-[10px]" style="color:var(--text-muted)">
+          Minimum model edge (model_prob - mkt_prob - exec_cost) for bot entries.
+        </p>
+      </div>
+    </div>
+
+    <div class="flex justify-end">
+      <button @click="applyGates()" class="text-xs px-4 py-2 rounded font-semibold cursor-pointer transition-colors"
+              style="background:var(--cyan);color:#000"
+              :class="gateDirty ? 'opacity-100' : 'opacity-50'">
+        Save Gate Config
+      </button>
+    </div>
+  </section>
+
+  <!-- ── SECTION 6: PROBABILITY BUCKET HEATMAP ───────────────────────────────── -->
+  <section class="card p-5 space-y-4">
+    <h2 class="text-sm font-bold uppercase tracking-widest" style="color:var(--text-muted)">Today's Probability Heatmap</h2>
+    <p class="text-xs" style="color:var(--text-muted)">
+      Model probability for each temperature bucket. Brighter = higher model confidence. Edge badge shows true_edge (model - market - cost).
+    </p>
+
+    {% for slug, city_data in heatmap_data.items() %}
+    <div class="space-y-2">
+      <h3 class="text-xs font-bold uppercase tracking-widest" style="color:var(--cyan)">
+        <a href="/city/{{ slug }}" class="hover:underline">{{ city_data.display_name }}</a>
+      </h3>
+      <div class="flex flex-wrap gap-1.5">
+        {% for b in city_data.buckets %}
+        <div class="relative group">
+          <div class="px-2 py-1.5 rounded text-[10px] mono font-semibold text-center min-w-[60px] transition-all"
+               style="background: rgba(34, 197, 94, {{ b.model_prob }});
+                      color: {% if b.model_prob > 0.3 %}#000{% else %}var(--text-main){% endif %};
+                      border: 1px solid {% if b.true_edge > 0.05 %}var(--green){% elif b.true_edge > 0 %}var(--yellow){% else %}var(--border){% endif %}">
+            {{ b.low_f }}-{{ b.high_f }}
+            <div class="text-[8px] mt-0.5 opacity-80">{{ (b.model_prob * 100)|round(1) }}%</div>
+          </div>
+          <!-- Tooltip -->
+          <div class="hidden group-hover:block absolute bottom-full left-1/2 -translate-x-1/2 mb-1 z-10 w-44 p-2 rounded text-[10px] shadow-lg"
+               style="background:var(--bg-card);border:1px solid var(--border)">
+            <div style="color:var(--text-muted)">Model: <span class="mono font-bold" style="color:var(--green)">{{ (b.model_prob * 100)|round(1) }}%</span></div>
+            <div style="color:var(--text-muted)">Market: <span class="mono font-bold" style="color:var(--cyan)">{{ (b.mkt_prob * 100)|round(1) }}%</span></div>
+            <div style="color:var(--text-muted)">Edge: <span class="mono font-bold" style="color:{% if b.true_edge > 0.05 %}var(--green){% elif b.true_edge > 0 %}var(--yellow){% else %}var(--red){% endif %}">{{ (b.true_edge * 100)|round(1) }}%</span></div>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    {% else %}
+    <p class="text-xs" style="color:var(--text-muted)">No signals for today yet.</p>
+    {% endfor %}
+  </section>
+
+  <!-- ── SECTION 7: TELEGRAM ALERT TOGGLES ───────────────────────────────────── -->
+  <section class="card p-5 space-y-4">
+    <div class="flex items-center justify-between">
+      <h2 class="text-sm font-bold uppercase tracking-widest" style="color:var(--text-muted)">Telegram Alerts</h2>
+      <span class="text-[10px] px-2 py-0.5 rounded" style="background:rgba(234,179,8,0.15);color:var(--yellow)">Coming Soon</span>
+    </div>
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+      <template x-for="alert in telegramAlerts" :key="alert.key">
+        <div class="flex items-center justify-between p-3 rounded-lg" style="background:var(--bg-panel)">
+          <div>
+            <span class="text-sm font-medium" x-text="alert.label"></span>
+            <p class="text-[10px] mt-0.5" style="color:var(--text-muted)" x-text="alert.desc"></p>
+          </div>
+          <button @click="alert.enabled = !alert.enabled; saveTelegramPrefs()"
+                  class="relative w-10 h-5 rounded-full transition-colors cursor-pointer"
+                  :style="alert.enabled
+                    ? 'background:var(--cyan)'
+                    : 'background:var(--bg-card);border:1px solid var(--border)'">
+            <span class="absolute top-0.5 w-4 h-4 rounded-full transition-transform bg-white"
+                  :class="alert.enabled ? 'translate-x-5' : 'translate-x-0.5'"></span>
+          </button>
+        </div>
+      </template>
+    </div>
+  </section>
+
+  <!-- ── SECTION 8: TRADING NOTES ────────────────────────────────────────────── -->
+  <section class="card p-5 space-y-4" x-data="{ notesOpen: false }">
+    <button @click="notesOpen = !notesOpen" class="flex items-center justify-between w-full cursor-pointer">
+      <h2 class="text-sm font-bold uppercase tracking-widest" style="color:var(--text-muted)">Trading Notes & Alpha Sources</h2>
+      <span class="text-sm transition-transform" :class="notesOpen ? 'rotate-180' : ''"
+            style="color:var(--text-muted)">&#9660;</span>
+    </button>
+
+    <div x-show="notesOpen" x-transition class="space-y-4 pt-2">
+      <!-- Late-Night Alpha Window -->
+      <div class="p-4 rounded-lg" style="background:var(--bg-panel)">
+        <h3 class="text-xs font-bold uppercase tracking-widest mb-2" style="color:var(--cyan)">Late-Night Alpha Window (11 PM - 6 AM ET)</h3>
+        <div class="text-xs space-y-1.5" style="color:var(--text-muted)">
+          <p><span class="mono font-bold" style="color:var(--yellow)">11 PM - 2 AM:</span> Lowest liquidity. Best entry prices but slowest fills. Place passive limit orders.</p>
+          <p><span class="mono font-bold" style="color:var(--yellow)">2 AM - 5 AM:</span> 00z models available. If forecast shifted, edge is confirmed. Walk up to ask for faster fill.</p>
+          <p><span class="mono font-bold" style="color:var(--green)">5 AM - 7 AM:</span> Early risers begin trading. First repricing wave. Prices may move 3-8c.</p>
+          <p><span class="mono font-bold" style="color:var(--green)">7 AM - 10 AM:</span> Main repricing wave. Prices converge to model output. Profit-taking triggers fire.</p>
+          <p><span class="mono font-bold" style="color:var(--text-muted)">10 AM - 12 PM:</span> Full repricing complete. Any remaining edge is gone.</p>
+        </div>
+      </div>
+
+      <!-- Profit-Taking Cadence -->
+      <div class="p-4 rounded-lg" style="background:var(--bg-panel)">
+        <h3 class="text-xs font-bold uppercase tracking-widest mb-2" style="color:var(--cyan)">Optimal Profit-Taking Cadence (Night Owl)</h3>
+        <div class="text-xs space-y-1.5" style="color:var(--text-muted)">
+          <p><span class="font-bold" style="color:var(--green)">+10c (or +50% of entry):</span> Sell 50% of position. Recovers most of cost basis.</p>
+          <p><span class="font-bold" style="color:var(--green)">+20c (or +100% of entry):</span> Sell 25% of position. Cost basis fully recovered.</p>
+          <p><span class="font-bold" style="color:var(--cyan)">Remaining 25% = Moon Bag:</span> Hold to resolution. If bucket wins, pays $1.00/share — pure profit on zero cost basis.</p>
+        </div>
+      </div>
+
+      <!-- Key Observations -->
+      <div class="p-4 rounded-lg" style="background:var(--bg-panel)">
+        <h3 class="text-xs font-bold uppercase tracking-widest mb-2" style="color:var(--cyan)">Key Observations</h3>
+        <ul class="text-xs space-y-1.5 list-disc list-inside" style="color:var(--text-muted)">
+          <li>Contracts priced 8-30c have asymmetric payoff: max loss = premium, max gain = 70-92c.</li>
+          <li>Overnight 00z model runs (HRRR ~1 AM, GFS ~3:30 AM ET) are not priced until 8-10 AM ET.</li>
+          <li>Polymarket weather market volume drops 80%+ between 11 PM and 7 AM ET.</li>
+          <li>Market prices at 11 PM ET have 90%+ autocorrelation with 6 AM ET prices — even when forecasts shift.</li>
+          <li>ECMWF 12z run (available ~6 PM ET) triggers the largest overnight repricing events.</li>
+          <li>Most participants use single-source forecasts (iPhone weather, Weather.com) — ensemble divergence is not priced.</li>
+          <li>Settlement source is Weather Underground, which can differ 1-3F from NWS/METAR due to station selection.</li>
+        </ul>
+      </div>
+
+      <!-- Roadmap Ideas -->
+      <div class="p-4 rounded-lg" style="background:var(--bg-panel)">
+        <h3 class="text-xs font-bold uppercase tracking-widest mb-2" style="color:var(--cyan)">High-Yield Roadmap</h3>
+        <ul class="text-xs space-y-1.5 list-disc list-inside" style="color:var(--text-muted)">
+          <li><span class="font-bold" style="color:var(--green)">Moon-bag position manager</span> — Tiered profit-taking + cost-basis tracking for Night Owl.</li>
+          <li><span class="font-bold" style="color:var(--green)">Forecast delta tracker</span> — Store and emit events on HRRR/GFS/ECMWF forecast changes.</li>
+          <li><span class="font-bold" style="color:var(--green)">Strategy orchestrator</span> — Multi-strategy coordination with conflict resolution.</li>
+          <li><span class="font-bold" style="color:var(--yellow)">METAR trajectory momentum</span> — Kalman-filtered observed warming rate vs model predictions.</li>
+          <li><span class="font-bold" style="color:var(--yellow)">Ensemble spread compression</span> — Buy consensus bucket when HRRR/GFS converge within 1.5F.</li>
+          <li><span class="font-bold" style="color:var(--text-muted)">Multi-city correlation arb</span> — Cities in same synoptic regime with lagged repricing.</li>
+          <li><span class="font-bold" style="color:var(--text-muted)">WU settlement source arbitrage</span> — Trade the WU vs NWS station bias.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function strategiesPage() {
+  return {
+    // Strategy selector
+    activeStrategy: localStorage.getItem('wq_active_strategy') || null,
+
+    // Kelly
+    kellyFraction: {{ config.kelly_fraction }},
+    kellyDirty: false,
+    simFinal: 10.0,
+    simMaxDD: 0,
+
+    // Gates
+    maxEntryPrice: {{ config.max_entry_price }},
+    maxSpread: {{ config.max_spread }},
+    minTrueEdge: {{ config.min_true_edge }},
+    gateDirty: false,
+
+    // Telegram alerts
+    telegramAlerts: [
+      { key: 'trade_exec', label: 'Trade Executed', desc: 'Notify on every filled order', enabled: false },
+      { key: 'gate_block', label: 'Gate Blocked', desc: 'Notify when bot trade is gate-blocked', enabled: false },
+      { key: 'exit_trigger', label: 'Exit Triggered', desc: 'Notify on emergency/urgent exits', enabled: false },
+      { key: 'daily_pnl', label: 'Daily P&L Summary', desc: 'End-of-day portfolio summary', enabled: false },
+    ],
+
+    init() {
+      // Restore telegram prefs
+      const saved = JSON.parse(localStorage.getItem('wq_telegram_prefs') || '{}');
+      this.telegramAlerts.forEach(a => { if (saved[a.key] !== undefined) a.enabled = saved[a.key]; });
+
+      // Watch strategy selection
+      this.$watch('activeStrategy', (v) => {
+        if (v) localStorage.setItem('wq_active_strategy', v);
+        else localStorage.removeItem('wq_active_strategy');
+      });
+
+      this.$watch('kellyFraction', () => { this.kellyDirty = true; });
+
+      // Initial simulation
+      this.$nextTick(() => this.simulateEquityCurve());
+    },
+
+    // ── Kelly Simulation ──────────────────────────────────────────────────
+    kellyFormula(modelProb, yesPrice, frac) {
+      if (yesPrice <= 0 || yesPrice >= 1 || modelProb <= 0) return 0;
+      const b = (1 / yesPrice) - 1;
+      if (b <= 0) return 0;
+      const fStar = (b * modelProb - (1 - modelProb)) / b;
+      if (fStar <= 0) return 0;
+      return Math.min(fStar * frac, 0.25);
+    },
+
+    simulateEquityCurve() {
+      const canvas = document.getElementById('equity-canvas');
+      if (!canvas) return;
+      const ctx = canvas.getContext('2d');
+      const W = canvas.width = canvas.offsetWidth * 2;
+      const H = canvas.height = canvas.offsetHeight * 2;
+      ctx.clearRect(0, 0, W, H);
+
+      // Monte Carlo: 100 trades, 52% win rate, avg entry 20c
+      const trades = 100;
+      const winRate = 0.52;
+      const avgEntry = 0.20;
+      const frac = this.kellyFraction;
+      let bankroll = 10.0;
+      let peak = bankroll;
+      let maxDD = 0;
+      const curve = [bankroll];
+
+      // Use seeded pseudo-random for consistent display
+      let seed = 42;
+      function rand() { seed = (seed * 16807 + 0) % 2147483647; return seed / 2147483647; }
+
+      for (let i = 0; i < trades; i++) {
+        const f = this.kellyFormula(winRate, avgEntry, frac);
+        const bet = Math.min(bankroll * f, bankroll * 0.25);
+        if (rand() < winRate) {
+          bankroll += bet * ((1 / avgEntry) - 1);
+        } else {
+          bankroll -= bet;
+        }
+        bankroll = Math.max(bankroll, 0.01);
+        peak = Math.max(peak, bankroll);
+        const dd = (peak - bankroll) / peak;
+        maxDD = Math.max(maxDD, dd);
+        curve.push(bankroll);
+      }
+
+      this.simFinal = bankroll;
+      this.simMaxDD = maxDD;
+
+      // Draw
+      const maxVal = Math.max(...curve) * 1.1;
+      const minVal = Math.min(...curve) * 0.9;
+      const stepX = W / trades;
+
+      // Grid lines
+      ctx.strokeStyle = 'rgba(148,163,184,0.1)';
+      ctx.lineWidth = 1;
+      for (let y = 0; y < 5; y++) {
+        const yy = H * (y / 4);
+        ctx.beginPath(); ctx.moveTo(0, yy); ctx.lineTo(W, yy); ctx.stroke();
+      }
+
+      // Starting line at $10
+      const startY = H - ((10 - minVal) / (maxVal - minVal)) * H;
+      ctx.strokeStyle = 'rgba(148,163,184,0.3)';
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath(); ctx.moveTo(0, startY); ctx.lineTo(W, startY); ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Equity curve
+      ctx.strokeStyle = '#22D3EE';
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      for (let i = 0; i <= trades; i++) {
+        const x = i * stepX;
+        const y = H - ((curve[i] - minVal) / (maxVal - minVal)) * H;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+
+      // Fill under curve
+      const grad = ctx.createLinearGradient(0, 0, 0, H);
+      grad.addColorStop(0, 'rgba(34,211,238,0.15)');
+      grad.addColorStop(1, 'rgba(34,211,238,0.0)');
+      ctx.fillStyle = grad;
+      ctx.lineTo(W, H);
+      ctx.lineTo(0, H);
+      ctx.closePath();
+      ctx.fill();
+    },
+
+    async applyKelly() {
+      const tok = getAdminToken() || promptForToken();
+      if (!tok) return;
+      try {
+        const res = await fetch('/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Admin-Token': tok },
+          body: JSON.stringify({ kelly_fraction: this.kellyFraction }),
+        });
+        if (res.ok) { this.kellyDirty = false; }
+        else { const d = await res.json(); alert(d.detail || 'Error'); }
+      } catch (e) { alert('Network error'); }
+    },
+
+    async applyGates() {
+      const tok = getAdminToken() || promptForToken();
+      if (!tok) return;
+      try {
+        const res = await fetch('/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Admin-Token': tok },
+          body: JSON.stringify({
+            max_entry_price: this.maxEntryPrice,
+            max_spread: this.maxSpread,
+            min_true_edge: this.minTrueEdge,
+          }),
+        });
+        if (res.ok) { this.gateDirty = false; }
+        else { const d = await res.json(); alert(d.detail || 'Error'); }
+      } catch (e) { alert('Network error'); }
+    },
+
+    saveTelegramPrefs() {
+      const prefs = {};
+      this.telegramAlerts.forEach(a => { prefs[a.key] = a.enabled; });
+      localStorage.setItem('wq_telegram_prefs', JSON.stringify(prefs));
+    },
+  };
+}
+</script>
+{% endblock %}

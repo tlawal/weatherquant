@@ -124,6 +124,7 @@
           <a href="/" class="text-sm hover:text-white transition-colors" style="color:var(--text-muted)">Signals</a>
           <a href="/redemptions" class="text-sm hover:text-white transition-colors" style="color:var(--text-muted)">Redemptions</a>
           <a href="/stations" class="text-sm hover:text-white transition-colors" style="color:var(--text-muted)">Stations</a>
+          <a href="/strategies" class="text-sm hover:text-white transition-colors" style="color:var(--text-muted)">Strategies</a>
           <a href="/admin/cities" class="text-sm hover:text-white transition-colors" style="color:var(--text-muted)">Cities</a>
         </nav>
       </div>
@@ -162,6 +163,12 @@
           {% elif arming_state == 'ARMING_PENDING' %}🟡 PENDING
           {% else %}🟢 SAFE{% endif %}
         </div>
+        <!-- API Token -->
+        <button @click="$store.auth.showModal = true" class="relative text-lg cursor-pointer" title="API Token">
+          <span>🔑</span>
+          <span x-data x-show="$store.auth && $store.auth.hasToken"
+                class="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-green-500"></span>
+        </button>
         <!-- Theme toggle -->
         <button onclick="toggleTheme()" class="text-lg" title="Toggle theme">🌗</button>
       </div>
@@ -204,15 +211,36 @@
     const savedTheme = localStorage.getItem('theme');
     if (savedTheme === 'light') document.documentElement.classList.remove('dark');
 
-    // Admin token for API calls (stored in sessionStorage)
+    // Admin token for API calls (persisted in localStorage)
     function getAdminToken() {
-      return sessionStorage.getItem('adminToken') || '';
+      return localStorage.getItem('adminToken') || '';
     }
     function promptForToken() {
-      const t = prompt('Enter Admin Token:');
-      if (t) sessionStorage.setItem('adminToken', t);
-      return t;
+      // Open token modal instead of browser prompt; return null to abort
+      // the current API call. User retries after entering token.
+      if (window.Alpine && Alpine.store('auth')) {
+        Alpine.store('auth').showModal = true;
+      }
+      return null;
     }
+
+    // Alpine store for auth modal state
+    document.addEventListener('alpine:init', () => {
+      Alpine.store('auth', {
+        showModal: false,
+        hasToken: !!localStorage.getItem('adminToken'),
+        setToken(t) {
+          if (t) {
+            localStorage.setItem('adminToken', t);
+            this.hasToken = true;
+          }
+        },
+        clearToken() {
+          localStorage.removeItem('adminToken');
+          this.hasToken = false;
+        }
+      });
+    });
 
     // Wallet balance component for header
     function walletBalance() {
@@ -240,5 +268,35 @@
   </script>
 
   {% block scripts %}{% endblock %}
+
+  <!-- ── TOKEN MODAL ──────────────────────────────────────────────────────────── -->
+  <div x-data="{ tokenValue: localStorage.getItem('adminToken') || '' }"
+       x-show="$store.auth && $store.auth.showModal" x-cloak
+       class="fixed inset-0 z-[100] flex items-center justify-center"
+       style="background:rgba(0,0,0,0.6)"
+       @keydown.escape.window="$store.auth.showModal = false">
+    <div class="card p-6 w-96 space-y-4" @click.outside="$store.auth.showModal = false">
+      <div class="flex items-center justify-between">
+        <h3 class="text-lg font-bold" style="color:var(--text-main)">API Token</h3>
+        <span x-show="$store.auth && $store.auth.hasToken"
+              class="text-xs px-2 py-0.5 rounded font-semibold"
+              style="background:rgba(34,197,94,0.15);color:var(--green)">Active</span>
+      </div>
+      <input type="password" x-model="tokenValue"
+             placeholder="Enter admin token..."
+             class="w-full px-3 py-2 rounded-lg mono text-sm"
+             style="background:var(--bg-panel);border:1px solid var(--border);color:var(--text-main)"
+             @keydown.enter="$store.auth.setToken(tokenValue); $store.auth.showModal = false" />
+      <div class="flex gap-2">
+        <button @click="$store.auth.setToken(tokenValue); $store.auth.showModal = false"
+                class="flex-1 py-2 rounded-lg text-sm font-semibold cursor-pointer"
+                style="background:var(--cyan);color:#000">Save</button>
+        <button @click="$store.auth.clearToken(); tokenValue = ''; $store.auth.showModal = false"
+                class="px-4 py-2 rounded-lg text-sm cursor-pointer"
+                style="background:var(--bg-panel);color:var(--red)">Clear</button>
+      </div>
+      <p class="text-xs" style="color:var(--text-muted)">Token persists across sessions in your browser's local storage.</p>
+    </div>
+  </div>
 </body>
 </html>

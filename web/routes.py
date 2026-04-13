@@ -767,3 +767,75 @@ async def stations_page(request: Request):
 async def redemptions_page(request: Request):
     """Full-page view of all events with positions and their redemption status."""
     return templates.TemplateResponse("redemptions.html", {"request": request})
+
+
+@dashboard_router.get("/strategies", response_class=HTMLResponse)
+async def strategies_page(request: Request):
+    """Strategy configuration, Kelly sizing, model schedules, and probability heatmap."""
+    from backend.storage.db import get_session
+    from backend.storage.repos import (
+        get_arming_state,
+        get_signals_for_latest_snapshot,
+        get_all_cities,
+    )
+    from backend.storage.models import Bucket, Event
+
+    today_et = et_today()
+
+    async with get_session() as sess:
+        arming = await get_arming_state(sess)
+        raw_signals = await get_signals_for_latest_snapshot(sess, limit=200)
+        cities = await get_all_cities(sess)
+
+    city_map = {c.id: c for c in cities}
+
+    # Build bucket probability heatmap data grouped by city
+    heatmap_data = {}  # city_slug -> list of bucket dicts
+    for sig in raw_signals:
+        async with get_session() as sess:
+            bucket = await sess.get(Bucket, sig.bucket_id)
+            if not bucket:
+                continue
+            event = await sess.get(Event, bucket.event_id)
+            if not event or event.date_et != today_et:
+                continue
+        city = city_map.get(event.city_id)
+        if not city:
+            continue
+        slug = city.city_slug
+        if slug not in heatmap_data:
+            heatmap_data[slug] = {"display_name": city.display_name, "buckets": []}
+        heatmap_data[slug]["buckets"].append({
+            "label": bucket.label or f"{bucket.low_f}-{bucket.high_f}",
+            "low_f": bucket.low_f,
+            "high_f": bucket.high_f,
+            "bucket_idx": bucket.bucket_idx,
+            "model_prob": round(sig.model_prob, 4),
+            "mkt_prob": round(sig.mkt_prob if sig.mkt_prob else 0, 4),
+            "true_edge": round(sig.true_edge, 4),
+        })
+
+    # Sort buckets within each city by bucket_idx
+    for slug in heatmap_data:
+        heatmap_data[slug]["buckets"].sort(key=lambda b: b["bucket_idx"])
+
+    config_snapshot = {
+        "kelly_fraction": Config.KELLY_FRACTION,
+        "max_entry_price": Config.MAX_ENTRY_PRICE,
+        "max_spread": Config.MAX_SPREAD,
+        "min_true_edge": Config.MIN_TRUE_EDGE,
+        "bankroll_cap": Config.BANKROLL_CAP,
+        "max_daily_loss": Config.MAX_DAILY_LOSS,
+        "max_positions_per_event": Config.MAX_POSITIONS_PER_EVENT,
+        "trading_window_close_et": Config.TRADING_WINDOW_CLOSE_ET,
+    }
+
+    return templates.TemplateResponse(
+        "strategies.html",
+        {
+            "request": request,
+            "arming_state": arming.state,
+            "config": config_snapshot,
+            "heatmap_data": heatmap_data,
+        },
+    )

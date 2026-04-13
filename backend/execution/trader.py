@@ -74,6 +74,7 @@ async def execute_signal(
     side: str = "BUY",
     limit_price_override: float | None = None,
     strategy: str = "default",
+    outcome: str = "yes",
 ) -> dict:
     """
     Attempt to execute a trade for the given signal.
@@ -123,6 +124,7 @@ async def execute_signal(
         "GATE_SETTLEMENT_SOURCE", "GATE_BRACKET_SURPASSED",
         "GATE_MKT_EXTREME", "GATE_DATE_ALIGNMENT", "GATE_WU_FRESHNESS",
         "GATE_LIQUIDITY", "GATE_METAR",
+        "GATE_MAX_PRICE", "GATE_MIN_PRICE", "GATE_SPREAD",
     }
     if manual:
         filtered = [f for f in gate_result.failures
@@ -244,15 +246,16 @@ async def execute_signal(
         signal.true_edge,
     )
 
-    # ── Look up YES token ID for this bucket ──────────────────────────────────
+    # ── Look up token ID for this bucket ────────────────────────────────────
     from backend.storage.repos import get_buckets_for_event
     async with get_session() as sess:
         buckets = await get_buckets_for_event(sess, event.id)
 
     bucket = next((b for b in buckets if b.id == signal.bucket_id), None)
-    if not bucket or not bucket.yes_token_id:
+    token_id = (bucket.no_token_id if outcome == "no" else bucket.yes_token_id) if bucket else None
+    if not bucket or not token_id:
         result["status"] = "error"
-        result["error"] = "bucket or yes_token_id not found"
+        result["error"] = f"bucket or {outcome}_token_id not found"
         return result
 
     # ── For SELL: verify on-chain conditional token balance ────────────────────
@@ -265,7 +268,7 @@ async def execute_signal(
             wallet = get_wallet_address()
             async with aiohttp.ClientSession() as _http:
                 onchain_raw = await erc1155_balance(
-                    _http, CTF_ADDRESS, wallet, bucket.yes_token_id,
+                    _http, CTF_ADDRESS, wallet, token_id,
                 )
             onchain_shares = onchain_raw / 1_000_000
 
@@ -329,7 +332,7 @@ async def execute_signal(
         order = await insert_order(
             sess,
             bucket_id=signal.bucket_id,
-            side="sell_yes" if side == "SELL" else "buy_yes",
+            side=f"sell_{outcome}" if side == "SELL" else f"buy_{outcome}",
             qty=shares,
             limit_price=limit_price,
             status="pending",
@@ -353,13 +356,13 @@ async def execute_signal(
         else:
             amount = shares * limit_price  # BUY: amount is in dollars (shares already ≥ $1 notional)
         clob_result = await clob.place_market_order(
-            token_id=bucket.yes_token_id,
+            token_id=token_id,
             side=side,
             amount=amount,
         )
     else:
         clob_result = await clob.place_limit_order(
-            token_id=bucket.yes_token_id,
+            token_id=token_id,
             side=side,
             size=shares,
             price=limit_price,
@@ -400,7 +403,7 @@ async def execute_signal(
     fill_result = await _poll_for_fill(
         order_id=order.id,
         clob_order_id=clob_order_id,
-        token_id=bucket.yes_token_id,
+        token_id=token_id,
         expected_size=shares,
         expected_price=limit_price,
         side=side,
@@ -414,7 +417,7 @@ async def execute_signal(
             await upsert_position(
                 sess,
                 bucket_id=signal.bucket_id,
-                side="yes",
+                side=outcome,
                 fill_qty=fill_result["qty"] if side == "BUY" else -fill_result["qty"],
                 fill_price=fill_result["price"],
                 last_mkt_price=fill_result["price"],

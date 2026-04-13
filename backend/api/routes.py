@@ -1706,6 +1706,7 @@ async def manual_trade(
             bankroll = min(balance, Config.BANKROLL_CAP)
 
     clob_side = "SELL" if is_sell else "BUY"
+    token_outcome = "no" if body.side == "buy_no" else "yes"
     result = await execute_signal(
         signal,
         bankroll=bankroll,
@@ -1714,7 +1715,8 @@ async def manual_trade(
         qty_override=body.qty,
         order_type=body.order_type,
         side=clob_side,
-        limit_price_override=body.limit_price
+        limit_price_override=body.limit_price,
+        outcome=token_outcome,
     )
     return result
 
@@ -1815,6 +1817,9 @@ class ConfigUpdate(BaseModel):
     min_true_edge: Optional[float] = None
     max_daily_loss: Optional[float] = None
     bankroll_cap: Optional[float] = None
+    kelly_fraction: Optional[float] = None
+    max_entry_price: Optional[float] = None
+    max_spread: Optional[float] = None
 
 
 @router.post("/config")
@@ -1838,6 +1843,24 @@ async def update_config(body: ConfigUpdate, actor: str = Depends(require_admin))
             raise HTTPException(status_code=400, detail="bankroll_cap cannot exceed $100 in v1")
         Config.BANKROLL_CAP = body.bankroll_cap
         updates["bankroll_cap"] = body.bankroll_cap
+
+    if body.kelly_fraction is not None:
+        if not (0.01 <= body.kelly_fraction <= 0.50):
+            raise HTTPException(status_code=400, detail="kelly_fraction must be in [0.01, 0.50]")
+        Config.KELLY_FRACTION = body.kelly_fraction
+        updates["kelly_fraction"] = body.kelly_fraction
+
+    if body.max_entry_price is not None:
+        if not (0.05 <= body.max_entry_price <= 0.95):
+            raise HTTPException(status_code=400, detail="max_entry_price must be in [0.05, 0.95]")
+        Config.MAX_ENTRY_PRICE = body.max_entry_price
+        updates["max_entry_price"] = body.max_entry_price
+
+    if body.max_spread is not None:
+        if not (0.005 <= body.max_spread <= 0.20):
+            raise HTTPException(status_code=400, detail="max_spread must be in [0.005, 0.20]")
+        Config.MAX_SPREAD = body.max_spread
+        updates["max_spread"] = body.max_spread
 
     async with get_session() as sess:
         await append_audit(sess, actor=actor, action="config_updated", payload=updates)
