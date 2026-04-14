@@ -262,7 +262,7 @@
       Four-level exit cascade. Higher levels override lower levels. Exit engine checks every 60 seconds.
     </p>
     <div class="overflow-x-auto">
-      <table class="w-full text-sm">
+      <table class="w-full text-sm border-collapse">
         <thead>
           <tr style="border-bottom:1px solid var(--border)">
             <th class="text-left py-2 text-xs uppercase tracking-widest" style="color:var(--text-muted)">Level</th>
@@ -273,94 +273,123 @@
           </tr>
         </thead>
         <tbody>
-          <tr style="border-bottom:1px solid var(--border)" class="group relative">
-            <td class="py-2.5">
-              <span class="text-xs font-bold px-2 py-0.5 rounded" style="background:rgba(239,68,68,0.15);color:var(--red)">EMERGENCY</span>
-              <div class="hidden group-hover:block absolute left-0 top-full z-10 w-80 p-3 rounded-lg text-xs shadow-lg"
-                   style="background:var(--bg-card);border:1px solid var(--border);color:var(--text-muted)">
-                <span class="font-bold" style="color:var(--red)">EMERGENCY EXIT</span><br>
+
+          <!-- EMERGENCY -->
+          <template x-data="{ open: false }">
+            <tr style="border-bottom:1px solid var(--border)">
+              <td class="py-2.5">
+                <button @click="open = !open" class="text-xs font-bold px-2 py-0.5 rounded cursor-pointer select-none transition-opacity hover:opacity-80"
+                        style="background:rgba(239,68,68,0.15);color:var(--red)"
+                        :title="open ? 'Click to collapse' : 'Click for details'">
+                  EMERGENCY <span x-text="open ? '▲' : '▼'" class="text-[9px] opacity-60"></span>
+                </button>
+              </td>
+              <td class="py-2.5 text-xs" style="color:var(--text-muted)">Observed high exceeds bucket ceiling, or deep miss (&lt;floor − 3°F after 6 PM)</td>
+              <td class="py-2.5 text-xs">Market sell immediately</td>
+              <td class="py-2.5 mono font-bold">100%</td>
+              <td class="py-2.5 text-xs mono">market @ bid</td>
+            </tr>
+            <tr x-show="open" x-transition style="border-bottom:1px solid var(--border)">
+              <td colspan="5" class="px-4 py-3 text-xs leading-relaxed" style="background:rgba(239,68,68,0.05);color:var(--text-muted)">
+                <span class="font-bold" style="color:var(--red)">EMERGENCY EXIT</span> —
                 Fires when METAR observations confirm the daily high already exceeded the bucket ceiling
-                (busted high — obs > ceiling + 1F), or is far below the bucket floor after 6 PM local with
-                &lt;5% model probability (deep miss — obs &lt; floor - 3F). In both cases the bucket is
-                essentially worth $0. Sells at best available bid to salvage any remaining value.
-              </div>
-            </td>
-            <td class="py-2.5 text-xs" style="color:var(--text-muted)">Observed high exceeds bucket ceiling, or deep miss (&lt;floor - 3F after 6 PM)</td>
-            <td class="py-2.5 text-xs">Market sell immediately</td>
-            <td class="py-2.5 mono font-bold">100%</td>
-            <td class="py-2.5 text-xs mono">market @ bid</td>
-          </tr>
-          <tr style="border-bottom:1px solid var(--border)" class="group relative">
-            <td class="py-2.5">
-              <span class="text-xs font-bold px-2 py-0.5 rounded" style="background:rgba(234,179,8,0.15);color:var(--yellow)">URGENT</span>
-              <div class="hidden group-hover:block absolute left-0 top-full z-10 w-80 p-3 rounded-lg text-xs shadow-lg"
-                   style="background:var(--bg-card);border:1px solid var(--border);color:var(--text-muted)">
-                <span class="font-bold" style="color:var(--yellow)">URGENT EXIT (Debounced + Spread-Guarded)</span><br>
-                Every 5 min, the signal engine computes model_prob for each bucket from NWS, WU, HRRR, GFS
-                forecasts. The bucket with the highest probability is "consensus." If consensus shifts away
-                from your held bucket for <span class="mono font-bold" x-text="consensusDebounceRuns"></span>
-                consecutive runs (debounce), URGENT exit fires.<br><br>
-                <span class="font-bold" style="color:var(--cyan)">Spread guard:</span> Suppressed when bid-ask
-                spread exceeds <span class="mono font-bold" x-text="(urgentExitMaxSpread * 100).toFixed(0) + 'c'"></span>
-                — prevents poor execution in thin markets (like the Atlanta 7c spread incident).
-              </div>
-            </td>
-            <td class="py-2.5 text-xs" style="color:var(--text-muted)">
-              Model consensus shifted for
-              <span class="mono font-bold" style="color:var(--cyan)" x-text="consensusDebounceRuns"></span> consecutive runs
-              (spread &lt; <span class="mono font-bold" style="color:var(--cyan)" x-text="(urgentExitMaxSpread * 100).toFixed(0) + 'c'"></span>)
-            </td>
-            <td class="py-2.5 text-xs">Aggressive limit sell</td>
-            <td class="py-2.5 mono font-bold">100%</td>
-            <td class="py-2.5 text-xs mono">limit @ bid-1c</td>
-          </tr>
-          <tr style="border-bottom:1px solid var(--border)" class="group relative">
-            <td class="py-2.5">
-              <span class="text-xs font-bold px-2 py-0.5 rounded" style="background:rgba(34,197,94,0.15);color:var(--green)">PROFIT</span>
-              <div class="hidden group-hover:block absolute left-0 top-full z-10 w-80 p-3 rounded-lg text-xs shadow-lg"
-                   style="background:var(--bg-card);border:1px solid var(--border);color:var(--text-muted)">
-                <span class="font-bold" style="color:var(--green)">PROFIT EXIT (Quick Flip)</span><br>
-                Fires when the current bid reaches your entry price + target
-                (<span class="mono font-bold" x-text="(quickFlipTarget * 100).toFixed(0) + 'c'"></span>).
-                Accounts for 2% Polymarket taker fee in P&amp;L calculation. Net profit per share =
-                (bid - entry) - (bid * 2%).<br><br>
-                <span class="font-bold" style="color:var(--cyan)">Adjust target below.</span> Higher targets
-                mean larger per-trade profit but fewer triggers. 5c is aggressive scalping; 10-15c is more
-                patient. Consider spread + fee when setting: at 2% fee on a 30c contract, cost is ~0.6c.
-              </div>
-            </td>
-            <td class="py-2.5 text-xs" style="color:var(--text-muted)">
-              Bid &gt;= entry +
-              <span class="mono font-bold" style="color:var(--cyan)" x-text="(quickFlipTarget * 100).toFixed(0) + 'c'"></span>
-              (Quick Flip target)
-            </td>
-            <td class="py-2.5 text-xs">Passive limit sell</td>
-            <td class="py-2.5 mono font-bold">100%</td>
-            <td class="py-2.5 text-xs mono">limit @ bid</td>
-          </tr>
-          <tr class="group relative">
-            <td class="py-2.5">
-              <span class="text-xs font-bold px-2 py-0.5 rounded" style="background:rgba(148,163,184,0.15);color:var(--text-muted)">EXPIRY</span>
-              <div class="hidden group-hover:block absolute left-0 top-full z-10 w-80 p-3 rounded-lg text-xs shadow-lg"
-                   style="background:var(--bg-card);border:1px solid var(--border);color:var(--text-muted)">
-                <span class="font-bold">EXPIRY EXIT (Time-Based Safety)</span><br>
-                Fires 30 min before market close (7:30 PM local). Sells at bid minus
-                <span class="mono font-bold" x-text="(expiryDiscount * 100).toFixed(0) + 'c'"></span> discount
-                to ensure fill before settlement.<br><br>
-                <span class="font-bold" style="color:var(--yellow)">Caution in thin markets:</span> A large
-                discount on an illiquid book may give away significant value. Consider whether the position is
-                winning (model_prob > 60% = hold) or losing (model_prob < 20% = exit). Future: dynamic expiry
-                based on model confidence and remaining temperature uncertainty.
-              </div>
-            </td>
-            <td class="py-2.5 text-xs" style="color:var(--text-muted)">
-              30 min before market close, discount
-              <span class="mono font-bold" style="color:var(--cyan)" x-text="(expiryDiscount * 100).toFixed(0) + 'c'"></span>
-            </td>
-            <td class="py-2.5 text-xs">Clearance limit sell</td>
-            <td class="py-2.5 mono font-bold">100%</td>
-            <td class="py-2.5 text-xs mono">limit @ bid - <span x-text="(expiryDiscount * 100).toFixed(0) + 'c'"></span></td>
-          </tr>
+                (<span class="mono">busted high</span>: obs &gt; ceiling + 1°F), or the observed high is far below the bucket floor
+                after 6 PM local with &lt;5% model probability (<span class="mono">deep miss</span>: obs &lt; floor − 3°F).
+                In either case the bucket is essentially worth $0. Sells at best available bid to salvage any remaining value.
+              </td>
+            </tr>
+          </template>
+
+          <!-- URGENT -->
+          <template x-data="{ open: false }">
+            <tr style="border-bottom:1px solid var(--border)">
+              <td class="py-2.5">
+                <button @click="open = !open" class="text-xs font-bold px-2 py-0.5 rounded cursor-pointer select-none transition-opacity hover:opacity-80"
+                        style="background:rgba(234,179,8,0.15);color:var(--yellow)">
+                  URGENT <span x-text="open ? '▲' : '▼'" class="text-[9px] opacity-60"></span>
+                </button>
+              </td>
+              <td class="py-2.5 text-xs" style="color:var(--text-muted)">
+                Model consensus shifted for
+                <span class="mono font-bold" style="color:var(--cyan)" x-text="consensusDebounceRuns"></span> consecutive runs
+                (spread &lt; <span class="mono font-bold" style="color:var(--cyan)" x-text="(urgentExitMaxSpread * 100).toFixed(0) + '¢'"></span>)
+              </td>
+              <td class="py-2.5 text-xs">Aggressive limit sell</td>
+              <td class="py-2.5 mono font-bold">100%</td>
+              <td class="py-2.5 text-xs mono">limit @ bid−1¢</td>
+            </tr>
+            <tr x-show="open" x-transition style="border-bottom:1px solid var(--border)">
+              <td colspan="5" class="px-4 py-3 text-xs leading-relaxed" style="background:rgba(234,179,8,0.05);color:var(--text-muted)">
+                <span class="font-bold" style="color:var(--yellow)">URGENT EXIT — Debounced + Spread-Guarded</span><br>
+                Every 5 min, the signal engine computes <span class="mono">model_prob</span> for each bucket from NWS, WU, HRRR, and GFS forecasts.
+                The bucket with the highest probability is "consensus." If consensus shifts away from your held bucket for
+                <span class="mono font-bold" x-text="consensusDebounceRuns"></span> consecutive runs, URGENT exit fires.<br><br>
+                <span class="font-bold" style="color:var(--cyan)">Spread guard:</span> Exit is suppressed when the bid-ask spread exceeds
+                <span class="mono font-bold" x-text="(urgentExitMaxSpread * 100).toFixed(0) + '¢'"></span> — prevents dumping into thin books
+                at a large implicit cost (e.g. the Atlanta 7¢ spread incident where the position bounced +15¢ after exit).
+                Adjust both thresholds in the Exit Engine Configuration below.
+              </td>
+            </tr>
+          </template>
+
+          <!-- PROFIT -->
+          <template x-data="{ open: false }">
+            <tr style="border-bottom:1px solid var(--border)">
+              <td class="py-2.5">
+                <button @click="open = !open" class="text-xs font-bold px-2 py-0.5 rounded cursor-pointer select-none transition-opacity hover:opacity-80"
+                        style="background:rgba(34,197,94,0.15);color:var(--green)">
+                  PROFIT <span x-text="open ? '▲' : '▼'" class="text-[9px] opacity-60"></span>
+                </button>
+              </td>
+              <td class="py-2.5 text-xs" style="color:var(--text-muted)">
+                Bid ≥ entry + <span class="mono font-bold" style="color:var(--cyan)" x-text="(quickFlipTarget * 100).toFixed(0) + '¢'"></span> (Quick Flip target)
+              </td>
+              <td class="py-2.5 text-xs">Passive limit sell</td>
+              <td class="py-2.5 mono font-bold">100%</td>
+              <td class="py-2.5 text-xs mono">limit @ bid</td>
+            </tr>
+            <tr x-show="open" x-transition style="border-bottom:1px solid var(--border)">
+              <td colspan="5" class="px-4 py-3 text-xs leading-relaxed" style="background:rgba(34,197,94,0.05);color:var(--text-muted)">
+                <span class="font-bold" style="color:var(--green)">PROFIT EXIT — Quick Flip</span><br>
+                Fires when the current bid reaches entry + <span class="mono font-bold" x-text="(quickFlipTarget * 100).toFixed(0) + '¢'"></span>.
+                Accounts for 2% Polymarket taker fee: net profit per share = (bid − entry) − (bid × 2%).
+                At a 30¢ contract that fee is ~0.6¢, so effective take-home on a <span class="mono" x-text="(quickFlipTarget * 100).toFixed(0) + '¢'"></span> target
+                is <span class="mono" x-text="((quickFlipTarget - 0.30 * 0.02) * 100).toFixed(1) + '¢'"></span>.<br><br>
+                Adjust the Quick Flip Target slider below. Higher = fewer triggers, larger per-trade gain.
+                5¢ is aggressive scalping suited for the 7–10 AM repricing window; 10–15¢ fits overnight holds.
+              </td>
+            </tr>
+          </template>
+
+          <!-- EXPIRY -->
+          <template x-data="{ open: false }">
+            <tr>
+              <td class="py-2.5">
+                <button @click="open = !open" class="text-xs font-bold px-2 py-0.5 rounded cursor-pointer select-none transition-opacity hover:opacity-80"
+                        style="background:rgba(148,163,184,0.15);color:var(--text-muted)">
+                  EXPIRY <span x-text="open ? '▲' : '▼'" class="text-[9px] opacity-60"></span>
+                </button>
+              </td>
+              <td class="py-2.5 text-xs" style="color:var(--text-muted)">
+                30 min before market close; discount <span class="mono font-bold" style="color:var(--cyan)" x-text="(expiryDiscount * 100).toFixed(0) + '¢'"></span>
+              </td>
+              <td class="py-2.5 text-xs">Clearance limit sell</td>
+              <td class="py-2.5 mono font-bold">100%</td>
+              <td class="py-2.5 text-xs mono">limit @ bid − <span x-text="(expiryDiscount * 100).toFixed(0) + '¢'"></span></td>
+            </tr>
+            <tr x-show="open" x-transition>
+              <td colspan="5" class="px-4 py-3 text-xs leading-relaxed" style="background:rgba(148,163,184,0.05);color:var(--text-muted)">
+                <span class="font-bold">EXPIRY EXIT — Time-Based Safety</span><br>
+                Fires at 7:30 PM local (30 min before close). Sells at bid minus
+                <span class="mono font-bold" x-text="(expiryDiscount * 100).toFixed(0) + '¢'"></span> discount to ensure fill before settlement.<br><br>
+                <span class="font-bold" style="color:var(--yellow)">Caution in thin markets:</span> A large discount on an illiquid book gives away
+                significant value. In practice: if the position is likely winning (model_prob &gt; 60%), holding to settlement at $1.00 may be worth
+                more than a discounted clearance sell. Future improvement: dynamic expiry based on model confidence and remaining intraday temperature trajectory.
+                Adjust the Expiry Discount slider below.
+              </td>
+            </tr>
+          </template>
+
         </tbody>
       </table>
     </div>
