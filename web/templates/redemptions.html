@@ -16,9 +16,13 @@
     <button onclick="sweepAll(this)" class="px-4 py-1.5 rounded text-sm font-semibold transition-colors bg-[var(--bg-panel)] border border-[var(--border)] hover:bg-[var(--cyan)] hover:text-black hover:border-[var(--cyan)]" style="color:var(--text-muted)">
       Sweep All Negative Risk
     </button>
-    <button onclick="loadEvents()" class="px-4 py-1.5 rounded text-sm font-semibold transition-colors bg-[var(--cyan)] text-black hover:bg-opacity-80 shadow-[0_0_10px_var(--cyan)]">
+    <button id="refresh-btn" onclick="loadEvents()" class="px-4 py-1.5 rounded text-sm font-semibold transition-colors bg-[var(--cyan)] text-black hover:bg-opacity-80 shadow-[0_0_10px_var(--cyan)]">
       Refresh Positions ↻
     </button>
+    <label class="flex items-center gap-1.5 text-[0.6rem] text-gray-500 cursor-pointer font-mono select-none">
+      <input type="checkbox" id="auto-refresh-toggle" onchange="toggleAutoRefresh(this.checked)" class="accent-[var(--cyan)]">
+      Auto 30s
+    </label>
   </div>
 </div>
 
@@ -56,21 +60,24 @@
 </div>
 
 <!-- Loading state -->
-<div id="loading" class="card p-8 text-center text-sm font-mono animate-pulse" style="color:var(--cyan)">INITIALIZING STATE...</div>
+<div id="loading" class="card p-8 text-center space-y-3">
+  <div class="spinner mx-auto"></div>
+  <div class="text-sm font-mono" style="color:var(--cyan)">LOADING POSITIONS...</div>
+</div>
 
 <!-- Events Table -->
 <div class="card overflow-x-auto hidden border-t-2 border-[var(--cyan)]" id="events-card">
   <table class="w-full text-left border-collapse font-mono text-sm whitespace-nowrap">
     <thead class="bg-[rgba(255,255,255,0.03)] border-b border-[var(--border)]">
       <tr>
-        <th class="py-3 px-4 uppercase tracking-wider text-[0.65rem] font-bold" style="color:var(--text-muted)">City / Bucket</th>
-        <th class="py-3 px-4 uppercase tracking-wider text-[0.65rem] font-bold" style="color:var(--text-muted)">Entry Info / Type</th>
-        <th class="py-3 px-4 uppercase tracking-wider text-[0.65rem] font-bold" style="color:var(--text-muted)">Strategy & Conditions (Hover)</th>
-        <th class="py-3 px-4 uppercase tracking-wider text-[0.65rem] font-bold text-right" style="color:var(--text-muted)">C. Mark</th>
-        <th class="py-3 px-4 uppercase tracking-wider text-[0.65rem] font-bold text-right" style="color:var(--text-muted)">Unrealized P&L</th>
-        <th class="py-3 px-4 uppercase tracking-wider text-[0.65rem] font-bold" style="color:var(--text-muted)">Live Exit Status</th>
-        <th class="py-3 px-4 uppercase tracking-wider text-[0.65rem] font-bold text-center" style="color:var(--text-muted)">Status</th>
-        <th class="py-3 px-4 uppercase tracking-wider text-[0.65rem] font-bold text-right" style="color:var(--text-muted)">Actions</th>
+        <th class="py-2 px-2 lg:py-3 lg:px-4 uppercase tracking-wider text-[0.65rem] font-bold sortable" style="color:var(--text-muted)" onclick="toggleSort('city')">City / Bucket <span class="sort-arrow" data-sort="city"></span></th>
+        <th class="py-2 px-2 lg:py-3 lg:px-4 uppercase tracking-wider text-[0.65rem] font-bold sortable" style="color:var(--text-muted)" onclick="toggleSort('entry_time')">Entry Info / Type <span class="sort-arrow" data-sort="entry_time"></span></th>
+        <th class="py-2 px-2 lg:py-3 lg:px-4 uppercase tracking-wider text-[0.65rem] font-bold hidden lg:table-cell" style="color:var(--text-muted)">Strategy & Conditions (Hover)</th>
+        <th class="py-2 px-2 lg:py-3 lg:px-4 uppercase tracking-wider text-[0.65rem] font-bold text-right sortable" style="color:var(--text-muted)" onclick="toggleSort('mark')">C. Mark <span class="sort-arrow" data-sort="mark"></span></th>
+        <th class="py-2 px-2 lg:py-3 lg:px-4 uppercase tracking-wider text-[0.65rem] font-bold text-right sortable" style="color:var(--text-muted)" onclick="toggleSort('pnl')">Unrealized P&L <span class="sort-arrow" data-sort="pnl"></span></th>
+        <th class="py-2 px-2 lg:py-3 lg:px-4 uppercase tracking-wider text-[0.65rem] font-bold hidden lg:table-cell" style="color:var(--text-muted)">Live Exit Status</th>
+        <th class="py-2 px-2 lg:py-3 lg:px-4 uppercase tracking-wider text-[0.65rem] font-bold text-center" style="color:var(--text-muted)">Status</th>
+        <th class="py-2 px-2 lg:py-3 lg:px-4 uppercase tracking-wider text-[0.65rem] font-bold text-right" style="color:var(--text-muted)">Actions</th>
       </tr>
     </thead>
     <tbody id="events-tbody" class="divide-y divide-[var(--border)]"></tbody>
@@ -83,6 +90,9 @@
 </div>
 
 <style>
+/* Spinner */
+@keyframes spin { to { transform: rotate(360deg); } }
+.spinner { width: 20px; height: 20px; border: 2px solid var(--border); border-top-color: var(--cyan); border-radius: 50%; animation: spin 0.8s linear infinite; display: inline-block; }
 /* Tooltip logic */
 .tooltip-trigger {
   position: relative;
@@ -101,6 +111,11 @@
   visibility: visible;
   opacity: 1;
 }
+/* Sortable headers */
+.sortable { cursor: pointer; user-select: none; }
+.sortable:hover { color: var(--cyan); }
+.sort-arrow { font-size: 0.5rem; margin-left: 2px; opacity: 0.4; }
+.sort-arrow.active { opacity: 1; color: var(--cyan); }
 </style>
 
 {% endblock %}
@@ -109,6 +124,10 @@
 <script>
 let CURRENT_FILTER = 'ALL';
 let RAW_DATA = [];
+let SORT_COL = null;   // 'city' | 'entry_time' | 'mark' | 'pnl'
+let SORT_DIR = 'desc';
+let _autoRefreshTimer = null;
+let _actionInProgress = false;
 
 const STATUS_LABELS = {
   redeemed:                 {text: 'REDEEMED',              color: 'var(--text-muted)', bg: 'transparent'},
@@ -146,44 +165,102 @@ function setFilter(f) {
   renderTable();
 }
 
+// ── Sorting ──────────────────────────────────────────────────────────────────
+function toggleSort(col) {
+  if (SORT_COL === col) {
+    SORT_DIR = SORT_DIR === 'asc' ? 'desc' : 'asc';
+  } else {
+    SORT_COL = col;
+    SORT_DIR = col === 'pnl' || col === 'mark' ? 'desc' : 'asc';
+  }
+  // Update arrow indicators
+  document.querySelectorAll('.sort-arrow').forEach(el => {
+    if (el.dataset.sort === col) {
+      el.textContent = SORT_DIR === 'asc' ? ' ▲' : ' ▼';
+      el.classList.add('active');
+    } else {
+      el.textContent = '';
+      el.classList.remove('active');
+    }
+  });
+  renderTable();
+}
+
+function _computeRow(evt, b) {
+  const bType = b.entry_type || (evt.source === 'on_chain' ? 'MANUAL' : 'AUTOMATIC');
+  const currentPrice = b.is_winner ? 1.0
+    : (evt.winning_bucket_idx !== null ? 0.0
+      : (b.live_price > 0 ? b.live_price : (b.last_mkt_price > 0 ? b.last_mkt_price : b.avg_cost)));
+  const pnl = (currentPrice - b.avg_cost) * b.net_qty;
+  return { evt, b, bType, currentPrice, pnl };
+}
+
+function _flattenAndSort() {
+  let flat = [];
+  for (const evt of RAW_DATA) {
+    const positionBuckets = evt.buckets.filter(b => b.net_qty > 0);
+    const iterBuckets = positionBuckets.length > 0 ? positionBuckets : evt.buckets.filter(b => evt.status === 'redeemable' || evt.status === 'redeemed');
+    for (const b of iterBuckets) {
+      if (b.net_qty <= 0 && evt.status !== 'redeemed') continue;
+      const row = _computeRow(evt, b);
+      // Apply filters
+      if (CURRENT_FILTER === 'AUTOMATIC' && row.bType !== 'AUTOMATIC') continue;
+      if (CURRENT_FILTER === 'MANUAL' && row.bType !== 'MANUAL') continue;
+      if (CURRENT_FILTER === 'RESOLVED' && evt.status === 'open') continue;
+      if (CURRENT_FILTER === 'ALL' && evt.status === 'redeemed') continue;
+      flat.push(row);
+    }
+  }
+  if (SORT_COL) {
+    const dir = SORT_DIR === 'asc' ? 1 : -1;
+    flat.sort((a, b_) => {
+      let va, vb;
+      switch (SORT_COL) {
+        case 'city':      va = (a.evt.city_name||'').toLowerCase(); vb = (b_.evt.city_name||'').toLowerCase(); return va < vb ? -dir : va > vb ? dir : 0;
+        case 'entry_time': va = a.b.entry_time || ''; vb = b_.b.entry_time || ''; return va < vb ? -dir : va > vb ? dir : 0;
+        case 'mark':       return (a.currentPrice - b_.currentPrice) * dir;
+        case 'pnl':        return (a.pnl - b_.pnl) * dir;
+        default: return 0;
+      }
+    });
+  }
+  return flat;
+}
+
+// ── Auto-refresh ─────────────────────────────────────────────────────────────
+function toggleAutoRefresh(on) {
+  if (_autoRefreshTimer) { clearInterval(_autoRefreshTimer); _autoRefreshTimer = null; }
+  if (on) {
+    _autoRefreshTimer = setInterval(() => { if (!_actionInProgress) loadEvents(); }, 30000);
+  }
+}
+
+// ── Table Rendering ──────────────────────────────────────────────────────────
 function renderTable() {
   const tbody = document.getElementById('events-tbody');
   tbody.innerHTML = '';
-  let hasDrawn = false;
+  const flat = _flattenAndSort();
 
-  for (const evt of RAW_DATA) {
-    const isManualEvent = evt.source === 'on_chain';
-    
-    // Evaluate if event belongs in the filter
-    const positionBuckets = evt.buckets.filter(b => b.net_qty > 0);
-    const iterBuckets = positionBuckets.length > 0 ? positionBuckets : evt.buckets.filter(b => evt.status === 'redeemable' || evt.status === 'redeemed');
+  if (flat.length === 0) {
+    document.getElementById('events-card').classList.add('hidden');
+    document.getElementById('empty').classList.remove('hidden');
+    return;
+  }
 
-    let html = '';
-    for (const b of iterBuckets) {
-      if (b.net_qty <= 0 && evt.status !== 'redeemed') continue;
-      
-      const bType = b.entry_type || (isManualEvent ? 'MANUAL' : 'AUTOMATIC');
-      if (CURRENT_FILTER === 'AUTOMATIC' && bType !== 'AUTOMATIC') continue;
-      if (CURRENT_FILTER === 'MANUAL' && bType !== 'MANUAL') continue;
-      if (CURRENT_FILTER === 'RESOLVED' && evt.status === 'open') continue;
-      if (CURRENT_FILTER === 'ALL' && (evt.status === 'redeemed')) continue; // hide deep history by default
-
+  for (const { evt, b, bType, currentPrice, pnl } of flat) {
       const isWin = b.is_winner;
       const isLose = evt.winning_bucket_idx !== null && !isWin;
       const qtyStr = b.net_qty > 0 ? `${b.net_qty.toFixed(0)} sh` : '-';
-      
-      const currentPrice = b.is_winner ? 1.0 : (evt.winning_bucket_idx !== null ? 0.0 : (b.live_price > 0 ? b.live_price : (b.last_mkt_price > 0 ? b.last_mkt_price : b.avg_cost)));
-      const pnl = (currentPrice - b.avg_cost) * b.net_qty;
+
       const pnlPct = b.avg_cost > 0 ? ((currentPrice / b.avg_cost) - 1) * 100 : 0;
-      
       const pnlColor = pnl > 0 ? "var(--green)" : pnl < 0 ? "#ef4444" : "var(--text-muted)";
       const pnlStr = `<span style="color:${pnlColor}">${pnl > 0 ? '+' : ''}$${pnl.toFixed(2)}<br/><span class="text-[0.6rem] font-normal">(${pnl > 0 ? '+' : ''}${pnlPct.toFixed(1)}%)</span></span>`;
 
       const eTime = b.entry_time ? new Date(b.entry_time).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) : '--';
-      const typeBadge = bType === 'AUTOMATIC' 
+      const typeBadge = bType === 'AUTOMATIC'
           ? `<span class="px-1 py-[1px] bg-purple-900/40 text-purple-300 border border-purple-500/50 rounded text-[0.55rem] font-bold">AUTO</span>`
           : `<span class="px-1 py-[1px] bg-yellow-900/40 text-yellow-300 border border-yellow-500/50 rounded text-[0.55rem] font-bold">MANUAL</span>`;
-      
+
       // governing exit conditions parsing
       let logicText = 'N/A';
       if (b.governing_exit_conditions) {
@@ -191,17 +268,42 @@ function renderTable() {
              let j = JSON.parse(b.governing_exit_conditions);
              logicText = `<div class="text-left"><div class="text-red-400">CUT: Hi>${j.cut_temp_high||'?'} / Lo<${j.cut_temp_low||'?'}</div><div class="text-green-400">TP: $${j.take_profit_price||'?'}</div><div class="text-blue-400">EXP: ${j.expiry_time||'?'}</div></div>`;
          } catch(e) { logicText = b.governing_exit_conditions; }
-      } else if (b.exit_strategy) { // fallback backward compatibility
+      } else if (b.exit_strategy) {
           logicText = `<div class="text-left text-xs"><div class="text-green-400">TP: $${b.exit_strategy.take_profit_price||'?'}</div></div>`;
       }
 
       const stratDisplay = b.strategy || (bType === 'MANUAL' ? 'Ungoverned' : 'Default-Cascade');
-      
+
       // Live exit status
       let statText = b.current_exit_status || (evt.status !== 'open' ? 'Position Closed' : 'Evaluating stream...');
       let statColor = statText.includes('triggered') ? 'text-red-400' : 'text-gray-400';
       if (statText.includes('Monitoring')) statColor = 'text-green-400';
       if (statText.includes('Closed')) statColor = 'text-gray-500';
+
+      // C.Mark staleness indicator
+      let markColor = 'text-gray-300';
+      let markSub = '';
+      if (evt.status === 'open' && b.net_qty > 0) {
+        if (!b.snapshot_at) {
+          markColor = 'text-gray-500';
+          markSub = `<div class="text-[0.5rem] text-gray-600 mt-0.5">(entry)</div>`;
+        } else if (b.snapshot_stale) {
+          markColor = 'text-yellow-400';
+          const snapAge = Math.round((Date.now() - new Date(b.snapshot_at).getTime()) / 60000);
+          markSub = `<div class="text-[0.5rem] text-yellow-600 mt-0.5">STALE ${snapAge}m</div>`;
+        } else {
+          markSub = b.live_bid > 0 ? `<div class="text-[0.55rem] text-gray-500 mt-0.5">bid $${b.live_bid.toFixed(3)} · spd ${(b.live_spread * 100).toFixed(1)}¢</div>` : '';
+        }
+      } else {
+        markSub = b.live_bid > 0 ? `<div class="text-[0.55rem] text-gray-500 mt-0.5">bid $${b.live_bid.toFixed(3)} · spd ${(b.live_spread * 100).toFixed(1)}¢</div>` : '';
+      }
+
+      // MAE badge
+      const maeColor = evt.station_tradeability === 'GREEN' ? 'bg-green-500'
+                      : evt.station_tradeability === 'AMBER' ? 'bg-yellow-500'
+                      : evt.station_tradeability === 'RED' ? 'bg-red-500'
+                      : 'bg-gray-600';
+      const maeText = evt.station_mae !== null && evt.station_mae !== undefined ? `MAE: ${evt.station_mae.toFixed(1)}\u00B0F` : 'MAE: --';
 
       const conditionId = b.condition_id || '';
       let actionBtn = '';
@@ -217,71 +319,63 @@ function renderTable() {
         `;
       }
 
-      const rowHtml = `
+      tbody.innerHTML += `
         <tr class="hover:bg-[rgba(255,255,255,0.02)] transition-colors">
-          <td class="py-3 px-4 align-top">
+          <td class="py-2 px-2 lg:py-3 lg:px-4 align-top">
             <div class="font-bold text-gray-200 text-[0.8rem] truncate max-w-[150px]"><a href="/city/${evt.city_slug}" class="hover:underline">${evt.city_name || 'On-Chain'}</a></div>
             <div class="text-[0.65rem] text-cyan-600 font-semibold mt-0.5 truncate max-w-[150px]" title="${b.label}">${b.label}</div>
           </td>
-          <td class="py-3 px-4 align-top">
+          <td class="py-2 px-2 lg:py-3 lg:px-4 align-top">
             <div class="text-gray-300 text-[0.75rem] font-semibold">$${b.avg_cost.toFixed(3)} at ${eTime}</div>
             <div class="mt-1 flex items-center gap-2">
               ${typeBadge} <span class="font-bold text-[0.65rem]" style="color:var(--cyan)">${qtyStr}</span>
             </div>
           </td>
-          <td class="py-3 px-4 align-top">
+          <td class="py-2 px-2 lg:py-3 lg:px-4 align-top hidden lg:table-cell">
              <span class="tooltip-trigger font-bold text-purple-400 text-[0.7rem] uppercase tracking-wider">${stratDisplay}
                <div class="tooltip-content w-48 bg-black/90 p-2 text-[0.65rem] border border-gray-700 shadow-xl rounded leading-tight font-mono normal-case">
                  <div class="font-bold text-gray-500 mb-1 border-b border-gray-800 pb-1">GOVERNING LOGIC</div>
                  ${logicText}
                </div>
              </span>
-             <div class="text-[0.6rem] text-gray-500 mt-1 flex items-center gap-1" title="Station MAE Anomaly Badge">
-               <span class="w-2 h-2 rounded-full ${evt.status==='open' ? 'bg-green-500' : 'bg-gray-600'} inline-block"></span> MAE: OK
+             <div class="text-[0.6rem] text-gray-500 mt-1 flex items-center gap-1" title="${maeText}">
+               <span class="w-2 h-2 rounded-full ${maeColor} inline-block"></span> ${maeText}
              </div>
           </td>
-          <td class="py-3 px-4 align-top text-right">
-            <div class="text-[0.75rem] text-gray-300 font-bold">$${currentPrice.toFixed(3)}</div>
-            ${b.live_bid > 0 ? `<div class="text-[0.55rem] text-gray-500 mt-0.5">bid $${b.live_bid.toFixed(3)} · spd ${(b.live_spread * 100).toFixed(1)}¢</div>` : ''}
+          <td class="py-2 px-2 lg:py-3 lg:px-4 align-top text-right">
+            <div class="text-[0.75rem] ${markColor} font-bold">$${currentPrice.toFixed(3)}</div>
+            ${markSub}
           </td>
-          <td class="py-3 px-4 align-top text-right font-bold w-24">
+          <td class="py-2 px-2 lg:py-3 lg:px-4 align-top text-right font-bold w-24">
             <div class="text-[0.8rem]">${pnlStr}</div>
           </td>
-          <td class="py-3 px-4 w-48 align-top text-[0.65rem] font-bold tracking-tight whitespace-normal leading-tight h-full bg-[rgba(255,255,255,0.01)] border-l border-[rgba(255,255,255,0.03)] ${statColor}">
+          <td class="py-2 px-2 lg:py-3 lg:px-4 w-48 align-top text-[0.65rem] font-bold tracking-tight whitespace-normal leading-tight h-full bg-[rgba(255,255,255,0.01)] border-l border-[rgba(255,255,255,0.03)] hidden lg:table-cell ${statColor}">
             ${statText}
           </td>
-          <td class="py-3 px-4 align-top text-center w-24">
+          <td class="py-2 px-2 lg:py-3 lg:px-4 align-top text-center w-24">
             <div class="mb-1">${badge(evt.status)}</div>
             ${isWin ? '<div class="text-[0.6rem] text-green-400 font-bold uppercase tracking-wider mt-1.5"><span class="animate-pulse">★</span> WINNER <span class="animate-pulse">★</span></div>' : ''}
             ${isLose ? '<div class="text-[0.6rem] text-red-400 font-bold uppercase tracking-wider mt-1.5">LOSER</div>' : ''}
           </td>
-          <td class="py-3 px-4 align-top text-right w-24 border-l border-[rgba(255,255,255,0.05)]">
+          <td class="py-2 px-2 lg:py-3 lg:px-4 align-top text-right w-24 border-l border-[rgba(255,255,255,0.05)]">
             <div class="mt-0.5">${actionBtn}</div>
           </td>
         </tr>
       `;
-      html += rowHtml;
-    }
-    if (html) {
-      tbody.innerHTML += html;
-      hasDrawn = true;
-    }
   }
 
-  if (hasDrawn) {
-    document.getElementById('events-card').classList.remove('hidden');
-    document.getElementById('empty').classList.add('hidden');
-  } else {
-    document.getElementById('events-card').classList.add('hidden');
-    document.getElementById('empty').classList.remove('hidden');
-  }
+  document.getElementById('events-card').classList.remove('hidden');
+  document.getElementById('empty').classList.add('hidden');
 }
 
+// ── Data Loading ─────────────────────────────────────────────────────────────
 async function loadEvents() {
   const loading = document.getElementById('loading');
+  const refreshBtn = document.getElementById('refresh-btn');
   loading.classList.remove('hidden');
   document.getElementById('events-card').classList.add('hidden');
   document.getElementById('empty').classList.add('hidden');
+  if (refreshBtn) { refreshBtn.disabled = true; refreshBtn.textContent = 'Refreshing...'; }
 
   try {
     const [redRes, posRes] = await Promise.all([
@@ -294,12 +388,12 @@ async function loadEvents() {
     if (red.auto_redeem_enabled !== undefined) {
       document.getElementById('auto-redeem-toggle').checked = red.auto_redeem_enabled;
     }
-    
+
     if (red.exit_engine_last_run) {
       const t = new Date(red.exit_engine_last_run);
       const ago = Math.round((Date.now() - t.getTime()) / 1000);
       const agoStr = ago < 60 ? `${ago}s ago` : ago < 3600 ? `${Math.round(ago/60)}m ago` : `${Math.round(ago/3600)}h ago`;
-      document.getElementById('last-run-banner').textContent = `Exit engine: ${t.toLocaleTimeString()} (${agoStr}) — ${red.positions_monitored || 0} positions monitored`;
+      document.getElementById('last-run-banner').textContent = `Exit engine: ${t.toLocaleTimeString()} (${agoStr}) \u2014 ${red.positions_monitored || 0} positions monitored`;
     } else {
       document.getElementById('last-run-banner').textContent = `Exit engine: not yet run`;
     }
@@ -308,13 +402,12 @@ async function loadEvents() {
       const exp = posReq.positions.reduce((acc, p) => acc + (p.net_qty * p.avg_cost), 0);
       document.getElementById('summary-exposure').innerHTML = '$' + exp.toFixed(2);
       document.getElementById('summary-realized').innerHTML = '$' + (posReq.daily_realized_pnl || 0).toFixed(2);
-      
+
       const unPnl = posReq.total_unrealized_pnl || 0;
       const unPnlColor = unPnl > 0 ? "text-green-400" : unPnl < 0 ? "text-red-400" : "text-gray-400";
       document.getElementById('summary-unrealized').className = `text-xl font-bold font-mono ${unPnlColor}`;
       document.getElementById('summary-unrealized').innerHTML = (unPnl > 0 ? '+$' : unPnl < 0 ? '-$' : '$') + Math.abs(unPnl).toFixed(2);
-      
-      // Simple bankroll approximate using cap = 10 from config default
+
       const risk = (exp / 10.0) * 100;
       document.getElementById('summary-bankroll').innerHTML = `<span class="${risk > 50 ? 'text-red-400' : 'text-gray-300'}">${risk.toFixed(1)}%</span>`;
     }
@@ -326,8 +419,8 @@ async function loadEvents() {
     }
 
     RAW_DATA = red.events;
-    
-    // Count stats
+
+    // Count auto vs manual
     let aCnt = 0; let mCnt = 0;
     RAW_DATA.forEach(e => {
         if (e.status !== 'open') return;
@@ -343,12 +436,16 @@ async function loadEvents() {
     renderTable();
     loading.classList.add('hidden');
   } catch (e) {
-    loading.innerHTML = 'SYSTEM ERROR: ' + e.message;
+    loading.innerHTML = '<div class="text-red-400 text-sm font-mono">SYSTEM ERROR: ' + e.message + '</div>';
+  } finally {
+    if (refreshBtn) { refreshBtn.disabled = false; refreshBtn.textContent = 'Refresh Positions \u21BB'; }
   }
 }
 
+// ── Action Handlers ──────────────────────────────────────────────────────────
 async function sweepAll(btn) {
   if (!confirm('Sweep all unredeemed winning risk balances?')) return;
+  _actionInProgress = true;
   btn.disabled = true;
   const oldText = btn.textContent;
   btn.textContent = 'SWEEPING...';
@@ -365,6 +462,8 @@ async function sweepAll(btn) {
   } catch(e) {
       btn.textContent = 'ERROR';
       setTimeout(() => { btn.disabled = false; btn.textContent = oldText; }, 3000);
+  } finally {
+    _actionInProgress = false;
   }
 }
 
@@ -375,6 +474,7 @@ async function toggleAutoRedeem(enabled) {
 }
 
 async function redeemByCondition(conditionId, btn) {
+  _actionInProgress = true;
   btn.disabled = true;
   const origText = btn.textContent;
   btn.textContent = '...';
@@ -391,11 +491,14 @@ async function redeemByCondition(conditionId, btn) {
   } catch (e) {
     btn.textContent = origText;
     btn.disabled = false;
+  } finally {
+    _actionInProgress = false;
   }
 }
 
 async function marketSell(conditionId, qty, citySlug, bucketId, btn) {
   if (!confirm(`SELL ${qty.toFixed(1)} shares at best bid? This cannot be undone.`)) return;
+  _actionInProgress = true;
   btn.disabled = true;
   const origText = btn.textContent;
   btn.textContent = '...';
@@ -421,6 +524,8 @@ async function marketSell(conditionId, qty, citySlug, bucketId, btn) {
     alert('Network error: ' + e.message);
     btn.textContent = origText;
     btn.disabled = false;
+  } finally {
+    _actionInProgress = false;
   }
 }
 

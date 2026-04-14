@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Body
@@ -42,6 +42,7 @@ from backend.storage.repos import (
     get_event,
     get_latest_forecast,
     get_latest_market_snapshot,
+    get_latest_market_snapshots_bulk,
     get_latest_metar,
     get_latest_model_snapshot,
     get_latest_signals,
@@ -656,12 +657,20 @@ async def get_positions():
     async with get_session() as sess:
         positions = await get_all_positions(sess)
         daily_pnl = await get_daily_realized_pnl(sess, today)
+        # Bulk-fetch live market prices for all open positions
+        bucket_ids = [p.bucket_id for p in positions]
+        snap_map = await get_latest_market_snapshots_bulk(sess, bucket_ids)
 
     result = []
+    live_total_pnl = 0.0
     for p in positions:
         async with get_session() as sess:
             from backend.storage.models import Bucket
             b = await sess.get(Bucket, p.bucket_id)
+        snap = snap_map.get(p.bucket_id)
+        live_price = (snap.yes_mid if snap and snap.yes_mid else None) or p.last_mkt_price or p.avg_cost
+        live_pnl = p.net_qty * (live_price - p.avg_cost) if p.net_qty > 0 else 0.0
+        live_total_pnl += live_pnl
         result.append({
             "bucket_id": p.bucket_id,
             "label": b.label if b else None,
@@ -669,7 +678,8 @@ async def get_positions():
             "net_qty": p.net_qty,
             "avg_cost": p.avg_cost,
             "last_mkt_price": p.last_mkt_price,
-            "unrealized_pnl": p.unrealized_pnl,
+            "live_price": live_price,
+            "unrealized_pnl": round(live_pnl, 4),
             "realized_pnl": p.realized_pnl,
             "updated_at": p.updated_at.isoformat() if hasattr(p.updated_at, 'isoformat') else p.updated_at,
         })
@@ -677,7 +687,7 @@ async def get_positions():
     return {
         "positions": result,
         "daily_realized_pnl": round(daily_pnl, 4),
-        "total_unrealized_pnl": round(sum(p.unrealized_pnl for p in positions), 4),
+        "total_unrealized_pnl": round(live_total_pnl, 4),
     }
 
 
@@ -956,6 +966,17 @@ async def redemptions_list():
                 except Exception:
                     determined_map[cid] = None
 
+    # ── Bulk-fetch market snapshots & station calibrations (avoid N+1) ──
+    all_bucket_ids = [b.id for evt in events for b in evt.buckets if b.condition_id]
+    async with get_session() as sess:
+        snap_map = await get_latest_market_snapshots_bulk(sess, all_bucket_ids)
+        from backend.storage.repos import get_all_station_calibrations
+        all_cals = await get_all_station_calibrations(sess)
+    cal_by_slug = {c.city_slug: c for c in all_cals}
+
+    now_utc = datetime.now(timezone.utc)
+    STALE_THRESHOLD = timedelta(minutes=5)
+
     rows = []
     for evt in events:
         async with get_session() as sess:
@@ -966,7 +987,7 @@ async def redemptions_list():
                 if not bucket.condition_id:
                     continue
                 pos = await get_position(sess, bucket.id)
-                mkt_snap = await get_latest_market_snapshot(sess, bucket.id)
+                mkt_snap = snap_map.get(bucket.id)
                 is_winner = (
                     evt.winning_bucket_idx is not None
                     and bucket.bucket_idx == evt.winning_bucket_idx
@@ -989,6 +1010,16 @@ async def redemptions_list():
                 live_bid = mkt_snap.yes_bid if mkt_snap else 0
                 live_spread = mkt_snap.spread if mkt_snap else 0
 
+                # Snapshot freshness metadata
+                snap_ts = None
+                snap_stale = True  # default stale if no snapshot
+                if mkt_snap and mkt_snap.fetched_at:
+                    snap_dt = mkt_snap.fetched_at
+                    if snap_dt.tzinfo is None:
+                        snap_dt = snap_dt.replace(tzinfo=timezone.utc)
+                    snap_ts = snap_dt.isoformat()
+                    snap_stale = (now_utc - snap_dt) > STALE_THRESHOLD
+
                 buckets_info.append({
                     "bucket_idx": bucket.bucket_idx,
                     "bucket_id": bucket.id,
@@ -1000,6 +1031,8 @@ async def redemptions_list():
                     "live_price": live_price or 0,
                     "live_bid": live_bid or 0,
                     "live_spread": live_spread or 0,
+                    "snapshot_at": snap_ts,
+                    "snapshot_stale": snap_stale,
                     "is_winner": is_winner,
                     "on_chain_determined": determined_map.get(bucket.condition_id),
                     "exit_strategy": exit_strategy,
@@ -1026,6 +1059,9 @@ async def redemptions_list():
         else:
             status = "open"
 
+        # Station calibration data
+        cal = cal_by_slug.get(city.city_slug) if city else None
+
         rows.append({
             "event_id": evt.id,
             "city_name": city.display_name if city else "?",
@@ -1037,6 +1073,9 @@ async def redemptions_list():
             "redeemed_at": evt.redeemed_at.isoformat() if evt.redeemed_at else None,
             "winning_bucket_idx": evt.winning_bucket_idx,
             "buckets": buckets_info,
+            "station_mae": round(cal.mae_f, 1) if cal and cal.mae_f is not None else None,
+            "station_bias": round(cal.bias_f, 1) if cal and cal.bias_f is not None else None,
+            "station_tradeability": cal.tradeability if cal else None,
         })
 
     # ── Fetch on-chain positions from Polymarket data API (catches manual trades) ──

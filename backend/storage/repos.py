@@ -651,6 +651,32 @@ async def get_latest_market_snapshot(
     return result.scalar_one_or_none()
 
 
+async def get_latest_market_snapshots_bulk(
+    session: AsyncSession, bucket_ids: list[int]
+) -> dict[int, MarketSnapshot]:
+    """Fetch the most recent MarketSnapshot for each bucket_id in one query."""
+    if not bucket_ids:
+        return {}
+    # Subquery: latest fetched_at per bucket
+    sub = (
+        select(
+            MarketSnapshot.bucket_id,
+            func.max(MarketSnapshot.fetched_at).label("max_ts"),
+        )
+        .where(MarketSnapshot.bucket_id.in_(bucket_ids))
+        .group_by(MarketSnapshot.bucket_id)
+        .subquery()
+    )
+    result = await session.execute(
+        select(MarketSnapshot).join(
+            sub,
+            (MarketSnapshot.bucket_id == sub.c.bucket_id)
+            & (MarketSnapshot.fetched_at == sub.c.max_ts),
+        )
+    )
+    return {s.bucket_id: s for s in result.scalars().all()}
+
+
 async def get_market_snapshots_for_bucket(
     session: AsyncSession,
     bucket_id: int,
