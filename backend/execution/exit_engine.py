@@ -5,14 +5,17 @@ Interval: 300 seconds (5 min)
 4-level cascade:
     1. EMERGENCY: METAR obs contradicts bucket by >= 3°F (Market sell)
     2. URGENT: Model consensus shifted to different bucket (Limit sell bid - 1c)
-    3. PROFIT: Quick Flip! Position is at entry + 5c (Limit sell at bid)
-    4. EXPIRY: 30 min before market close (Sell at bid - 10c)
+       — debounced: requires CONSENSUS_DEBOUNCE_RUNS consecutive shifts
+       — spread-guarded: suppressed when spread > URGENT_EXIT_MAX_SPREAD
+    3. PROFIT: Quick Flip! Position is at entry + QUICK_FLIP_TARGET (Limit sell at bid)
+    4. EXPIRY: 30 min before market close (Sell at bid - EXPIRY_DISCOUNT)
 """
 from __future__ import annotations
 
 import logging
 from typing import Optional
 
+from backend.config import Config
 from backend.storage.db import get_session
 from backend.storage.repos import get_all_positions, get_open_orders, get_city_by_slug
 from backend.engine.signal_engine import run_signal_engine, BucketSignal
@@ -23,6 +26,24 @@ log = logging.getLogger(__name__)
 
 # Polymarket taker fee roughly 2%
 FEE_RATE = 0.02
+
+# Module-level consensus history for debouncing URGENT exits.
+# Maps event_id → list of last N consensus bucket_ids (one entry per exit engine run).
+_consensus_history: dict[int, list[int]] = {}
+
+
+def _stable_consensus(event_id: int, held_bucket_id: int) -> int | None:
+    """Return the consensus bucket_id only if the last N runs consistently
+    agree on a DIFFERENT bucket than the held one. Returns None if still noisy."""
+    hist = _consensus_history.get(event_id, [])
+    n = Config.CONSENSUS_DEBOUNCE_RUNS
+    if len(hist) < n:
+        return None  # not enough data to be confident
+    recent = hist[-n:]
+    # All recent runs must agree on the same bucket, AND it must differ from held
+    if all(b == recent[0] for b in recent) and recent[0] != held_bucket_id:
+        return recent[0]  # stable shift confirmed
+    return None  # noisy or still matches held — suppress URGENT
 
 
 async def _run_exit_cascade_for_position(
@@ -68,15 +89,24 @@ async def _run_exit_cascade_for_position(
             log.warning("exit: EMERGENCY %s - deep miss (obs=%.1f < bucket=%.1f)", signal.city_slug, obs_high, signal.low_f)
             return {"level": "EMERGENCY", "price": bid, "reason": "deep_miss"}
             
-    # ── 2. URGENT ──
-    # Model consensus shifted to different bucket, we are holding a non-consensus bucket
+    # ── 2. URGENT ── (debounced + spread-guarded)
+    # Model consensus shifted to different bucket, we are holding a non-consensus bucket.
+    # Only triggers after CONSENSUS_DEBOUNCE_RUNS consecutive confirmations AND
+    # only when the bid-ask spread is within acceptable bounds.
     if consensus_bucket_id and pos.bucket_id != consensus_bucket_id:
-        log.info("exit: URGENT %s - consensus shifted to bucket_id=%s. Exiting holding.", signal.city_slug, consensus_bucket_id)
-        return {"level": "URGENT", "price": max(0.01, bid - 0.01), "reason": "consensus_shifted"}
+        spread = signal.spread or 0.0
+        if spread > Config.URGENT_EXIT_MAX_SPREAD:
+            log.warning(
+                "exit: URGENT suppressed %s — spread %.3f > threshold %.3f (consensus→%s)",
+                signal.city_slug, spread, Config.URGENT_EXIT_MAX_SPREAD, consensus_bucket_id,
+            )
+        else:
+            log.info("exit: URGENT %s - consensus shifted to bucket_id=%s. Exiting holding.", signal.city_slug, consensus_bucket_id)
+            return {"level": "URGENT", "price": max(0.01, bid - 0.01), "reason": "consensus_shifted"}
         
     # ── 3. PROFIT (Quick Flip) ──
-    # Buy at entry, full exit at entry + 0.05
-    target_price = pos.avg_cost + 0.05
+    # Buy at entry, full exit at entry + configurable target
+    target_price = pos.avg_cost + Config.QUICK_FLIP_TARGET
     if bid >= target_price:
         log.info("exit: PROFIT QuickFlip %s! (entry=%.3f, bid=%.3f, net_pnl_share=%.3f)", signal.city_slug, pos.avg_cost, bid, net_pnl_per_share)
         return {"level": "PROFIT", "price": bid, "reason": "quick_flip"}
@@ -85,7 +115,7 @@ async def _run_exit_cascade_for_position(
     # 30 min before market close (7:30 PM local for daily high markets)
     if now_local.hour == 19 and now_local.minute >= 30:
         log.info("exit: EXPIRY %s - 30 min to close. Dumping remaining.", signal.city_slug)
-        return {"level": "EXPIRY", "price": max(0.01, bid - 0.10), "reason": "market_close"}
+        return {"level": "EXPIRY", "price": max(0.01, bid - Config.EXPIRY_DISCOUNT), "reason": "market_close"}
         
     return None
 
@@ -116,20 +146,28 @@ async def run_exit_engine() -> None:
         if s.event_id not in event_consensus or s.model_prob > event_consensus[s.event_id].model_prob:
             event_consensus[s.event_id] = s
 
+    # Update consensus history for debouncing (one entry per run per event)
+    for event_id, sig in event_consensus.items():
+        hist = _consensus_history.setdefault(event_id, [])
+        hist.append(sig.bucket_id)
+        if len(hist) > 10:
+            hist.pop(0)  # cap memory growth
+
     exits_triggered = 0
-    
+
     for pos in active_positions:
         if pos.bucket_id in pending_sell_buckets:
             continue
-            
+
         signal = sig_map.get(pos.bucket_id)
         if not signal:
             continue
-            
-        consensus_sig = event_consensus.get(signal.event_id)
-        consensus_bucket_id = consensus_sig.bucket_id if consensus_sig else None
-        
-        cascade = await _run_exit_cascade_for_position(pos, signal, consensus_bucket_id)
+
+        # Use debounced consensus — only fires if last N runs consistently agree
+        # on a different bucket than the held position.
+        stable_consensus_id = _stable_consensus(signal.event_id, pos.bucket_id)
+
+        cascade = await _run_exit_cascade_for_position(pos, signal, stable_consensus_id)
         if cascade:
             exits_triggered += 1
             sell_price = round(cascade["price"], 3)
@@ -148,6 +186,19 @@ async def run_exit_engine() -> None:
                 )
                 await sess.commit()
 
+            # ── Telegram notification ──
+            try:
+                from backend.notifications.telegram import notify_exit_triggered
+                await notify_exit_triggered(
+                    city_slug=signal.city_slug,
+                    level=cascade["level"],
+                    reason=cascade["reason"],
+                    price=sell_price,
+                    shares=pos.net_qty,
+                )
+            except Exception:
+                log.debug("Telegram exit notification failed (non-critical)", exc_info=True)
+
             await execute_signal(
                 signal=signal,
                 bankroll=0.0, # Not used for sells
@@ -160,14 +211,15 @@ async def run_exit_engine() -> None:
             )
         else:
             # Save active monitoring status
-            target_price = pos.avg_cost + 0.05
+            target_price = pos.avg_cost + Config.QUICK_FLIP_TARGET
             bid = signal.yes_bid or 0.0
+            flip_cents = Config.QUICK_FLIP_TARGET * 100
             async with get_session() as sess:
                 from sqlalchemy import update
                 import backend.storage.models as m
                 await sess.execute(
                     update(m.Position).where(m.Position.bucket_id == pos.bucket_id)
-                    .values(current_exit_status=f"Monitoring: await +5¢ Quick-Flip (target ${target_price:.2f}, bid ${bid:.2f}) or Shift")
+                    .values(current_exit_status=f"Monitoring: await +{flip_cents:.0f}¢ Quick-Flip (target ${target_price:.2f}, bid ${bid:.2f}) or Shift")
                 )
                 await sess.commit()
             

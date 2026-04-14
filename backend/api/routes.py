@@ -966,6 +966,7 @@ async def redemptions_list():
                 if not bucket.condition_id:
                     continue
                 pos = await get_position(sess, bucket.id)
+                mkt_snap = await get_latest_market_snapshot(sess, bucket.id)
                 is_winner = (
                     evt.winning_bucket_idx is not None
                     and bucket.bucket_idx == evt.winning_bucket_idx
@@ -979,21 +980,30 @@ async def redemptions_list():
                             "type": "default",
                             "cut_loss_temp_high": bucket.high_f + 1.0 if bucket.high_f is not None else None,
                             "cut_loss_temp_low": bucket.low_f - 3.0 if bucket.low_f is not None else None,
-                            "take_profit_price": round(pos.avg_cost + 0.05, 3),
+                            "take_profit_price": round(pos.avg_cost + Config.QUICK_FLIP_TARGET, 3),
                             "expiry_time": "19:30 Local",
                         }
 
+                # Live market prices from latest CLOB snapshot
+                live_price = mkt_snap.yes_mid if mkt_snap else (pos.last_mkt_price if pos else 0)
+                live_bid = mkt_snap.yes_bid if mkt_snap else 0
+                live_spread = mkt_snap.spread if mkt_snap else 0
+
                 buckets_info.append({
                     "bucket_idx": bucket.bucket_idx,
+                    "bucket_id": bucket.id,
                     "label": bucket.label,
                     "condition_id": bucket.condition_id,
                     "net_qty": pos.net_qty if pos else 0,
                     "avg_cost": pos.avg_cost if pos else 0,
                     "last_mkt_price": pos.last_mkt_price if pos else 0,
+                    "live_price": live_price or 0,
+                    "live_bid": live_bid or 0,
+                    "live_spread": live_spread or 0,
                     "is_winner": is_winner,
                     "on_chain_determined": determined_map.get(bucket.condition_id),
                     "exit_strategy": exit_strategy,
-                    # New Position Tracking Metadata
+                    # Position Tracking Metadata
                     "entry_type": pos.entry_type if pos else None,
                     "strategy": pos.strategy if pos else None,
                     "governing_exit_conditions": pos.governing_exit_conditions if pos else None,
@@ -1127,13 +1137,19 @@ async def redemptions_list():
         except Exception as e:
             log.warning("redemptions: failed to fetch on-chain positions: %s", e)
 
-    # Fetch Auto Redeem Status
+    # Fetch Auto Redeem Status + Exit Engine Heartbeat
     async with get_session() as sess:
-        from backend.storage.repos import get_arming_state
+        from backend.storage.repos import get_arming_state, get_heartbeat
         arming = await get_arming_state(sess)
         auto_redeem_enabled = arming.auto_redeem_enabled if arming else False
+        hb = await get_heartbeat(sess, "run_exit_engine")
 
-    return {"events": rows, "auto_redeem_enabled": auto_redeem_enabled}
+    return {
+        "events": rows,
+        "auto_redeem_enabled": auto_redeem_enabled,
+        "exit_engine_last_run": hb.last_run_at.isoformat() if hb and hb.last_run_at else None,
+        "positions_monitored": len([r for r in rows if r["status"] == "open" and any(b["net_qty"] > 0 for b in r["buckets"])]),
+    }
 
 
 @router.get("/api/redeem-diag")
@@ -1591,7 +1607,7 @@ async def get_orderbook(city_slug: str, bucket_idx: int, date_et: str | None = N
 
 class ManualTradeRequest(BaseModel):
     city_slug: str
-    bucket_idx: int
+    bucket_idx: Optional[int] = None  # required when bucket_id is absent
     bucket_id: Optional[int] = None  # canonical PK — when present, bypasses date guessing
     side: str  # "buy_yes" | "buy_no" | "sell_yes" | "sell_no"
     qty: Optional[float] = None  # None = auto-size
@@ -1609,6 +1625,9 @@ async def manual_trade(
     from backend.execution.trader import execute_signal
     from backend.ingestion.polymarket_clob import get_clob
     from backend.tz_utils import city_local_now, city_local_tomorrow
+
+    if body.bucket_id is None and body.bucket_idx is None:
+        raise HTTPException(status_code=400, detail="Either bucket_id or bucket_idx is required")
 
     async with get_session() as sess:
         city = await _get_city_or_404(sess, body.city_slug)
@@ -1808,6 +1827,10 @@ class ConfigUpdate(BaseModel):
     kelly_fraction: Optional[float] = None
     max_entry_price: Optional[float] = None
     max_spread: Optional[float] = None
+    quick_flip_target: Optional[float] = None
+    urgent_exit_max_spread: Optional[float] = None
+    consensus_debounce_runs: Optional[int] = None
+    expiry_discount: Optional[float] = None
 
 
 @router.post("/config")
@@ -1849,6 +1872,30 @@ async def update_config(body: ConfigUpdate, actor: str = Depends(require_admin))
             raise HTTPException(status_code=400, detail="max_spread must be in [0.005, 0.20]")
         Config.MAX_SPREAD = body.max_spread
         updates["max_spread"] = body.max_spread
+
+    if body.quick_flip_target is not None:
+        if not (0.03 <= body.quick_flip_target <= 0.20):
+            raise HTTPException(status_code=400, detail="quick_flip_target must be in [0.03, 0.20]")
+        Config.QUICK_FLIP_TARGET = body.quick_flip_target
+        updates["quick_flip_target"] = body.quick_flip_target
+
+    if body.urgent_exit_max_spread is not None:
+        if not (0.01 <= body.urgent_exit_max_spread <= 0.15):
+            raise HTTPException(status_code=400, detail="urgent_exit_max_spread must be in [0.01, 0.15]")
+        Config.URGENT_EXIT_MAX_SPREAD = body.urgent_exit_max_spread
+        updates["urgent_exit_max_spread"] = body.urgent_exit_max_spread
+
+    if body.consensus_debounce_runs is not None:
+        if not (1 <= body.consensus_debounce_runs <= 5):
+            raise HTTPException(status_code=400, detail="consensus_debounce_runs must be in [1, 5]")
+        Config.CONSENSUS_DEBOUNCE_RUNS = body.consensus_debounce_runs
+        updates["consensus_debounce_runs"] = body.consensus_debounce_runs
+
+    if body.expiry_discount is not None:
+        if not (0.01 <= body.expiry_discount <= 0.20):
+            raise HTTPException(status_code=400, detail="expiry_discount must be in [0.01, 0.20]")
+        Config.EXPIRY_DISCOUNT = body.expiry_discount
+        updates["expiry_discount"] = body.expiry_discount
 
     async with get_session() as sess:
         await append_audit(sess, actor=actor, action="config_updated", payload=updates)

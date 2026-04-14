@@ -172,7 +172,7 @@ function renderTable() {
       const isLose = evt.winning_bucket_idx !== null && !isWin;
       const qtyStr = b.net_qty > 0 ? `${b.net_qty.toFixed(0)} sh` : '-';
       
-      const currentPrice = b.is_winner ? 1.0 : (evt.winning_bucket_idx !== null ? 0.0 : (b.last_mkt_price > 0 ? b.last_mkt_price : b.avg_cost));
+      const currentPrice = b.is_winner ? 1.0 : (evt.winning_bucket_idx !== null ? 0.0 : (b.live_price > 0 ? b.live_price : (b.last_mkt_price > 0 ? b.last_mkt_price : b.avg_cost)));
       const pnl = (currentPrice - b.avg_cost) * b.net_qty;
       const pnlPct = b.avg_cost > 0 ? ((currentPrice / b.avg_cost) - 1) * 100 : 0;
       
@@ -210,8 +210,8 @@ function renderTable() {
       } else if (evt.status === 'open') {
         actionBtn = `
            <div class="flex flex-col gap-1 hidden lg:flex">
-             <button onclick="marketSell('${conditionId}', ${b.net_qty}, this)" class="px-2 py-[2px] rounded text-[0.6rem] font-bold border border-red-500/50 text-red-400 hover:bg-red-900/30 w-full">QUICK EXIT</button>
-             <button class="px-2 py-[2px] rounded text-[0.6rem] font-bold border border-yellow-500/50 text-yellow-500 hover:bg-yellow-900/30 w-full cursor-not-allowed">LADDER</button>
+             <button onclick="marketSell('${conditionId}', ${b.net_qty}, '${evt.city_slug}', ${b.bucket_id || 0}, this)" class="px-2 py-[2px] rounded text-[0.6rem] font-bold border border-red-500/50 text-red-400 hover:bg-red-900/30 w-full">QUICK EXIT</button>
+             <button class="px-2 py-[2px] rounded text-[0.6rem] font-bold border border-yellow-500/50 text-yellow-500 hover:bg-yellow-900/30 w-full cursor-not-allowed" title="Coming soon: multi-level ladder sell at incremental price tiers">LADDER</button>
            </div>
            <button class="lg:hidden px-2 py-1 border border-gray-600 rounded text-[0.6rem]">...</button>
         `;
@@ -242,6 +242,7 @@ function renderTable() {
           </td>
           <td class="py-3 px-4 align-top text-right">
             <div class="text-[0.75rem] text-gray-300 font-bold">$${currentPrice.toFixed(3)}</div>
+            ${b.live_bid > 0 ? `<div class="text-[0.55rem] text-gray-500 mt-0.5">bid $${b.live_bid.toFixed(3)} · spd ${(b.live_spread * 100).toFixed(1)}¢</div>` : ''}
           </td>
           <td class="py-3 px-4 align-top text-right font-bold w-24">
             <div class="text-[0.8rem]">${pnlStr}</div>
@@ -294,7 +295,14 @@ async function loadEvents() {
       document.getElementById('auto-redeem-toggle').checked = red.auto_redeem_enabled;
     }
     
-    document.getElementById('last-run-banner').textContent = `Last update: ${new Date().toLocaleTimeString()}`;
+    if (red.exit_engine_last_run) {
+      const t = new Date(red.exit_engine_last_run);
+      const ago = Math.round((Date.now() - t.getTime()) / 1000);
+      const agoStr = ago < 60 ? `${ago}s ago` : ago < 3600 ? `${Math.round(ago/60)}m ago` : `${Math.round(ago/3600)}h ago`;
+      document.getElementById('last-run-banner').textContent = `Exit engine: ${t.toLocaleTimeString()} (${agoStr}) — ${red.positions_monitored || 0} positions monitored`;
+    } else {
+      document.getElementById('last-run-banner').textContent = `Exit engine: not yet run`;
+    }
 
     if (posReq && posReq.positions) {
       const exp = posReq.positions.reduce((acc, p) => acc + (p.net_qty * p.avg_cost), 0);
@@ -386,8 +394,34 @@ async function redeemByCondition(conditionId, btn) {
   }
 }
 
-async function marketSell(conditionId, qty) {
-  alert('Execute market dump ladder. Must implement specific integration logic on backend router.');
+async function marketSell(conditionId, qty, citySlug, bucketId, btn) {
+  if (!confirm(`SELL ${qty.toFixed(1)} shares at best bid? This cannot be undone.`)) return;
+  btn.disabled = true;
+  const origText = btn.textContent;
+  btn.textContent = '...';
+  try {
+    const data = await apiCall('/trade', 'POST', {
+      city_slug: citySlug,
+      bucket_id: bucketId,
+      side: 'sell_yes',
+      qty: qty,
+      order_type: 'limit',
+    });
+    if (data && (data.status === 'filled' || data.status === 'order_placed')) {
+      btn.textContent = 'SOLD';
+      btn.classList.remove('border-red-500/50', 'text-red-400');
+      btn.classList.add('border-green-500/50', 'text-green-400');
+      setTimeout(loadEvents, 2000);
+    } else {
+      alert('Sell error: ' + (data?.error || data?.detail || JSON.stringify(data)));
+      btn.textContent = origText;
+      btn.disabled = false;
+    }
+  } catch (e) {
+    alert('Network error: ' + e.message);
+    btn.textContent = origText;
+    btn.disabled = false;
+  }
 }
 
 loadEvents();

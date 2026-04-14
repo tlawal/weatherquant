@@ -1118,6 +1118,14 @@ async def get_all_heartbeats(session: AsyncSession) -> list[WorkerHeartbeat]:
     return list(result.scalars().all())
 
 
+async def get_heartbeat(session: AsyncSession, job_name: str) -> WorkerHeartbeat | None:
+    """Get heartbeat for a specific worker job by name."""
+    result = await session.execute(
+        select(WorkerHeartbeat).where(WorkerHeartbeat.job_name == job_name)
+    )
+    return result.scalar_one_or_none()
+
+
 # ─── Resolution / Redemption ─────────────────────────────────────────────────
 
 async def get_unresolved_events_with_positions(session: AsyncSession) -> list[Event]:

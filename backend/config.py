@@ -75,6 +75,17 @@ class Config:
     MAX_SPREAD: float = _float("MAX_SPREAD", 0.04)
     MIN_ORDERBOOK_DEPTH_DOLLARS: float = _float("MIN_ORDERBOOK_DEPTH_DOLLARS", 2000.0)
 
+    # ── Exit Engine ──────────────────────────────────────────────────────────
+    QUICK_FLIP_TARGET: float = _float("QUICK_FLIP_TARGET", 0.05)
+    URGENT_EXIT_MAX_SPREAD: float = _float("URGENT_EXIT_MAX_SPREAD", 0.06)
+    CONSENSUS_DEBOUNCE_RUNS: int = _int("CONSENSUS_DEBOUNCE_RUNS", 2)
+    EXPIRY_DISCOUNT: float = _float("EXPIRY_DISCOUNT", 0.10)
+
+    # ── Telegram Notifications ───────────────────────────────────────────────
+    TELEGRAM_BOT_TOKEN: str = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    TELEGRAM_CHAT_ID: str = os.environ.get("TELEGRAM_CHAT_ID", "")
+    TELEGRAM_ENABLED: bool = _bool("TELEGRAM_ENABLED", default=False)
+
     # ── Trading Window (ET hours) ─────────────────────────────────────────────
     TRADING_WINDOW_CLOSE_ET: int = _int("TRADING_WINDOW_CLOSE_ET", 19)
     TRADING_FORCE_DISABLE_ET: int = _int("TRADING_FORCE_DISABLE_ET", 21)

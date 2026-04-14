@@ -908,6 +908,13 @@ async def strategies_page(request: Request):
         "max_daily_loss": Config.MAX_DAILY_LOSS,
         "max_positions_per_event": Config.MAX_POSITIONS_PER_EVENT,
         "trading_window_close_et": Config.TRADING_WINDOW_CLOSE_ET,
+        # Exit engine params
+        "quick_flip_target": Config.QUICK_FLIP_TARGET,
+        "urgent_exit_max_spread": Config.URGENT_EXIT_MAX_SPREAD,
+        "consensus_debounce_runs": Config.CONSENSUS_DEBOUNCE_RUNS,
+        "expiry_discount": Config.EXPIRY_DISCOUNT,
+        # Telegram
+        "telegram_enabled": Config.TELEGRAM_ENABLED,
     }
 
     return templates.TemplateResponse(

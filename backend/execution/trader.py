@@ -252,7 +252,7 @@ async def execute_signal(
         governing_exit_conditions = json.dumps({
             "cut_temp_high": round(signal.high_f + 1, 1) if signal.high_f is not None else None,
             "cut_temp_low": round(signal.low_f - 3, 1) if signal.low_f is not None else None,
-            "take_profit_price": round(limit_price + 0.05, 3),
+            "take_profit_price": round(limit_price + Config.QUICK_FLIP_TARGET, 3),
             "expiry_time": "19:30 ET"
         })
 
@@ -447,6 +447,20 @@ async def execute_signal(
             )
         result["status"] = "filled"
         result["fill"] = fill_result
+
+        # ── Telegram notification ─────────────────────────────────────────
+        try:
+            from backend.notifications.telegram import notify_trade_filled
+            await notify_trade_filled(
+                city_slug=signal.city_slug,
+                bucket_label=signal.label,
+                side=side,
+                shares=fill_result["qty"],
+                price=fill_result["price"],
+                edge=signal.true_edge,
+            )
+        except Exception:
+            log.debug("Telegram notification failed (non-critical)", exc_info=True)
     else:
         result["status"] = "timeout"
         result["error"] = "fill not confirmed within 30s"
