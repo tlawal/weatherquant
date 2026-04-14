@@ -865,9 +865,67 @@ async def redeem_by_condition(condition_id: str, actor: str = Depends(require_ad
     if "error" in send_resp:
         raise HTTPException(status_code=500, detail=f"TX failed: {send_resp['error']}")
 
+    tx_hash = send_resp.get("result")
+
+    # ── DB cleanup: zero position, realize P&L, mark event redeemed ──
+    try:
+        from sqlalchemy import select as sa_select
+        from backend.storage.models import Bucket, Event
+        from backend.storage.repos import upsert_position
+
+        async with get_session() as sess:
+            bucket = (await sess.execute(
+                sa_select(Bucket).where(Bucket.condition_id == condition_id)
+            )).scalar_one_or_none()
+
+            if bucket:
+                pos = await get_position(sess, bucket.id)
+                if pos and pos.net_qty > 0:
+                    event = await sess.get(Event, bucket.event_id)
+                    is_winner = (
+                        event is not None
+                        and event.winning_bucket_idx is not None
+                        and bucket.bucket_idx == event.winning_bucket_idx
+                    )
+                    redeem_price = 1.0 if is_winner else 0.0
+                    await upsert_position(
+                        sess,
+                        bucket_id=bucket.id,
+                        side="yes",
+                        fill_qty=-pos.net_qty,
+                        fill_price=redeem_price,
+                        last_mkt_price=redeem_price,
+                    )
+
+                # Mark event redeemed if all bucket positions are now closed
+                if bucket.event_id:
+                    event = await sess.get(Event, bucket.event_id)
+                    if event and not event.redeemed_at:
+                        all_buckets = (await sess.execute(
+                            sa_select(Bucket).where(Bucket.event_id == event.id)
+                        )).scalars().all()
+                        all_closed = True
+                        for bkt in all_buckets:
+                            p = await get_position(sess, bkt.id)
+                            if p and p.net_qty > 0:
+                                all_closed = False
+                                break
+                        if all_closed:
+                            event.redeemed_at = datetime.now(timezone.utc)
+                            await sess.commit()
+
+                await append_audit(
+                    sess,
+                    actor=actor,
+                    action="redeem_by_condition",
+                    payload={"condition_id": condition_id, "tx_hash": tx_hash, "amounts": [yes_bal, no_bal]},
+                )
+    except Exception as e:
+        log.warning("redeem_by_condition: DB cleanup failed (tx still succeeded): %s", e)
+
     return {
         "ok": True,
-        "tx_hash": send_resp.get("result"),
+        "tx_hash": tx_hash,
         "sender": sender,
         "condition_id": condition_id,
         "amounts": [yes_bal, no_bal],
