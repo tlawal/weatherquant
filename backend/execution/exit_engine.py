@@ -32,11 +32,11 @@ FEE_RATE = 0.02
 _consensus_history: dict[int, list[int]] = {}
 
 
-def _stable_consensus(event_id: int, held_bucket_id: int) -> int | None:
+def _stable_consensus(event_id: int, held_bucket_id: int, multiplier: int = 1) -> int | None:
     """Return the consensus bucket_id only if the last N runs consistently
     agree on a DIFFERENT bucket than the held one. Returns None if still noisy."""
     hist = _consensus_history.get(event_id, [])
-    n = Config.CONSENSUS_DEBOUNCE_RUNS
+    n = Config.CONSENSUS_DEBOUNCE_RUNS * multiplier
     if len(hist) < n:
         return None  # not enough data to be confident
     recent = hist[-n:]
@@ -47,7 +47,7 @@ def _stable_consensus(event_id: int, held_bucket_id: int) -> int | None:
 
 
 async def _run_exit_cascade_for_position(
-    pos, signal: BucketSignal, consensus_bucket_id: Optional[int]
+    pos, signal: BucketSignal, consensus_bucket_id: Optional[int], consensus_sig: Optional[BucketSignal] = None
 ) -> dict | None:
     """Evaluate the 4-level cascade for a single position."""
     
@@ -89,20 +89,32 @@ async def _run_exit_cascade_for_position(
             log.warning("exit: EMERGENCY %s - deep miss (obs=%.1f < bucket=%.1f)", signal.city_slug, obs_high, signal.low_f)
             return {"level": "EMERGENCY", "price": bid, "reason": "deep_miss"}
             
-    # ── 2. URGENT ── (debounced + spread-guarded)
+    # ── 2. URGENT ── (debounced + spread-guarded + confidence-gated)
     # Model consensus shifted to different bucket, we are holding a non-consensus bucket.
-    # Only triggers after CONSENSUS_DEBOUNCE_RUNS consecutive confirmations AND
-    # only when the bid-ask spread is within acceptable bounds.
-    if consensus_bucket_id and pos.bucket_id != consensus_bucket_id:
+    if consensus_bucket_id and pos.bucket_id != consensus_bucket_id and consensus_sig:
+        age_s = (now_local.astimezone(timezone.utc) - pos.entry_time.astimezone(timezone.utc)).total_seconds() if pos.entry_time else float('inf')
         spread = signal.spread or 0.0
-        if spread > Config.URGENT_EXIT_MAX_SPREAD:
-            log.warning(
-                "exit: URGENT suppressed %s — spread %.3f > threshold %.3f (consensus→%s)",
-                signal.city_slug, spread, Config.URGENT_EXIT_MAX_SPREAD, consensus_bucket_id,
-            )
+        bid_depth = signal.yes_bid_depth
+        held_prob = signal.model_prob
+        cons_prob = consensus_sig.model_prob
+
+        if age_s < Config.URGENT_MIN_POSITION_AGE_SECONDS:
+            log.info("exit: URGENT suppressed %s — position age %ds < %ds", signal.city_slug, int(age_s), Config.URGENT_MIN_POSITION_AGE_SECONDS)
+        elif held_prob >= Config.URGENT_MIN_EXIT_MODEL_PROB and held_prob >= cons_prob * 0.40:
+            log.info("exit: URGENT suppressed %s — probability gate (held=%.2f, cons=%.2f)", signal.city_slug, held_prob, cons_prob)
+        elif bid_depth < Config.URGENT_MIN_BID_DEPTH:
+            log.warning("exit: URGENT suppressed %s — thin bid depth %.1f < %.1f", signal.city_slug, bid_depth, Config.URGENT_MIN_BID_DEPTH)
+        elif spread > Config.URGENT_EXIT_MAX_SPREAD:
+            log.warning("exit: URGENT suppressed %s — spread %.3f > %.3f (consensus→%s)", signal.city_slug, spread, Config.URGENT_EXIT_MAX_SPREAD, consensus_bucket_id)
         else:
+            # Check depth for passive vs aggressive sell
+            if bid_depth < pos.net_qty * 2:
+                sell_price = bid  # Passive limit sell at the bid exactly to not sweep thin books
+            else:
+                sell_price = max(0.01, bid - 0.01)  # Aggressive: bid - 1c
+                
             log.info("exit: URGENT %s - consensus shifted to bucket_id=%s. Exiting holding.", signal.city_slug, consensus_bucket_id)
-            return {"level": "URGENT", "price": max(0.01, bid - 0.01), "reason": "consensus_shifted"}
+            return {"level": "URGENT", "price": sell_price, "reason": "consensus_shifted"}
         
     # ── 3. PROFIT (Quick Flip) ──
     # Buy at entry, full exit at entry + configurable target
@@ -165,9 +177,14 @@ async def run_exit_engine() -> None:
 
         # Use debounced consensus — only fires if last N runs consistently agree
         # on a different bucket than the held position.
-        stable_consensus_id = _stable_consensus(signal.event_id, pos.bucket_id)
+        consensus_sig = event_consensus.get(signal.event_id)
+        multiplier = 1
+        if consensus_sig and abs(consensus_sig.bucket_idx - signal.bucket_idx) == 1:
+            multiplier = Config.URGENT_ADJACENT_DEBOUNCE_MULTIPLIER
 
-        cascade = await _run_exit_cascade_for_position(pos, signal, stable_consensus_id)
+        stable_consensus_id = _stable_consensus(signal.event_id, pos.bucket_id, multiplier)
+
+        cascade = await _run_exit_cascade_for_position(pos, signal, stable_consensus_id, consensus_sig)
         if cascade:
             exits_triggered += 1
             sell_price = round(cascade["price"], 3)

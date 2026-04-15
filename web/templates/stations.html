@@ -67,11 +67,23 @@
 <div x-data="stationData()" x-init="init()" class="space-y-6">
 
   <!-- Loading state -->
-  <template x-if="loading && stations.length === 0">
+  <template x-if="loading && stations.length === 0 && !emptyReason">
     <div class="card p-8 text-center space-y-3">
       <div class="spinner mx-auto"></div>
       <div class="text-sm font-medium" style="color:var(--cyan)" x-text="refreshing ? 'Computing 30-day station calibration... (this happens automatically on first load and daily thereafter)' : 'Loading station data...'"></div>
       <div class="text-[10px]" style="color:var(--text-muted)" x-show="refreshing">This may take a minute. The page will update automatically when complete.</div>
+    </div>
+  </template>
+
+  <!-- Empty state (polling gave up or refresh returned 0) -->
+  <template x-if="emptyReason">
+    <div class="card p-6 text-center space-y-2" style="border:1px solid rgba(234,179,8,0.3)">
+      <div class="text-sm font-semibold" style="color:#FDE047">Calibration table is empty</div>
+      <div class="text-xs" style="color:var(--text-muted)" x-text="emptyReason"></div>
+      <div class="text-[10px] pt-2" style="color:var(--text-muted)">
+        Expand the Diagnostics panel below for details, or press
+        <span style="color:var(--cyan)">REFRESH CALIBRATION NOW</span> to retry.
+      </div>
     </div>
   </template>
 
@@ -244,6 +256,8 @@
       <div>Row count: <span style="color:var(--cyan)" x-text="diag.row_count ?? '—'"></span></div>
       <div>Last updated: <span style="color:var(--cyan)" x-text="diag.last_updated ? new Date(diag.last_updated).toLocaleString() : 'never'"></span></div>
       <div>Refresh in progress: <span style="color:var(--cyan)" x-text="diag.refresh_in_progress ?? '—'"></span></div>
+      <div>Enabled cities: <span style="color:var(--cyan)" x-text="diag.enabled_cities_count ?? '—'"></span></div>
+      <div>Cities with METAR station: <span style="color:var(--cyan)" x-text="diag.cities_with_station_count ?? '—'"></span></div>
       <div x-show="diag.error">Error: <span style="color:#EF4444" x-text="diag.error"></span></div>
     </div>
   </div>
@@ -279,7 +293,9 @@
       countAmber: 0,
       countRed: 0,
       diag: {},
+      emptyReason: '',
       _pollTimer: null,
+      _pollTimeout: null,
 
       maeForModel(s) {
         if (this.activeModel === 'ecmwf') return s.mae_ecmwf_f;
@@ -369,7 +385,11 @@
           try {
             await fetch('/api/station-calibrations/auto-refresh', { method: 'POST' });
           } catch (e) { console.error('Auto-refresh trigger failed:', e); }
-          // Poll every 5s until data appears
+          // Poll every 5s, but give up after 60s with an informative message.
+          const stopPolling = () => {
+            if (this._pollTimer) { clearInterval(this._pollTimer); this._pollTimer = null; }
+            if (this._pollTimeout) { clearTimeout(this._pollTimeout); this._pollTimeout = null; }
+          };
           this._pollTimer = setInterval(async () => {
             try {
               const res = await fetch('/api/station-calibrations');
@@ -381,15 +401,42 @@
                   this.updateMap();
                   this.refreshing = false;
                   this.loading = false;
-                  clearInterval(this._pollTimer);
+                  this.emptyReason = '';
+                  stopPolling();
                   this.fetchDiagnostics();
                 }
               }
             } catch (e) { /* keep polling */ }
           }, 5000);
+          this._pollTimeout = setTimeout(async () => {
+            stopPolling();
+            this.refreshing = false;
+            this.loading = false;
+            await this.fetchDiagnostics();
+            this.emptyReason = this.deriveEmptyReason();
+          }, 60000);
         } else {
           this.loading = false;
         }
+      },
+
+      deriveEmptyReason() {
+        const d = this.diag || {};
+        if (d.error) {
+          return 'Diagnostics query failed: ' + d.error;
+        }
+        const enabled = d.enabled_cities_count;
+        const withStation = d.cities_with_station_count;
+        if (enabled === 0) {
+          return '0 cities are enabled. Enable cities in /cities_admin or via the DB.';
+        }
+        if (withStation === 0) {
+          return `${enabled} cities enabled, but none have a METAR station configured.`;
+        }
+        if (d.refresh_in_progress) {
+          return 'Refresh still running after 60s — give it another minute and reload.';
+        }
+        return `${withStation} of ${enabled} enabled cities have a METAR station, but none produced 30 days of calibration data yet. Likely insufficient METAR/forecast history.`;
       },
 
       async fetchDiagnostics() {

@@ -335,7 +335,6 @@ async def list_cities():
         async with get_session() as sess:
             metar = await get_latest_metar(sess, city.id)
             nws = await get_latest_forecast(sess, city.id, "nws", today_city)
-            wu_d = await get_latest_forecast(sess, city.id, "wu_daily", today_city)
             event = await get_event(sess, city.id, today_city)
 
         result.append({
@@ -347,7 +346,6 @@ async def list_cities():
             "metar_daily_high_f": metar.daily_high_f if metar else None,
             "metar_age_s": _age_seconds(metar.fetched_at) if metar else None,
             "nws_high_f": nws.high_f if nws else None,
-            "wu_daily_high_f": wu_d.high_f if wu_d else None,
             "event_status": event.status if event else None,
             "forecast_quality": event.forecast_quality if event else None,
             "trading_enabled": event.trading_enabled if event else False,
@@ -366,7 +364,6 @@ async def get_city_state(city_slug: str):
         today_city = city_local_date(city)
         metar = await get_latest_metar(sess, city.id)
         nws = await get_latest_forecast(sess, city.id, "nws", today_city)
-        wu_d = await get_latest_forecast(sess, city.id, "wu_daily", today_city)
         wu_h = await get_latest_forecast(sess, city.id, "wu_hourly", today_city)
         wu_hist = await get_latest_forecast(sess, city.id, "wu_history", today_city)
         event = await get_event(sess, city.id, today_city)
@@ -399,11 +396,6 @@ async def get_city_state(city_slug: str):
                 "high_f": nws.high_f if nws else None,
                 "age_s": _age_seconds(nws.fetched_at if nws else None),
                 "error": nws.parse_error if nws else None,
-            },
-            "wu_daily": {
-                "high_f": wu_d.high_f if wu_d else None,
-                "age_s": _age_seconds(wu_d.fetched_at if wu_d else None),
-                "error": wu_d.parse_error if wu_d else None,
             },
             "wu_hourly": {
                 "high_f": wu_h.high_f if wu_h else None,
@@ -1484,10 +1476,8 @@ async def get_city_calibration(city_slug: str):
     return {
         "city_slug": city_slug,
         "bias_nws": cal.bias_nws,
-        "bias_wu_daily": cal.bias_wu_daily,
         "bias_wu_hourly": cal.bias_wu_hourly,
         "weight_nws": cal.weight_nws,
-        "weight_wu_daily": cal.weight_wu_daily,
         "weight_wu_hourly": cal.weight_wu_hourly,
         "n_samples": cal.n_samples,
         "last_realized_high": cal.last_realized_high,
@@ -2087,54 +2077,28 @@ async def station_calibrations_csv():
     )
 
 
-@router.get("/api/station-calibrations/{station_id}")
-async def get_station_calibration_detail(station_id: str):
-    """Single station calibration detail."""
-    from backend.storage.repos import get_station_calibration as _get_cal
-
-    async with get_session() as sess:
-        c = await _get_cal(sess, station_id.upper())
-
-    if not c:
-        raise HTTPException(status_code=404, detail=f"No calibration for {station_id}")
-
-    return {
-        "station_id": c.station_id,
-        "city_slug": c.city_slug,
-        "city_name": c.city_name,
-        "lat": c.lat,
-        "lon": c.lon,
-        "mae_f": c.mae_f,
-        "bias_f": c.bias_f,
-        "rmse_f": c.rmse_f,
-        "n_samples": c.n_samples,
-        "pct_days_traded": c.pct_days_traded,
-        "tradeability": c.tradeability,
-        "best_source": c.best_source,
-        "best_source_mae": c.best_source_mae,
-        "source_mae_json": c.source_mae_json,
-        "mae_ecmwf_f": c.mae_ecmwf_f,
-        "mae_gfs_hrrr_f": c.mae_gfs_hrrr_f,
-        "mae_nws_f": c.mae_nws_f,
-        "winner": c.winner,
-        "updated_at": c.updated_at.isoformat() if c.updated_at else None,
-    }
-
-
 # ─── Station Calibration Diagnostics & Auto-Refresh ─────────────────────────
+#
+# NOTE on route ordering: the `/{station_id}` catch-all GET must be registered
+# LAST in this group. FastAPI matches in registration order, so any sibling
+# path (e.g. `/diagnostics`) registered after `/{station_id}` would be
+# shadowed and return 404. Keep `/{station_id}` at the bottom.
 
 _cal_refresh_in_progress = False
 
 
 @router.get("/api/station-calibrations/diagnostics")
 async def station_calibration_diagnostics():
-    """Debug info: table row count, last updated, refresh status."""
+    """Debug info: table row count, last updated, refresh status, and city counts
+    so the UI can distinguish 'broken' from 'no cities qualify for calibration'."""
     from sqlalchemy import func, select
-    from backend.storage.models import StationCalibration
+    from backend.storage.models import StationCalibration, City
 
     error = None
     row_count = 0
     last_updated = None
+    enabled_cities_count = 0
+    cities_with_station_count = 0
     try:
         async with get_session() as sess:
             count_q = await sess.execute(
@@ -2145,6 +2109,17 @@ async def station_calibration_diagnostics():
                 select(func.max(StationCalibration.updated_at))
             )
             last_updated = last_q.scalar_one_or_none()
+            enabled_q = await sess.execute(
+                select(func.count(City.id)).where(City.enabled == True)  # noqa: E712
+            )
+            enabled_cities_count = enabled_q.scalar_one()
+            with_station_q = await sess.execute(
+                select(func.count(City.id)).where(
+                    City.enabled == True,  # noqa: E712
+                    City.metar_station.isnot(None),
+                )
+            )
+            cities_with_station_count = with_station_q.scalar_one()
     except Exception as e:
         error = str(e)
 
@@ -2153,6 +2128,8 @@ async def station_calibration_diagnostics():
         "row_count": row_count,
         "last_updated": last_updated.isoformat() if last_updated else None,
         "refresh_in_progress": _cal_refresh_in_progress,
+        "enabled_cities_count": enabled_cities_count,
+        "cities_with_station_count": cities_with_station_count,
         "error": error,
     }
 
@@ -2192,6 +2169,42 @@ async def refresh_station_calibrations(actor: str = Depends(require_admin)):
             payload={"stations_updated": count},
         )
     return {"ok": True, "stations_updated": count}
+
+
+# IMPORTANT: keep this `/{station_id}` route LAST in the station-calibrations
+# group. See the comment above `_cal_refresh_in_progress` for the rationale.
+@router.get("/api/station-calibrations/{station_id}")
+async def get_station_calibration_detail(station_id: str):
+    """Single station calibration detail."""
+    from backend.storage.repos import get_station_calibration as _get_cal
+
+    async with get_session() as sess:
+        c = await _get_cal(sess, station_id.upper())
+
+    if not c:
+        raise HTTPException(status_code=404, detail=f"No calibration for {station_id}")
+
+    return {
+        "station_id": c.station_id,
+        "city_slug": c.city_slug,
+        "city_name": c.city_name,
+        "lat": c.lat,
+        "lon": c.lon,
+        "mae_f": c.mae_f,
+        "bias_f": c.bias_f,
+        "rmse_f": c.rmse_f,
+        "n_samples": c.n_samples,
+        "pct_days_traded": c.pct_days_traded,
+        "tradeability": c.tradeability,
+        "best_source": c.best_source,
+        "best_source_mae": c.best_source_mae,
+        "source_mae_json": c.source_mae_json,
+        "mae_ecmwf_f": c.mae_ecmwf_f,
+        "mae_gfs_hrrr_f": c.mae_gfs_hrrr_f,
+        "mae_nws_f": c.mae_nws_f,
+        "winner": c.winner,
+        "updated_at": c.updated_at.isoformat() if c.updated_at else None,
+    }
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────

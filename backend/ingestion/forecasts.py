@@ -1,13 +1,13 @@
 """
-Forecast ingestion — NWS API (15 min) + Weather Underground scraping (60 min).
+Forecast ingestion — NWS API (15 min) + Weather Underground (60 min).
 
-Three sources per city:
+Sources per city:
   1. NWS API daily high (reliable, rate-limited)
-  2. WU daily high scrape (settlement source — must work!)
-  3. WU hourly peak scrape (max of hourly temps for the day)
+  2. WU hourly forecast via weather.com v1 API (max of hourly temps for the day)
+  3. WU history via weather.com v1 API (settlement source for past obs)
 
-WU scraping is the SETTLEMENT SOURCE for Polymarket resolution.
-If WU scraping fails, forecast_quality → degraded and auto-trading stops.
+WU history is the SETTLEMENT SOURCE fallback for Polymarket resolution.
+If WU fails entirely, forecast_quality → degraded and auto-trading stops.
 """
 from __future__ import annotations
 
@@ -15,13 +15,11 @@ import asyncio
 import hashlib
 import json
 import logging
-import re
 from datetime import datetime, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
 
 import aiohttp
-from bs4 import BeautifulSoup
 
 from backend.config import Config
 from backend.tz_utils import active_dates_for_city, city_local_date, city_local_now, city_local_tomorrow
@@ -29,7 +27,6 @@ from backend.storage.db import get_session
 from backend.storage.models import City
 from backend.storage.repos import (
     get_all_cities,
-    get_daily_high_metar,
     get_latest_forecast,
     get_latest_successful_forecast,
     insert_forecast_obs,
@@ -342,14 +339,6 @@ async def _fetch_nws_high(city: City, active_date_str: str) -> Optional[float]:
 
 # ─── WU Scraping ─────────────────────────────────────────────────────────────
 
-def _wu_daily_url(city: City) -> str:
-    return f"{WU_BASE}/weather/{city.metar_station}"
-
-
-def _wu_hourly_url(city: City) -> str:
-    return f"{WU_BASE}/hourly/{city.metar_station}"
-
-
 def wu_history_url(city: City, date_et: str) -> str:
     dt_str = date_et.replace("-", "")
     units = "m" if getattr(city, "unit", "F") == "C" else "e"
@@ -362,7 +351,7 @@ def wu_history_url(city: City, date_et: str) -> str:
 
 
 async def fetch_wu_all() -> None:
-    """Scrape WU daily + hourly for all enabled cities where WU is the settlement source."""
+    """Fetch WU hourly forecast + history for all enabled cities where WU is the settlement source."""
     async with get_session() as sess:
         cities = await get_all_cities(sess, enabled_only=True)
 
@@ -371,26 +360,19 @@ async def fetch_wu_all() -> None:
             log.debug("wu: city %s missing WU config, skipping", city.city_slug)
             continue
 
-        today_local = city_local_date(city)
-
         for date_et in active_dates_for_city(city):
-            is_today = (date_et == today_local)
-
             # Skip WU scraping for cities where WU is NOT the settlement source
             async with get_session() as sess:
                 event = await get_event(sess, city.id, date_et)
             if event and not event.settlement_source_verified:
                 log.debug("wu: %s date=%s settlement_source_verified=False, fetching forecast anyway", city.city_slug, date_et)
 
-            # Rate limit: source-aware per date.
-            # For non-today dates we skip wu_daily (same HTML page), so only
-            # check hourly + history sources for the cooldown.
+            # Rate limit: check wu_hourly + wu_history cooldown.
             async with get_session() as sess:
-                last_daily = await get_latest_successful_forecast(sess, city.id, "wu_daily", date_et) if is_today else None
                 last_hourly = await get_latest_successful_forecast(sess, city.id, "wu_hourly", date_et)
                 last_history = await get_latest_successful_forecast(sess, city.id, "wu_history", date_et)
 
-            check_sources = [last_daily, last_hourly, last_history] if is_today else [last_hourly, last_history]
+            check_sources = [last_hourly, last_history]
             all_succeeded = all(f and f.fetched_at for f in check_sources)
 
             if all_succeeded:
@@ -404,7 +386,7 @@ async def fetch_wu_all() -> None:
                     continue
             else:
                 from backend.storage.repos import get_latest_forecast as _get_latest_any
-                source_names = ["wu_daily", "wu_hourly", "wu_history"] if is_today else ["wu_hourly", "wu_history"]
+                source_names = ["wu_hourly", "wu_history"]
                 async with get_session() as sess:
                     recent_attempts = []
                     for src in source_names:
@@ -422,14 +404,13 @@ async def fetch_wu_all() -> None:
                                   city.city_slug, date_et, newest_attempt_age)
                         continue
 
-                log.info("wu: %s date=%s has failed source(s) [daily=%s hourly=%s history=%s], retrying now",
+                log.info("wu: %s date=%s has failed source(s) [hourly=%s history=%s], retrying now",
                          city.city_slug, date_et,
-                         "ok" if last_daily else ("SKIP" if not is_today else "FAIL"),
                          "ok" if last_hourly else "FAIL",
                          "ok" if last_history else "FAIL")
 
             try:
-                await _scrape_wu_city(city, date_et, skip_daily=not is_today)
+                await _scrape_wu_city(city, date_et)
             except Exception as e:
                 log.exception("wu: Unhandled exception scraping %s date=%s: %s", city.city_slug, date_et, e)
 
@@ -437,7 +418,7 @@ async def fetch_wu_all() -> None:
         await asyncio.sleep(5)
 
 
-async def _scrape_wu_city(city: City, date_et: str, skip_daily: bool = False) -> None:
+async def _scrape_wu_city(city: City, date_et: str) -> None:
     # Fetch station profile for resolution-aware filtering
     from backend.storage.repos import get_station_profile, get_latest_forecast
     valid_minutes = None
@@ -448,20 +429,13 @@ async def _scrape_wu_city(city: City, date_et: str, skip_daily: bool = False) ->
             valid_minutes = json.loads(profile.observation_minutes)
 
     # Isolate each scraper so one failure doesn't block the others
-    daily_high = None
-    if not skip_daily:
-        try:
-            daily_high = await _scrape_wu_daily(city)
-        except Exception as e:
-            log.exception("wu_daily: %s scrape exception: %s", city.city_slug, e)
-
     hourly_peak, peak_hour = None, None
     try:
         hourly_peak, peak_hour = await _fetch_wu_hourly_api(city, date_et)
     except Exception as e:
         log.exception("wu_hourly_api: %s date=%s scrape exception: %s", city.city_slug, date_et, e)
 
-    log.info("wu: %s date=%s fetched — daily=%.1f hourly=%.1f", city.city_slug, date_et, daily_high or 0, hourly_peak or 0)
+    log.info("wu: %s date=%s fetched — hourly=%.1f", city.city_slug, date_et, hourly_peak or 0)
 
     # Smart scheduling for WU History (~35 mins after station observation)
     now_utc = datetime.now(timezone.utc)
@@ -508,52 +482,11 @@ async def _scrape_wu_city(city: City, date_et: str, skip_daily: bool = False) ->
         except Exception:
             obs_time = None
 
-    wu_ok = daily_high is not None or hourly_peak is not None or history_high is not None
+    wu_ok = hourly_peak is not None or history_high is not None
     parse_err = None if wu_ok else "all_wu_sources_failed"
 
     # DB inserts — isolate per source so one failure doesn't block others
     async with get_session() as sess:
-        if not skip_daily:
-            # Floor: wu_daily can't be below any already-known high for today.
-            # The WU daily page transitions to night forecast in late afternoon, causing
-            # the scraper to pick up the overnight low instead of the day's high.
-            # Use history_high + hourly_peak (already fetched above) as primary floors
-            # since they come from APIs rather than HTML scraping. METAR provides
-            # an additional floor if available.
-            try:
-                metar_high = await get_daily_high_metar(sess, city.id, date_et, city_tz=getattr(city, "tz", "America/New_York"))
-            except Exception as e:
-                log.exception("wu: %s failed get_daily_high_metar: %s", city.city_slug, e)
-                metar_high = None
-
-            floor = max(
-                (v for v in [metar_high, history_high, hourly_peak] if v is not None),
-                default=None,
-            )
-            if daily_high is not None and floor is not None and daily_high < floor:
-                log.info(
-                    "wu_daily: %s scraped %.1f < floor %.1f "
-                    "(metar=%.1f, history=%.1f, hourly=%.1f) — using floor",
-                    city.city_slug, daily_high, floor,
-                    metar_high or 0, history_high or 0, hourly_peak or 0,
-                )
-                daily_high = floor
-
-            try:
-                raw = json.dumps({"high_f": daily_high, "source": "wu_daily"})
-                await insert_forecast_obs(
-                    sess,
-                    city_id=city.id,
-                    source="wu_daily",
-                    date_et=date_et,
-                    high_f=daily_high,
-                    raw_payload_hash=hashlib.md5(raw.encode()).hexdigest(),
-                    raw_json=raw,
-                    parse_error=None if daily_high is not None else "parse_failed",
-                )
-            except Exception as e:
-                log.exception("wu: %s failed to insert wu_daily: %s", city.city_slug, e)
-
         try:
             raw = json.dumps({"high_f": hourly_peak, "peak_hour": peak_hour, "source": "wu_hourly"})
             await insert_forecast_obs(
@@ -602,95 +535,12 @@ async def _scrape_wu_city(city: City, date_et: str, skip_daily: bool = False) ->
             log.exception("wu: %s failed to update heartbeat: %s", city.city_slug, e)
 
     log.info(
-        "wu: %s daily=%.1f hourly=%.1f history=%.1f quality=%s",
+        "wu: %s hourly=%.1f history=%.1f quality=%s",
         city.city_slug,
-        daily_high or 0,
         hourly_peak or 0,
         history_high or 0,
         "ok" if wu_ok else "degraded",
     )
-
-
-_WU_DASH_TOKENS = {"--", "—", "–", "-"}
-
-
-async def _scrape_wu_daily(city: City) -> Optional[float]:
-    """Scrape WU station page for daily high forecast.
-
-    Returns None when WU's "Today" block is not showing a numeric high.
-    This happens nightly between the day's "peak locked in" window and the
-    next morning's forecast publication — WU renders the high as `--`. In
-    that state we must not guess: a wrong value silently poisons the model.
-    """
-    url = _wu_daily_url(city)
-    html = await _fetch_html(url)
-    if not html:
-        return None
-
-    soup = BeautifulSoup(html, "lxml")
-
-    # Strategy 1 — trusted structured selectors. These are the only places
-    # we accept as "today's forecast high". If the element is present but
-    # shows a dash glyph, WU is explicitly telling us "not published" and
-    # we bail out immediately.
-    selectors = [
-        ("span", {"data-test": "daily-temperature-high"}),
-        ("div", {"class": re.compile(r"todaySummaryTemp|today-summary", re.I)}),
-    ]
-    for tag, attrs in selectors:
-        el = soup.find(tag, attrs)
-        if el is None:
-            continue
-        raw = el.get_text(strip=True)
-        if raw in _WU_DASH_TOKENS or raw.replace("°", "").replace("F", "").strip() in _WU_DASH_TOKENS:
-            log.info("wu_daily: %s — WU shows '%s' (not published), skipping", city.city_slug, raw)
-            return None
-        temp = _extract_temp_from_element(el)
-        if temp is not None:
-            return temp
-
-    text = soup.get_text(" ", strip=True)
-
-    # Strategy 2 — if the body text has "today" or "high" right next to a
-    # dash glyph, WU is clearly in the rollover window. Treat as no-data.
-    if re.search(r"(?:today|high)[^A-Za-z0-9]{0,20}(?:--|—|–)", text, re.I):
-        log.info("wu_daily: %s — '--' near today/high in body, skipping", city.city_slug)
-        return None
-
-    # Strategy 3 — scoped phrase match. Require the `°F` literal marker,
-    # stay within one clause (no crossing a period or newline), and
-    # explicitly reject false-positive prefixes like "record high" /
-    # "previous high" / "all-time high" which describe historical records,
-    # not today's forecast.
-    _BAD_PREFIXES = ("record", "previous", "all-time", "all time", "historic", "historical")
-    for match in re.finditer(
-        r"\b(?:high|today)\b[^.\n]{0,30}?(\d{2,3})\s*°\s*F\b",
-        text,
-        re.I,
-    ):
-        start = match.start()
-        prefix = text[max(0, start - 20):start].lower()
-        if any(bad in prefix for bad in _BAD_PREFIXES):
-            continue
-        try:
-            val = float(match.group(1))
-            if 0 <= val <= 130:
-                return val
-        except ValueError:
-            continue
-
-    # No last-resort max-sweep. If the structured selectors and the scoped
-    # regex both fail, return None and let the model fall back to NWS +
-    # WU hourly + HRRR/NBM. Silence is safer than garbage — the old
-    # "max of all 2–3 digit numbers on page" fallback was the exact
-    # mechanism producing wildly wrong wu_daily values during the WU
-    # rollover window.
-    log.warning(
-        "wu_daily: %s — no high found at %s (likely WU rollover window)",
-        city.city_slug,
-        url,
-    )
-    return None
 
 
 async def _fetch_wu_hourly_api(city: City, date_et: str | None = None) -> tuple[Optional[float], Optional[str]]:
@@ -755,49 +605,6 @@ async def _fetch_wu_hourly_api(city: City, date_et: str | None = None) -> tuple[
                 await asyncio.sleep(2)
 
     return None, None
-
-
-def _extract_temp_from_element(el) -> Optional[float]:
-    """Extract a temperature float from a BS4 element's text."""
-    if el is None:
-        return None
-    text = el.get_text(strip=True)
-    # Match "87", "87°", "87°F", "87 °F"
-    m = re.match(r"^(M?-?\d{1,3})(?:\s*°?\s*[FC]?)?\s*$", text)
-    if m:
-        try:
-            val = float(m.group(1))
-            if -60 <= val <= 140:
-                return val
-        except ValueError:
-            pass
-    return None
-
-
-async def _fetch_html(url: str, retries: int = 3) -> Optional[str]:
-    """Fetch HTML page with browser-like headers and retry logic."""
-    for attempt in range(retries):
-        try:
-            async with aiohttp.ClientSession(
-                timeout=_TIMEOUT, headers=_WU_HEADERS
-            ) as http:
-                async with http.get(url, allow_redirects=True) as resp:
-                    if resp.status == 429:
-                        wait = 10 * (attempt + 1)
-                        log.warning("wu: rate limited (429), waiting %ds", wait)
-                        await asyncio.sleep(wait)
-                        continue
-                    if resp.status != 200:
-                        log.error("wu: HTTP %d from %s", resp.status, url)
-                        return None
-                    return await resp.text()
-        except asyncio.TimeoutError:
-            log.warning("wu: timeout for %s (attempt %d/%d)", url[:60], attempt + 1, retries)
-            if attempt < retries - 1:
-                await asyncio.sleep(3 * (attempt + 1))
-        except Exception as e:
-            log.error("wu: error for %s: %s", url[:60], e)
-    return None
 
 
 def _at_valid_minute(obs: dict, valid_minutes: list[int], tolerance: int = 1) -> bool:

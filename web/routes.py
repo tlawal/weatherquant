@@ -321,7 +321,6 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
             obs_minutes_list = json.loads(station_profile.observation_minutes)
             resolution_high_f = await get_resolution_high_metar(sess, city.id, target_date_et, obs_minutes_list, city_tz=getattr(city, "tz", "America/New_York"))
 
-        wu_d = await get_latest_successful_forecast(sess, city.id, "wu_daily", target_date_et)
         wu_h = await get_latest_successful_forecast(sess, city.id, "wu_hourly", target_date_et)
         wu_history = await get_latest_successful_forecast(sess, city.id, "wu_history", target_date_et)
         hrrr_fc = await get_latest_successful_forecast(sess, city.id, "hrrr", target_date_et)
@@ -497,7 +496,7 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
             wu_peak_time = wu_hourly_raw.get("peak_hour")
             # Fused forecast high for adaptive remaining-rise cap
             _fc_vals = [
-                s.high_f for s in [primary_fc, wu_d, wu_h]
+                s.high_f for s in [primary_fc, wu_h]
                 if s is not None and getattr(s, "high_f", None) is not None
             ]
             _adaptive_fc_high = sum(_fc_vals) / len(_fc_vals) if _fc_vals else None
@@ -659,12 +658,6 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                     "age_s": _age(primary_fc.fetched_at if primary_fc else None),
                     "collected_at": _fmt_time_et(primary_fc.fetched_at if primary_fc else None),
                     "url": f"https://api.weather.gov/gridpoints/{city.nws_office}/{city.nws_grid_x},{city.nws_grid_y}/forecast" if city.is_us else f"https://api.open-meteo.com/v1/forecast?latitude={city.lat}&longitude={city.lon}&hourly=temperature_2m&forecast_days=1"
-                },
-                "wu_daily": {
-                    "high_f": max((v for v in [wu_d.high_f if wu_d else None, obs_high_f] if v is not None), default=None),
-                    "age_s": _age(wu_d.fetched_at if wu_d else None),
-                    "collected_at": _fmt_time_et(wu_d.fetched_at if wu_d else None),
-                    "url": f"https://www.wunderground.com/weather/{city.metar_station}" if city.metar_station else None
                 },
                 "wu_hourly": {
                     "high_f": wu_h.high_f if wu_h else None,

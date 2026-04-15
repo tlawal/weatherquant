@@ -69,7 +69,7 @@ async def _get_daily_highs(
 async def _get_forecast_highs(
     city_id: int,
     dates: list[str],
-    sources: list[str] = ("nws", "wu_daily", "wu_hourly", "hrrr", "nbm"),
+    sources: list[str] = ("nws", "wu_hourly", "hrrr", "nbm"),
 ) -> dict[str, dict[str, float]]:
     """For each date, get each source's latest forecast high_f.
 
@@ -187,7 +187,7 @@ async def compute_station_calibration(city: City) -> Optional[dict]:
         return None
 
     # Fetch per-source forecast highs (includes ecmwf_ifs for model comparison)
-    sources = ["nws", "wu_daily", "wu_hourly", "hrrr", "nbm", "ecmwf_ifs"]
+    sources = ["nws", "wu_hourly", "hrrr", "nbm", "ecmwf_ifs"]
     fc_highs = await _get_forecast_highs(city.id, dates, sources)
 
     # Fetch model mu (fused ensemble)

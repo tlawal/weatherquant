@@ -1,10 +1,9 @@
 """
 Temperature forecast fusion + METAR intraday adjustment.
 
-Fuses six forecast sources using calibrated weights:
+Fuses five forecast sources using calibrated weights:
   - NWS API (US only)
-  - WU daily scrape
-  - WU hourly peak scrape
+  - WU hourly peak (via weather.com v1 API)
   - HRRR (via Open-Meteo, GFS+HRRR blend, US CONUS)
   - NBM (via Open-Meteo, NCEP National Blend of Models, US CONUS)
   - ECMWF IFS (via Open-Meteo, global 9–25 km, top-2 global NWP model)
@@ -310,7 +309,6 @@ def _compute_lock_probs(
 
 def compute_model(
     nws_high: Optional[float],
-    wu_daily_high: Optional[float],
     wu_hourly_peak: Optional[float],
     daily_high_metar: Optional[float],
     current_temp_f: Optional[float],
@@ -332,12 +330,11 @@ def compute_model(
 
     Args:
         nws_high: NWS API daily high forecast (units match 'unit')
-        wu_daily_high: WU daily high scrape
-        wu_hourly_peak: max(WU hourly temps)
+        wu_hourly_peak: max(WU hourly temps) from weather.com v1 API
         daily_high_metar: max observed temp today
         current_temp_f: latest METAR temperature
-        calibration: dict with bias_nws, bias_wu_daily, bias_wu_hourly,
-                     weight_nws, weight_wu_daily, weight_wu_hourly
+        calibration: dict with bias_nws, bias_wu_hourly,
+                     weight_nws, weight_wu_hourly
         buckets: list of (lo, hi) bucket boundaries
         forecast_quality: "ok" | "degraded"
         unit: "F" or "C"
@@ -345,63 +342,21 @@ def compute_model(
     Returns:
         ModelResult or None if insufficient data.
     """
-    # Apply calibration bias corrections
+    # Apply calibration bias corrections.
+    # Historical CalibrationParams rows may still carry baked-in weight_wu_daily
+    # values; we ignore them and renormalize defaults across the remaining sources.
     cal = calibration or {}
     bias_nws = cal.get("bias_nws", 0.0)
-    bias_wud = cal.get("bias_wu_daily", 0.0)
     bias_wuh = cal.get("bias_wu_hourly", 0.0)
-    w_nws = cal.get("weight_nws", 1/3)
-    w_wud = cal.get("weight_wu_daily", 1/3)
-    w_wuh = cal.get("weight_wu_hourly", 1/3)
-    # WU Nighttime Rollover Protection + physics floor.
-    # (1) Classic rollover: past 18:00 local AND WU's "Today" block
-    #     disagrees with METAR's observed high by more than unit_dev — WU
-    #     has likely rolled over and is showing tomorrow's forecast.
-    # (2) Physics floor (any hour): a forecast daily high cannot be
-    #     meaningfully below today's already-observed high. If WU says
-    #     55°F and METAR has already clocked 78.8°F, WU is wrong
-    #     (scraper glitch, stale page, rollover-window garbage).
-    # (3) Physics floor vs current temp (any hour): a forecast daily
-    #     high cannot be meaningfully below the current live reading.
+    w_nws = cal.get("weight_nws", 0.5)
+    w_wuh = cal.get("weight_wu_hourly", 0.5)
     local_tz = ZoneInfo(city_tz)
     now_local = datetime.now(local_tz)
     hour_local = now_local.hour
-    if wu_daily_high is not None:
-        drop_reason: Optional[str] = None
-        if hour_local >= 18 and daily_high_metar is not None:
-            unit_dev = 6.0 if unit == "C" else 10.0
-            if abs(wu_daily_high - daily_high_metar) > unit_dev:
-                drop_reason = f"nighttime rollover (metar={daily_high_metar:.1f})"
-        # Physics floor: WU forecast high should not sit below the
-        # already-observed METAR high (minus a small rounding slack).
-        if drop_reason is None and daily_high_metar is not None:
-            slack = 2.0 if unit == "C" else 4.0
-            if wu_daily_high < daily_high_metar - slack:
-                drop_reason = (
-                    f"below observed METAR high "
-                    f"(metar={daily_high_metar:.1f}, slack={slack})"
-                )
-        # Physics floor: WU forecast high should not sit below the
-        # current live reading either.
-        if drop_reason is None and current_temp_f is not None:
-            slack_cur = 2.0 if unit == "C" else 4.0
-            if wu_daily_high < current_temp_f - slack_cur:
-                drop_reason = (
-                    f"below current temp (current={current_temp_f:.1f})"
-                )
-        if drop_reason:
-            log.warning(
-                "model: dropping wu_daily_high (%.1f) — %s",
-                wu_daily_high,
-                drop_reason,
-            )
-            wu_daily_high = None
 
     calibrated = {}
     if nws_high is not None:
         calibrated["nws"] = (nws_high + bias_nws, w_nws)
-    if wu_daily_high is not None:
-        calibrated["wu_daily"] = (wu_daily_high + bias_wud, w_wud)
     if wu_hourly_peak is not None:
         calibrated["wu_hourly"] = (wu_hourly_peak + bias_wuh, w_wuh)
     if hrrr_high is not None:
@@ -608,7 +563,6 @@ def compute_model(
 
     inputs = {
         "nws_high": nws_high,
-        "wu_daily_high": wu_daily_high,
         "wu_hourly_peak": wu_hourly_peak,
         "hrrr_high": hrrr_high,
         "nbm_high": nbm_high,

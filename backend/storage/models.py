@@ -204,7 +204,7 @@ class StationProfile(Base):
 
 
 class ForecastObs(Base):
-    """Single forecast reading from one source (nws / wu_daily / wu_hourly)."""
+    """Single forecast reading from one source (nws / wu_hourly / wu_history / hrrr / nbm / ecmwf_ifs / open_meteo)."""
     __tablename__ = "forecast_obs"
     __table_args__ = (
         Index("ix_forecast_city_source_ts", "city_id", "source", "fetched_at"),
@@ -212,7 +212,7 @@ class ForecastObs(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     city_id: Mapped[int] = mapped_column(Integer, ForeignKey("cities.id"), nullable=False)
-    # "nws" | "wu_daily" | "wu_hourly"
+    # "nws" | "wu_hourly" | "wu_history" | "hrrr" | "nbm" | "ecmwf_ifs" | "open_meteo"
     source: Mapped[str] = mapped_column(String(16), nullable=False)
     date_et: Mapped[str] = mapped_column(String(10), nullable=False)  # YYYY-MM-DD
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
@@ -258,7 +258,7 @@ class ModelSnapshot(Base):
     sigma: Mapped[float] = mapped_column(Float, nullable=False)
     # JSON array of bucket probabilities (float), length == number of buckets
     probs_json: Mapped[str] = mapped_column(Text, nullable=False)
-    # JSON dict of inputs used: nws_val, wu_daily_val, wu_hourly_val,
+    # JSON dict of inputs used: nws_val, wu_hourly_val,
     #   metar_high_so_far, w_metar, projected_high, mu_forecast, spread, etc.
     inputs_json: Mapped[Optional[str]] = mapped_column(Text)
     forecast_quality: Mapped[str] = mapped_column(String(16), default="ok")
@@ -319,7 +319,7 @@ class Signal(Base):
     raw_edge: Mapped[float] = mapped_column(Float, nullable=False)
     exec_cost: Mapped[float] = mapped_column(Float, nullable=False)
     true_edge: Mapped[float] = mapped_column(Float, nullable=False)
-    # JSON with full reasoning: mu, sigma, nws_val, wu_daily, spread, depth, etc.
+    # JSON with full reasoning: mu, sigma, nws_val, spread, depth, etc.
     reason_json: Mapped[Optional[str]] = mapped_column(Text)
     # gate failures preventing execution (JSON list of strings)
     gate_failures_json: Mapped[Optional[str]] = mapped_column(Text)
@@ -453,12 +453,15 @@ class CalibrationParams(Base):
     )
     # Additive bias corrections (degrees F)
     bias_nws: Mapped[float] = mapped_column(Float, default=0.0)
+    # DEPRECATED: wu_daily ensemble source was removed (HTML scrape unreliable).
+    # Column retained to avoid destructive migration; no code reads/writes it.
     bias_wu_daily: Mapped[float] = mapped_column(Float, default=0.0)
     bias_wu_hourly: Mapped[float] = mapped_column(Float, default=0.0)
     bias_hrrr: Mapped[Optional[float]] = mapped_column(Float, default=0.0)
     bias_nbm: Mapped[Optional[float]] = mapped_column(Float, default=0.0)
     # Ensemble weights (must sum to 1.0)
     weight_nws: Mapped[float] = mapped_column(Float, default=0.333)
+    # DEPRECATED: wu_daily ensemble source was removed.
     weight_wu_daily: Mapped[float] = mapped_column(Float, default=0.334)
     weight_wu_hourly: Mapped[float] = mapped_column(Float, default=0.333)
     weight_hrrr: Mapped[Optional[float]] = mapped_column(Float, default=0.5)

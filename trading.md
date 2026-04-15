@@ -163,7 +163,7 @@ For each strategy, write: inefficiency, detection logic, entry rules, exit rules
 
 **Strategy 12: Settlement Source (WU) Arbitrage**
 - **Inefficiency:** The settlement source is Weather Underground daily high, not NWS or METAR. WU can differ from NWS/METAR by 1–3°F due to station selection, rounding, and timing. If the bot knows which WU station settles and its historical bias, it can trade accordingly.
-- **Detection:** When `wu_daily_forecast` differs from `nws_forecast` by ≥2°F, and the market is priced to the NWS forecast.
+- **Detection:** When `wu_history` settlement high differs from `nws_forecast` by ≥2°F, and the market is priced to the NWS forecast.
 - **Entry:** Buy the bucket aligned with the WU forecast at current ask.
 - **Exit:** Hold to resolution (settlement source advantage).
 - **Sizing:** 1.5x Kelly (information edge on settlement mechanics).
@@ -545,7 +545,7 @@ def detect_ensemble_divergence(city_id, forecasts):
     hrrr = forecasts.get("hrrr", {}).get("temperature_f")
     gfs = forecasts.get("gfs", {}).get("temperature_f")
     nws = forecasts.get("nws", {}).get("temperature_f")
-    wu = forecasts.get("wu_daily", {}).get("temperature_f")
+    wu = forecasts.get("wu_hourly", {}).get("temperature_f")
 
     available = [v for v in [hrrr, gfs, nws, wu] if v is not None]
     if len(available) < 3:

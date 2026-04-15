@@ -214,15 +214,6 @@ def test_get_city_state_handles_naive_forecast_timestamps(tmp_path, monkeypatch)
                     ),
                     ForecastObs(
                         city_id=city.id,
-                        source="wu_daily",
-                        date_et=date_et,
-                        fetched_at=fetched_at,
-                        high_f=72.0,
-                        raw_payload_hash="wu_daily",
-                        raw_json="{}",
-                    ),
-                    ForecastObs(
-                        city_id=city.id,
                         source="wu_hourly",
                         date_et=date_et,
                         fetched_at=fetched_at,
@@ -240,7 +231,6 @@ def test_get_city_state_handles_naive_forecast_timestamps(tmp_path, monkeypatch)
     assert response["city_slug"] == city.city_slug
     assert response["metar_age_s"] is not None
     assert response["forecasts"]["nws"]["age_s"] is not None
-    assert response["forecasts"]["wu_daily"]["age_s"] is not None
     assert response["forecasts"]["wu_hourly"]["age_s"] is not None
     assert response["daily_high_f"] == 70.0
 
@@ -286,15 +276,6 @@ def test_get_city_state_exposes_hotter_bucket_fields(tmp_path, monkeypatch):
                         fetched_at=fetched_at,
                         high_f=72.0,
                         raw_payload_hash="nws",
-                        raw_json="{}",
-                    ),
-                    ForecastObs(
-                        city_id=city.id,
-                        source="wu_daily",
-                        date_et=date_et,
-                        fetched_at=fetched_at,
-                        high_f=69.8,
-                        raw_payload_hash="wu_daily",
                         raw_json="{}",
                     ),
                     ForecastObs(

@@ -195,7 +195,6 @@ async def build_market_context_input(city: City, date_et: str) -> MarketContextI
 
         primary_source = "nws" if city.is_us else "open_meteo"
         primary_fc = await get_latest_forecast(sess, city.id, primary_source, date_et)
-        wu_daily = await get_latest_successful_forecast(sess, city.id, "wu_daily", date_et)
         wu_hourly = await get_latest_successful_forecast(sess, city.id, "wu_hourly", date_et)
         wu_history = await get_latest_successful_forecast(sess, city.id, "wu_history", date_et)
         hrrr_fc = await get_latest_successful_forecast(sess, city.id, "hrrr", date_et)
@@ -289,7 +288,6 @@ async def build_market_context_input(city: City, date_et: str) -> MarketContextI
     metar_age_s = _age_seconds(latest_obs.observed_at) if (latest_obs and target_is_today) else None
     sources = _summarize_sources(
         primary_fc=primary_fc,
-        wu_daily=wu_daily,
         wu_hourly=wu_hourly,
         hrrr_fc=hrrr_fc,
         nbm_fc=nbm_fc,
@@ -315,7 +313,6 @@ async def build_market_context_input(city: City, date_et: str) -> MarketContextI
     availability = {
         "latest_observations": bool(obs_rows),
         "nws_available": primary_fc is not None if city.is_us else False,
-        "wu_daily_available": wu_daily is not None,
         "wu_hourly_available": wu_hourly is not None,
         "wu_history_available": wu_history is not None,
         "adaptive_available": bool(adaptive_inputs),
@@ -393,7 +390,6 @@ async def build_market_context_input(city: City, date_et: str) -> MarketContextI
             "last_settled_errors_f": last_settled["errors"] if last_settled else {},
             "calibration_biases_f": {
                 "nws": _round_float(calibration.bias_nws) if calibration else 0.0,
-                "wu_daily": _round_float(calibration.bias_wu_daily) if calibration else 0.0,
                 "wu_hourly": _round_float(calibration.bias_wu_hourly) if calibration else 0.0,
             },
             "climatology_status": "not_ingested",
@@ -450,9 +446,11 @@ async def _generate_market_context_output(
                 ),
                 tools=TOOL_DEFINITIONS,
             )
+            llm_selection = MarketContextSelection(**payload.get("final_selection", {}))
+            _validate_authoritative_selection(llm_selection, context.final_selection)
             parsed = MarketContextOutput(
                 sections=payload.get("sections", {}),
-                final_selection=context.final_selection,
+                final_selection=llm_selection,
             )
             return parsed
         except Exception as exc:
@@ -589,7 +587,7 @@ async def _compute_recent_error_summary(
 ) -> tuple[dict[str, Any], Optional[dict[str, Any]]]:
     city_tz = getattr(city, "tz", "America/New_York")
     summary: dict[str, Any] = {}
-    errors_by_source: dict[str, list[float]] = {"nws": [], "wu_daily": [], "wu_hourly": []}
+    errors_by_source: dict[str, list[float]] = {"nws": [], "wu_hourly": []}
     last_settled: Optional[dict[str, Any]] = None
 
     for event in recent_events:
@@ -605,7 +603,7 @@ async def _compute_recent_error_summary(
             continue
 
         date_errors: dict[str, float] = {}
-        for source in ("nws", "wu_daily", "wu_hourly"):
+        for source in ("nws", "wu_hourly"):
             fc = await get_latest_successful_forecast(sess, city.id, source, event.date_et)
             if fc and fc.high_f is not None:
                 err = round(fc.high_f - realized_high, 1)
@@ -703,7 +701,6 @@ async def _resolve_realized_high(
 def _summarize_sources(
     *,
     primary_fc,
-    wu_daily,
     wu_hourly,
     hrrr_fc=None,
     nbm_fc=None,
@@ -729,7 +726,6 @@ def _summarize_sources(
 
     return {
         "primary": _build_source("primary", primary_fc, 3600),
-        "wu_daily": _build_source("wu_daily", wu_daily, Config.WU_STALE_TTL_SECONDS),
         "wu_hourly": _build_source("wu_hourly", wu_hourly, Config.WU_STALE_TTL_SECONDS),
         "hrrr": _build_source("hrrr", hrrr_fc, 3600),
         "nbm": _build_source("nbm", nbm_fc, 3600),
@@ -773,7 +769,7 @@ def _select_bucket(
     gap = max(0.0, selected_prob - runner_up_prob)
     source_stale_count = sum(
         1
-        for key in ("primary", "wu_daily", "wu_hourly")
+        for key in ("primary", "wu_hourly")
         if source_summary.get(key, {}).get("stale")
     )
 
@@ -984,7 +980,7 @@ def _consensus_spread_points(bucket_rows: list[dict[str, Any]]) -> Optional[floa
 
 def _best_recent_source(error_summary: dict[str, Any]) -> Optional[dict[str, Any]]:
     ranked = []
-    for source in ("nws", "wu_daily", "wu_hourly"):
+    for source in ("nws", "wu_hourly"):
         item = error_summary.get(source) or {}
         mae = item.get("avg_abs_error_f")
         samples = item.get("samples", 0)

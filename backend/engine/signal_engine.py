@@ -71,6 +71,7 @@ class BucketSignal:
     yes_mid: Optional[float]
     spread: Optional[float]
     yes_ask_depth: float
+    yes_bid_depth: float
     reason: dict = field(default_factory=dict)
     gate_failures: list[str] = field(default_factory=list)
     actionable: bool = False
@@ -189,7 +190,6 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         daily_high = await get_daily_high_metar(sess, city.id, today_et, city_tz=getattr(city, "tz", "America/New_York"))
 
         nws_obs = await get_latest_forecast(sess, city.id, "nws", today_et)
-        wu_daily_obs = await get_latest_forecast(sess, city.id, "wu_daily", today_et)
         wu_hourly_obs = await get_latest_forecast(sess, city.id, "wu_hourly", today_et)
         wu_history_obs = await get_latest_forecast(sess, city.id, "wu_history", today_et)
         hrrr_obs = await get_latest_forecast(sess, city.id, "hrrr", today_et)
@@ -276,12 +276,10 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
     if cal:
         cal_dict = {
             "bias_nws": cal.bias_nws,
-            "bias_wu_daily": cal.bias_wu_daily,
             "bias_wu_hourly": cal.bias_wu_hourly,
             "bias_hrrr": v if (v := getattr(cal, "bias_hrrr", None)) is not None else 0.0,
             "bias_nbm": v if (v := getattr(cal, "bias_nbm", None)) is not None else 0.0,
             "weight_nws": cal.weight_nws,
-            "weight_wu_daily": cal.weight_wu_daily,
             "weight_wu_hourly": cal.weight_wu_hourly,
             "weight_hrrr": v if (v := getattr(cal, "weight_hrrr", None)) is not None else 0.5,
             "weight_nbm": v if (v := getattr(cal, "weight_nbm", None)) is not None else 0.2,
@@ -340,7 +338,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
 
         # Fused forecast high for adaptive remaining-rise cap
         _fc_highs = [
-            s.high_f for s in [nws_obs, wu_daily_obs, wu_hourly_obs]
+            s.high_f for s in [nws_obs, wu_hourly_obs]
             if s is not None and s.high_f is not None
         ]
         adaptive_forecast_high = sum(_fc_highs) / len(_fc_highs) if _fc_highs else None
@@ -389,7 +387,6 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
     # Run temperature model
     model = compute_model(
         nws_high=nws_obs.high_f if nws_obs else None,
-        wu_daily_high=wu_daily_obs.high_f if wu_daily_obs else None,
         wu_hourly_peak=wu_hourly_obs.high_f if wu_hourly_obs else None,
         hrrr_high=hrrr_obs.high_f if hrrr_obs else None,
         nbm_high=nbm_obs.high_f if nbm_obs else None,
@@ -489,6 +486,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
                     yes_mid=None,
                     spread=None,
                     yes_ask_depth=0.0,
+                    yes_bid_depth=0.0,
                     gate_failures=["no_market_data"],
                     prob_new_high=prob_hotter_bucket,
                     prob_hotter_bucket=prob_hotter_bucket,
@@ -504,6 +502,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
 
             mkt_prob = mkt_snap.yes_mid
             ask_depth = mkt_snap.yes_ask_depth or 0.0
+            bid_depth = mkt_snap.yes_bid_depth or 0.0
             spread = mkt_snap.spread
             exec_cost = _execution_cost(spread, ask_depth)
 
@@ -571,6 +570,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
                 yes_mid=float(round(mkt_prob, 4)),
                 spread=spread,
                 yes_ask_depth=ask_depth,
+                yes_bid_depth=bid_depth,
                 reason=reason,
                 actionable=actionable,
                 prob_new_high=prob_hotter_bucket,

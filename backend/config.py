@@ -80,6 +80,11 @@ class Config:
     URGENT_EXIT_MAX_SPREAD: float = _float("URGENT_EXIT_MAX_SPREAD", 0.06)
     CONSENSUS_DEBOUNCE_RUNS: int = _int("CONSENSUS_DEBOUNCE_RUNS", 2)
     EXPIRY_DISCOUNT: float = _float("EXPIRY_DISCOUNT", 0.10)
+    # URGENT exit anti-whipsaw gates (added April 2026 after Atlanta shakeout)
+    URGENT_MIN_POSITION_AGE_SECONDS: int = _int("URGENT_MIN_POSITION_AGE_SECONDS", 3600)
+    URGENT_MIN_EXIT_MODEL_PROB: float = _float("URGENT_MIN_EXIT_MODEL_PROB", 0.15)
+    URGENT_MIN_BID_DEPTH: float = _float("URGENT_MIN_BID_DEPTH", 5.0)
+    URGENT_ADJACENT_DEBOUNCE_MULTIPLIER: int = _int("URGENT_ADJACENT_DEBOUNCE_MULTIPLIER", 2)
 
     # ── Telegram Notifications ───────────────────────────────────────────────
     TELEGRAM_BOT_TOKEN: str = os.environ.get("TELEGRAM_BOT_TOKEN", "")

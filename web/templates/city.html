@@ -278,7 +278,7 @@
         <span>Distribution Model Mean</span>
       </div>
       <div class="space-y-1.5 opacity-90">
-        <p class="py-1 italic mb-2">Projected true daily high from a weighted ensemble of 5 forecast sources (NWS, WU Daily, WU Hourly, HRRR, NCEP NBM) blended with live METAR observations via time-of-day weighting. Uncertainty (sigma) adjusts dynamically for cloud cover, humidity, wind, pressure, and precipitation. A Kalman filter + regression adaptive engine refines the projection as observations accumulate.</p>
+        <p class="py-1 italic mb-2">Projected true daily high from a weighted ensemble of 4 forecast sources (NWS, WU Hourly, HRRR, NCEP NBM) blended with live METAR observations via time-of-day weighting. Uncertainty (sigma) adjusts dynamically for cloud cover, humidity, wind, pressure, and precipitation. A Kalman filter + regression adaptive engine refines the projection as observations accumulate.</p>
         <div class="flex justify-between"><span style="color:var(--text-muted)">Sigma Spread</span><span class="mono">{% if model and model.sigma %}{{ "%.2f"|format(model.sigma) }}{% else %}—{% endif %}</span></div>
         <div class="flex justify-between"><span style="color:var(--text-muted)">Est. Peak Timing</span><span class="mono">{% if adaptive_info and adaptive_info.composite_peak_timing %}{{ adaptive_info.composite_peak_timing }}{% elif avg_peak_timing %}{{ avg_peak_timing }}{% else %}—{% endif %}</span></div>
         {% if adaptive_info and adaptive_info.peak_timing_source %}
@@ -340,30 +340,6 @@
              {% endif %}
              {% if forecasts.primary.url %}
              <a href="{{ forecasts.primary.url }}" target="_blank" rel="noopener" class="text-[10px] flex items-center gap-1 hover:underline transition-colors" style="color:var(--cyan)">↗ View API Source</a>
-             {% endif %}
-        </div>
-      </div>
-
-      <!-- WU Daily Forecast -->
-      <div class="group relative flex justify-between items-center cursor-pointer hover:bg-white/5 p-1 -mx-1 rounded transition-colors" x-data="{ showMeta: false }">
-        <div class="flex items-center gap-1.5" @click="showMeta = !showMeta" @click.outside="showMeta = false">
-          <span style="color:var(--text-muted)">WU Forecast</span>
-          <button class="hover:text-cyan-400 opacity-30 group-hover:opacity-100 transition-all">ⓘ</button>
-        </div>
-        <span class="mono font-medium {% if forecasts.wu_daily.high_f is not none %}text-white{% else %}text-red-400{% endif %}">
-          {% if forecasts.wu_daily.high_f is not none %}{{ "%.1f"|format(forecasts.wu_daily.high_f) }}°{{ city.unit|default('F') }}{% else %}—{% endif %}
-        </span>
-        <!-- Popover -->
-        <div x-show="showMeta" x-cloak
-             x-transition:enter="transition ease-out duration-100" class="absolute left-0 right-0 top-6 w-auto p-3 rounded-xl shadow-2xl z-50 border font-medium normal-case flex flex-col items-start text-left sm:right-auto sm:w-64"
-             style="background:var(--bg-panel); border-color:var(--border);">
-             <div class="font-bold mb-1 pb-1 border-b w-full" style="color:var(--cyan); border-color:var(--border)">Weather Underground Daily</div>
-             <p class="opacity-80 mb-2 mt-1 italic text-[9px]">The daily highest temperature prediction directly from WU's frontend.</p>
-             {% if forecasts.wu_daily.collected_at %}
-             <p class="opacity-60 text-[9px] mb-2">Collected {{ forecasts.wu_daily.collected_at }}</p>
-             {% endif %}
-             {% if forecasts.wu_daily.url %}
-             <a href="{{ forecasts.wu_daily.url }}" target="_blank" rel="noopener" class="text-[10px] flex items-center gap-1 hover:underline transition-colors" style="color:var(--cyan)">↗ View WU Location Page</a>
              {% endif %}
         </div>
       </div>

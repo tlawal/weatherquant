@@ -272,10 +272,9 @@
             <th class="text-left py-2 text-xs uppercase tracking-widest" style="color:var(--text-muted)">Order Type</th>
           </tr>
         </thead>
-        <tbody>
 
           <!-- EMERGENCY -->
-          <template x-data="{ open: false }">
+          <tbody x-data="{ open: false }">
             <tr style="border-bottom:1px solid var(--border)">
               <td class="py-2.5">
                 <button @click="open = !open" class="text-xs font-bold px-2 py-0.5 rounded cursor-pointer select-none transition-opacity hover:opacity-80"
@@ -298,10 +297,10 @@
                 In either case the bucket is essentially worth $0. Sells at best available bid to salvage any remaining value.
               </td>
             </tr>
-          </template>
+          </tbody>
 
           <!-- URGENT -->
-          <template x-data="{ open: false }">
+          <tbody x-data="{ open: false }">
             <tr style="border-bottom:1px solid var(--border)">
               <td class="py-2.5">
                 <button @click="open = !open" class="text-xs font-bold px-2 py-0.5 rounded cursor-pointer select-none transition-opacity hover:opacity-80"
@@ -320,20 +319,25 @@
             </tr>
             <tr x-show="open" x-transition style="border-bottom:1px solid var(--border)">
               <td colspan="5" class="px-4 py-3 text-xs leading-relaxed" style="background:rgba(234,179,8,0.05);color:var(--text-muted)">
-                <span class="font-bold" style="color:var(--yellow)">URGENT EXIT — Debounced + Spread-Guarded</span><br>
+                <span class="font-bold" style="color:var(--yellow)">URGENT EXIT — Debounced + Spread-Guarded + Confidence-Gated</span><br>
                 Every 5 min, the signal engine computes <span class="mono">model_prob</span> for each bucket from NWS, WU, HRRR, and GFS forecasts.
                 The bucket with the highest probability is "consensus." If consensus shifts away from your held bucket for
                 <span class="mono font-bold" x-text="consensusDebounceRuns"></span> consecutive runs, URGENT exit fires.<br><br>
+                <span class="font-bold" style="color:var(--cyan)">New safety gates (April 2026):</span><br>
+                <span style="color:var(--yellow)">① Position age:</span> URGENT suppressed until position held ≥60 min (prevents flip-flop on fresh entries).<br>
+                <span style="color:var(--yellow)">② Probability gate:</span> Held bucket must drop below 15% model_prob, or consensus bucket must be ≥2.5× the held bucket's probability.<br>
+                <span style="color:var(--yellow)">③ Bid depth:</span> Suppressed when bid depth &lt;5 shares — cost of selling into a thin book exceeds cost of holding.<br>
+                <span style="color:var(--yellow)">④ Adjacent grace:</span> Consensus shifting to an adjacent bucket (±1 idx) requires 2× debounce runs — adjacent oscillation is forecast noise, not regime change.<br><br>
                 <span class="font-bold" style="color:var(--cyan)">Spread guard:</span> Exit is suppressed when the bid-ask spread exceeds
                 <span class="mono font-bold" x-text="(urgentExitMaxSpread * 100).toFixed(0) + '¢'"></span> — prevents dumping into thin books
                 at a large implicit cost (e.g. the Atlanta 7¢ spread incident where the position bounced +15¢ after exit).
-                Adjust both thresholds in the Exit Engine Configuration below.
+                Adjust thresholds in the Exit Engine Configuration below.
               </td>
             </tr>
-          </template>
+          </tbody>
 
           <!-- PROFIT -->
-          <template x-data="{ open: false }">
+          <tbody x-data="{ open: false }">
             <tr style="border-bottom:1px solid var(--border)">
               <td class="py-2.5">
                 <button @click="open = !open" class="text-xs font-bold px-2 py-0.5 rounded cursor-pointer select-none transition-opacity hover:opacity-80"
@@ -359,10 +363,10 @@
                 5¢ is aggressive scalping suited for the 7–10 AM repricing window; 10–15¢ fits overnight holds.
               </td>
             </tr>
-          </template>
+          </tbody>
 
           <!-- EXPIRY -->
-          <template x-data="{ open: false }">
+          <tbody x-data="{ open: false }">
             <tr>
               <td class="py-2.5">
                 <button @click="open = !open" class="text-xs font-bold px-2 py-0.5 rounded cursor-pointer select-none transition-opacity hover:opacity-80"
@@ -388,10 +392,9 @@
                 Adjust the Expiry Discount slider below.
               </td>
             </tr>
-          </template>
+          </tbody>
 
-        </tbody>
-      </table>
+        </table>
     </div>
     <!-- Exit Engine Configuration Sliders -->
     <div class="mt-3 pt-3" style="border-top:1px solid var(--border)">

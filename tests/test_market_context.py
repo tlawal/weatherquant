@@ -91,7 +91,6 @@ async def _seed_market_context_fixture(session_factory):
             CalibrationParams(
                 city_id=city.id,
                 bias_nws=-0.4,
-                bias_wu_daily=0.8,
                 bias_wu_hourly=0.2,
                 n_samples=12,
                 last_realized_high=75.0,
@@ -179,15 +178,6 @@ async def _seed_market_context_fixture(session_factory):
                 ),
                 ForecastObs(
                     city_id=city.id,
-                    source="wu_daily",
-                    date_et=today_et,
-                    high_f=76.0,
-                    raw_payload_hash="wu-d-today",
-                    raw_json=json.dumps({"high_f": 76.0}),
-                    fetched_at=datetime.now(timezone.utc) - timedelta(minutes=15),
-                ),
-                ForecastObs(
-                    city_id=city.id,
                     source="wu_hourly",
                     date_et=today_et,
                     high_f=75.6,
@@ -208,14 +198,14 @@ async def _seed_market_context_fixture(session_factory):
         )
 
         previous_days = [
-            (prev1_et, 74.6, 74.0, 75.2, 74.5, [0.25, 0.50, 0.25]),
-            (prev2_et, 73.4, 72.8, 73.9, 73.1, [0.40, 0.45, 0.15]),
+            (prev1_et, 74.6, 75.2, 74.5, [0.25, 0.50, 0.25]),
+            (prev2_et, 73.4, 73.9, 73.1, [0.40, 0.45, 0.15]),
         ]
         for day_data, event, buckets in [
             (previous_days[0], prev_event_1, prev1_buckets),
             (previous_days[1], prev_event_2, prev2_buckets),
         ]:
-            date_key, nws_high, wu_daily_high, wu_hourly_high, realized_high, probs = day_data
+            date_key, nws_high, wu_hourly_high, realized_high, probs = day_data
             session.add_all(
                 [
                     ForecastObs(
@@ -225,14 +215,6 @@ async def _seed_market_context_fixture(session_factory):
                         high_f=nws_high,
                         raw_payload_hash=f"nws-{date_key}",
                         raw_json=json.dumps({"high_f": nws_high}),
-                    ),
-                    ForecastObs(
-                        city_id=city.id,
-                        source="wu_daily",
-                        date_et=date_key,
-                        high_f=wu_daily_high,
-                        raw_payload_hash=f"wu-d-{date_key}",
-                        raw_json=json.dumps({"high_f": wu_daily_high}),
                     ),
                     ForecastObs(
                         city_id=city.id,
@@ -273,8 +255,11 @@ async def _seed_market_context_fixture(session_factory):
                 "composite_peak_timing": "4:52 PM ET",
                 "peak_timing_source": "wu_hourly",
                 "kalman_trend_per_hr": 1.7,
+                "kalman_divergence_f": 0.5,
                 "regression_r2": 0.64,
             },
+            "kalman_nowcast_active": True,
+            "kalman_divergence_f": 0.5,
         }
         session.add(
             ModelSnapshot(
@@ -353,6 +338,9 @@ def _valid_output_for_context(context):
             for key in SECTION_KEYS
         },
         "final_selection": context.final_selection.model_dump(),
+        "short_range_models": {
+            "missing_external_models": ["HRRR", "NBM", "NAM", "RAP", "ECMWF"]
+        }
     }
 
 
@@ -367,7 +355,7 @@ def test_build_market_context_input_selects_bucket_and_flip_signals(tmp_path, mo
         assert context.final_selection.label == "74–76°"
         assert context.final_selection.confidence_pct >= 40
         assert context.current_observations["current_temp_f"] == 75.1
-        assert context.short_range_models["missing_external_models"] == ["HRRR", "NAM", "RAP", "ECMWF"]
+        assert context.short_range_models["missing_external_models"] == ["HRRR", "NBM", "NAM", "RAP", "ECMWF"]
         assert context.final_selection.flip_signals
         assert context.market_pricing["underpriced_buckets"]
 
