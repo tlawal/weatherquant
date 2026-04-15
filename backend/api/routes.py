@@ -1788,6 +1788,7 @@ async def manual_trade(
         yes_mid=mkt_prob,
         spread=mkt_snap.spread if mkt_snap else None,
         yes_ask_depth=mkt_snap.yes_ask_depth if mkt_snap else 0.0,
+        yes_bid_depth=mkt_snap.yes_bid_depth if mkt_snap else 0.0,
         actionable=True,  # manual override
     )
 

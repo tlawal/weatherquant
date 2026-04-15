@@ -660,6 +660,9 @@ async def _fetch_wu_history_api(
                         return None, None
                     else:
                         body = await resp.text()
+                        if resp.status == 400 and "NDF-0001" in body:
+                            log.info("wu_history: %s — 400 NDF-0001 (no data yet for %s)", city.city_slug, date_et)
+                            return None, None
                         log.warning("wu_history: HTTP %d for %s — body: %.200s",
                                     resp.status, city.city_slug, body)
         except Exception as e:
