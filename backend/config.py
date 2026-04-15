@@ -85,6 +85,7 @@ class Config:
     URGENT_MIN_EXIT_MODEL_PROB: float = _float("URGENT_MIN_EXIT_MODEL_PROB", 0.15)
     URGENT_MIN_BID_DEPTH: float = _float("URGENT_MIN_BID_DEPTH", 5.0)
     URGENT_ADJACENT_DEBOUNCE_MULTIPLIER: int = _int("URGENT_ADJACENT_DEBOUNCE_MULTIPLIER", 2)
+    EXIT_MARKET_SELL_MAX_SPREAD: float = _float("EXIT_MARKET_SELL_MAX_SPREAD", 0.06)
 
     # ── Telegram Notifications ───────────────────────────────────────────────
     TELEGRAM_BOT_TOKEN: str = os.environ.get("TELEGRAM_BOT_TOKEN", "")

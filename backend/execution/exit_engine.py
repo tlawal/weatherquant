@@ -203,20 +203,7 @@ async def run_exit_engine() -> None:
                 )
                 await sess.commit()
 
-            # ── Telegram notification ──
-            try:
-                from backend.notifications.telegram import notify_exit_triggered
-                await notify_exit_triggered(
-                    city_slug=signal.city_slug,
-                    level=cascade["level"],
-                    reason=cascade["reason"],
-                    price=sell_price,
-                    shares=pos.net_qty,
-                )
-            except Exception:
-                log.debug("Telegram exit notification failed (non-critical)", exc_info=True)
-
-            await execute_signal(
+            result = await execute_signal(
                 signal=signal,
                 bankroll=0.0, # Not used for sells
                 actor="exit_engine",
@@ -226,6 +213,47 @@ async def run_exit_engine() -> None:
                 limit_price_override=sell_price,
                 qty_override=pos.net_qty # Dump the whole position
             )
+            
+            # ── Handle result ──
+            if result.get("status") in ("filled", "timeout"):
+                try:
+                    from backend.notifications.telegram import notify_exit_triggered
+                    await notify_exit_triggered(
+                        city_slug=signal.city_slug,
+                        level=cascade["level"],
+                        reason=cascade["reason"],
+                        price=sell_price,
+                        shares=pos.net_qty,
+                    )
+                except Exception:
+                    log.debug("Telegram exit notification failed (non-critical)", exc_info=True)
+            else:
+                # Exit order failed — update position status and notify
+                err = result.get("error", "unknown")
+                log.warning(
+                    "exit_engine: %s exit for bucket %d FAILED — %s",
+                    cascade["level"], pos.bucket_id, err,
+                )
+                async with get_session() as sess:
+                    from sqlalchemy import update
+                    import backend.storage.models as m
+                    await sess.execute(
+                        update(m.Position).where(m.Position.bucket_id == pos.bucket_id)
+                        .values(current_exit_status=f"{cascade['level']} exit FAILED: {err[:80]}")
+                    )
+                    await sess.commit()
+                try:
+                    from backend.notifications.telegram import notify_exit_failed
+                    await notify_exit_failed(
+                        city_slug=signal.city_slug,
+                        level=cascade["level"],
+                        reason=cascade["reason"],
+                        price=sell_price,
+                        shares=pos.net_qty,
+                        error=err,
+                    )
+                except Exception:
+                    log.debug("Telegram exit-failed notification failed (non-critical)", exc_info=True)
         else:
             # Save active monitoring status
             target_price = pos.avg_cost + Config.QUICK_FLIP_TARGET

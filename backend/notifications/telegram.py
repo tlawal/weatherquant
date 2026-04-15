@@ -101,6 +101,27 @@ async def notify_exit_triggered(
         logger.warning("notify_exit_triggered failed", exc_info=True)
 
 
+async def notify_exit_failed(
+    city_slug: str,
+    level: str,
+    reason: str,
+    price: float,
+    shares: float,
+    error: str,
+) -> None:
+    """Notification when an exit order fails to execute."""
+    try:
+        text = (
+            f"\U0001f6a8 <b>Exit FAILED</b> | {city_slug}\n"
+            f"Level: {level}  Reason: {reason}\n"
+            f"Price: {price:.4f}  Shares: {shares:.2f}\n"
+            f"Error: {error[:120]}"
+        )
+        await send_telegram(text)
+    except Exception:
+        logger.warning("notify_exit_failed failed", exc_info=True)
+
+
 async def notify_gate_blocked(
     city_slug: str,
     bucket_label: str,

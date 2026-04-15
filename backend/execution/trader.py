@@ -232,6 +232,9 @@ async def execute_signal(
         shares = float(min_shares)
         cost = round(shares * limit_price, 2)
 
+    # NOTE: 5-share minimum check moved after on-chain balance verification
+    # (on-chain cap can reduce shares below 5 after this point)
+
     result["shares"] = shares
     result["limit_price"] = limit_price
     result["estimated_cost"] = cost
@@ -331,6 +334,21 @@ async def execute_signal(
                 "sell: on-chain balance check failed (proceeding anyway): %s", e
             )
 
+    # ── PolyMarket 5 share minimum for Limit Orders ───────────────────────────
+    # Must run AFTER on-chain balance check which may cap shares below 5.
+    if order_type == "limit" and shares < 5.0 and side == "SELL":
+        if signal.yes_bid and signal.yes_bid >= limit_price and signal.yes_bid_depth >= shares:
+            log.info(
+                "trade: bumping limit sell to market sell for <5 shares (shares=%.2f, bid=%.3f, limit=%.3f)",
+                shares, signal.yes_bid, limit_price
+            )
+            order_type = "market"
+            result["warning"] = "Switched to market order (size < 5 share minimum)"
+        else:
+            result["status"] = "error"
+            result["error"] = f"shares < 5 limit minimum but current bid ({signal.yes_bid}) below limit ({limit_price}) or depth ({signal.yes_bid_depth}) insufficient"
+            return result
+
     # ── Capture pre-trade position baseline (used by fill poller to compute delta)
     async with get_session() as sess:
         _baseline_pos = await get_position(sess, signal.bucket_id)
@@ -379,24 +397,129 @@ async def execute_signal(
         )
 
     if not clob_result or "error" in clob_result:
-        result["status"] = "order_failed"
-        if not clob_result:
-            result["error"] = "CLOB returned no result"
-        else:
-            raw_err = clob_result.get("error", "Unknown CLOB error")
-            result["error"] = _rewrite_balance_error(raw_err) or raw_err
-            
-        async with get_session() as sess:
-            await update_order_status(sess, order.id, "rejected", cancel_reason=result["error"][:100])
-            await append_audit(
-                sess,
-                actor=actor,
-                action="trade_order_failed",
-                payload=result,
-                ok=False,
-                error_msg=result["error"][:200],
+        raw_err = (clob_result or {}).get("error", "") if clob_result else ""
+        is_min_size_err = "lower than the minimum" in raw_err and side == "SELL" and order_type == "limit"
+
+        # ── Fallback: retry as market sell if limit failed due to min size ────
+        if is_min_size_err:
+            bid = signal.yes_bid or 0.0
+            spread = signal.spread or 0.0
+            bid_depth = signal.yes_bid_depth or 0.0
+            avg_cost = pos.avg_cost if (pos or None) else 0.0
+            net_pnl_per_share = (bid - avg_cost) - (bid * 0.02) if avg_cost > 0 else -1.0
+
+            spread_ok = spread <= Config.EXIT_MARKET_SELL_MAX_SPREAD
+            depth_ok = bid_depth >= shares
+            pnl_ok = net_pnl_per_share > 0
+
+            log.warning(
+                "trade: limit sell rejected (min size) — evaluating market-sell fallback "
+                "(shares=%.2f, bid=%.3f, spread=%.3f, depth=%.1f, net_pnl/share=%.3f, "
+                "spread_ok=%s, depth_ok=%s, pnl_ok=%s)",
+                shares, bid, spread, bid_depth, net_pnl_per_share,
+                spread_ok, depth_ok, pnl_ok,
             )
-        return result
+
+            if spread_ok and depth_ok and pnl_ok:
+                log.info(
+                    "trade: retrying as market sell (shares=%.2f) — profitable exit fallback",
+                    shares,
+                )
+                # Update the persisted order to reflect market type
+                async with get_session() as sess:
+                    await update_order_status(
+                        sess, order.id, "retrying",
+                        cancel_reason="limit_rejected_min_size_retrying_market",
+                    )
+                    await append_audit(
+                        sess,
+                        actor=actor,
+                        action="trade_market_sell_fallback",
+                        payload={
+                            **result,
+                            "original_error": raw_err[:200],
+                            "fallback_reason": "limit min size rejected",
+                            "shares": shares,
+                            "bid": bid,
+                            "spread": spread,
+                            "bid_depth": bid_depth,
+                            "net_pnl_per_share": net_pnl_per_share,
+                        },
+                        ok=True,
+                    )
+
+                clob_result = await clob.place_market_order(
+                    token_id=token_id,
+                    side="SELL",
+                    amount=shares,
+                )
+                order_type = "market"  # track that we switched
+
+                if not clob_result or "error" in clob_result:
+                    fallback_err = (clob_result or {}).get("error", "CLOB returned no result") if clob_result else "CLOB returned no result"
+                    log.error(
+                        "trade: market-sell fallback ALSO failed: %s", fallback_err,
+                    )
+                    result["status"] = "order_failed"
+                    result["error"] = f"limit+market sell both failed (limit: min size; market: {fallback_err[:100]})"
+                    async with get_session() as sess:
+                        await update_order_status(sess, order.id, "rejected", cancel_reason=result["error"][:100])
+                        await append_audit(
+                            sess,
+                            actor=actor,
+                            action="trade_market_sell_fallback_failed",
+                            payload={**result, "original_error": raw_err[:200]},
+                            ok=False,
+                            error_msg=result["error"][:200],
+                        )
+                    return result
+                # Fallback succeeded — continue to fill polling below
+                result["warning"] = (result.get("warning") or "") + "; market-sell fallback after limit min-size rejection"
+            else:
+                # Fallback conditions not met — log and return original error
+                blocked_reasons = []
+                if not spread_ok:
+                    blocked_reasons.append(f"spread={spread:.3f} > max={Config.EXIT_MARKET_SELL_MAX_SPREAD}")
+                if not depth_ok:
+                    blocked_reasons.append(f"bid_depth={bid_depth:.1f} < shares={shares:.2f}")
+                if not pnl_ok:
+                    blocked_reasons.append(f"net_pnl/share={net_pnl_per_share:.3f} <= 0")
+                log.warning(
+                    "trade: market-sell fallback BLOCKED — %s",
+                    "; ".join(blocked_reasons),
+                )
+                result["status"] = "order_failed"
+                result["error"] = f"limit sell rejected (min size) and market-sell fallback blocked: {'; '.join(blocked_reasons)}"
+                async with get_session() as sess:
+                    await update_order_status(sess, order.id, "rejected", cancel_reason=result["error"][:100])
+                    await append_audit(
+                        sess,
+                        actor=actor,
+                        action="trade_order_failed_no_fallback",
+                        payload={**result, "original_error": raw_err[:200]},
+                        ok=False,
+                        error_msg=result["error"][:200],
+                    )
+                return result
+        else:
+            # Non-min-size error or not a limit SELL — no fallback
+            result["status"] = "order_failed"
+            if not clob_result:
+                result["error"] = "CLOB returned no result"
+            else:
+                result["error"] = _rewrite_balance_error(raw_err) or raw_err
+
+            async with get_session() as sess:
+                await update_order_status(sess, order.id, "rejected", cancel_reason=result["error"][:100])
+                await append_audit(
+                    sess,
+                    actor=actor,
+                    action="trade_order_failed",
+                    payload=result,
+                    ok=False,
+                    error_msg=result["error"][:200],
+                )
+            return result
 
     # Extract CLOB order ID
     clob_order_id = (
