@@ -177,6 +177,21 @@ async def init_db() -> None:
     await _run_ddl("ALTER TABLE metar_obs ADD COLUMN source VARCHAR(16) NOT NULL DEFAULT 'aviation'")
     await _run_ddl("CREATE INDEX IF NOT EXISTS ix_metar_source_station_ts ON metar_obs (source, metar_station, observed_at)")
 
+    # madis_obs — MADIS HFMETAR benchmarking table
+    await _run_ddl("""
+        CREATE TABLE IF NOT EXISTS madis_obs (
+            id SERIAL PRIMARY KEY,
+            city_id INTEGER NOT NULL REFERENCES cities(id),
+            metar_station VARCHAR(8) NOT NULL,
+            observed_at TIMESTAMPTZ NOT NULL,
+            fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            temp_c FLOAT,
+            temp_f FLOAT,
+            source_file VARCHAR(64)
+        )
+    """)
+    await _run_ddl("CREATE INDEX IF NOT EXISTS ix_madis_station_ts ON madis_obs (metar_station, observed_at)")
+
     # station_calibrations — per-source MAE breakdown
     await _run_ddl("ALTER TABLE station_calibrations ADD COLUMN source_mae_json TEXT")
     await _run_ddl("ALTER TABLE station_calibrations ADD COLUMN rmse_f FLOAT DEFAULT 0.0")

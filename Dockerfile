@@ -2,7 +2,7 @@ FROM python:3.12-slim
 
 # Install system deps (lxml for BeautifulSoup WU scraping)
 RUN apt-get update && apt-get install -y \
-    libxml2-dev libxslt-dev gcc \
+    libxml2-dev libxslt-dev gcc libhdf5-dev libnetcdf-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

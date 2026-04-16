@@ -172,20 +172,23 @@ class MetarObsExtended(Base):
     )
     dewpoint_c: Mapped[Optional[float]] = mapped_column(Float)
     dewpoint_f: Mapped[Optional[float]] = mapped_column(Float)
-    humidity_pct: Mapped[Optional[float]] = mapped_column(Float)
-    wind_dir_deg: Mapped[Optional[int]] = mapped_column(Integer)
-    wind_speed_kt: Mapped[Optional[float]] = mapped_column(Float)
-    wind_gust_kt: Mapped[Optional[float]] = mapped_column(Float)
-    altimeter_inhg: Mapped[Optional[float]] = mapped_column(Float)
-    sea_level_pressure_mb: Mapped[Optional[float]] = mapped_column(Float)
-    visibility_sm: Mapped[Optional[float]] = mapped_column(Float)
-    cloud_cover: Mapped[Optional[str]] = mapped_column(String(4))   # CLR/FEW/SCT/BKN/OVC
-    cloud_base_ft: Mapped[Optional[int]] = mapped_column(Integer)
-    wx_string: Mapped[Optional[str]] = mapped_column(String(64))    # -RA, TS, etc.
-    precip_in: Mapped[Optional[float]] = mapped_column(Float)
-    condition: Mapped[Optional[str]] = mapped_column(String(32))    # Fair, Cloudy, Rain, etc.
 
-    metar_obs_ref: Mapped[MetarObs] = relationship("MetarObs", back_populates="extended")
+
+class MadisObs(Base):
+    """MADIS HFMETAR observation — benchmarking only, does NOT feed trading logic."""
+    __tablename__ = "madis_obs"
+    __table_args__ = (
+        Index("ix_madis_station_ts", "metar_station", "observed_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    city_id: Mapped[int] = mapped_column(Integer, ForeignKey("cities.id"), nullable=False)
+    metar_station: Mapped[str] = mapped_column(String(8), nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    temp_c: Mapped[Optional[float]] = mapped_column(Float)
+    temp_f: Mapped[Optional[float]] = mapped_column(Float)
+    source_file: Mapped[Optional[str]] = mapped_column(String(64))
 
 
 class StationProfile(Base):

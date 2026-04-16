@@ -26,6 +26,7 @@ from backend.storage.models import (
     ForecastObs,
     MarketContextSnapshot,
     MarketSnapshot,
+    MadisObs,
     MetarObs,
     MetarObsExtended,
     ModelSnapshot,
@@ -1326,3 +1327,39 @@ async def upsert_station_calibration(
     await session.commit()
     await session.refresh(cal)
     return cal
+
+
+# ─── MADIS HFMETAR ─────────────────────────────────────────────────────────────
+
+async def get_madis_obs_by_key(
+    session: AsyncSession, metar_station: str, observed_at: datetime
+) -> Optional[MadisObs]:
+    """Check if a MadisObs row exists for (station, observed_at)."""
+    result = await session.execute(
+        select(MadisObs).where(
+            MadisObs.metar_station == metar_station,
+            MadisObs.observed_at == observed_at,
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def insert_madis_obs(session: AsyncSession, **kwargs) -> MadisObs:
+    obs = MadisObs(**kwargs)
+    session.add(obs)
+    await session.commit()
+    await session.refresh(obs)
+    return obs
+
+
+async def get_latest_madis_obs(
+    session: AsyncSession, city_id: int
+) -> Optional[MadisObs]:
+    """Latest MadisObs for a city (for UI benchmarking display)."""
+    result = await session.execute(
+        select(MadisObs)
+        .where(MadisObs.city_id == city_id)
+        .order_by(desc(MadisObs.observed_at))
+        .limit(1)
+    )
+    return result.scalar_one_or_none()

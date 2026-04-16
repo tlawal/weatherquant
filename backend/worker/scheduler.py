@@ -185,6 +185,11 @@ async def job_fetch_tgftp_metar():
     await fetch_tgftp_all()
 
 
+async def job_fetch_madis():
+    from backend.ingestion.madis_hfmetar import fetch_madis_latest
+    await fetch_madis_latest()
+
+
 async def job_check_resolved():
     from backend.execution.redeemer import check_resolved_markets
     await check_resolved_markets()
@@ -246,6 +251,7 @@ def create_scheduler() -> AsyncIOScheduler:
     add(job_refresh_station_profiles, seconds=3600, name="refresh_station_profiles")  # 1h
     add(job_fetch_metar_smart,       seconds=30,    name="fetch_metar_smart")
     add(job_fetch_tgftp_metar,      seconds=60,    name="fetch_tgftp_metar")
+    add(job_fetch_madis,            seconds=300,   name="fetch_madis")
     add(job_check_resolved,          seconds=300,   name="check_resolved")  # 5 min
     add(job_auto_redeem,             seconds=43200, name="auto_redeem")  # 12h
     add(job_refresh_station_calibrations, seconds=21600, name="refresh_station_cal")  # 6h
@@ -266,6 +272,7 @@ async def start_scheduler() -> AsyncIOScheduler:
         (job_fetch_gamma, "fetch_gamma"),
         (job_fetch_metar, "fetch_metar"),
         (job_fetch_tgftp_metar, "fetch_tgftp_metar"),
+        (job_fetch_madis, "fetch_madis"),
         (job_fetch_nws, "fetch_nws"),
         (job_fetch_wu, "fetch_wu"),
         (job_fetch_open_meteo, "fetch_open_meteo"),
