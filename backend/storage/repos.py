@@ -309,6 +309,49 @@ async def get_latest_metar_by_source(
     return result.scalar_one_or_none()
 
 
+async def get_daily_high_metar_obs(
+    session: AsyncSession, city_id: int, date_et: str,
+    city_tz: str = "America/New_York",
+    source: Optional[str] = None,
+) -> Optional[MetarObs]:
+    """Return the MetarObs row that achieved the daily high temp_f for the given local date.
+
+    When source is provided, only consider observations from that source.
+    Returns the most recent observation at the max temperature.
+    """
+    tz = ZoneInfo(city_tz)
+    start_dt = datetime.strptime(date_et, "%Y-%m-%d").replace(tzinfo=tz)
+    end_dt = start_dt + timedelta(days=1)
+
+    # First get the max temp_f
+    q_max = select(func.max(MetarObs.temp_f)).where(
+        MetarObs.city_id == city_id,
+        MetarObs.observed_at >= start_dt,
+        MetarObs.observed_at < end_dt,
+    )
+    if source is not None:
+        q_max = q_max.where(MetarObs.source == source)
+
+    max_result = await session.execute(q_max)
+    max_temp = max_result.scalar_one_or_none()
+    if max_temp is None:
+        return None
+
+    # Then get the most recent row at that max temp
+    q_row = select(MetarObs).where(
+        MetarObs.city_id == city_id,
+        MetarObs.observed_at >= start_dt,
+        MetarObs.observed_at < end_dt,
+        MetarObs.temp_f == max_temp,
+    )
+    if source is not None:
+        q_row = q_row.where(MetarObs.source == source)
+
+    q_row = q_row.order_by(desc(MetarObs.observed_at)).limit(1)
+    result = await session.execute(q_row)
+    return result.scalar_one_or_none()
+
+
 async def get_daily_high_metar(
     session: AsyncSession, city_id: int, date_et: str,
     city_tz: str = "America/New_York",

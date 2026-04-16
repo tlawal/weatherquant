@@ -248,7 +248,15 @@
         {% if settlement_high.obs_time_local %}
         <div class="flex justify-between"><span style="color:var(--text-muted)">Obs Time</span><span class="mono">{{ settlement_high.obs_time_local }}</span></div>
         {% endif %}
-        {% if forecasts.wu_history.url %}
+        {% if settlement_high.source_url %}
+        <div class="mt-2 pt-2 border-t" style="border-color:var(--border)">
+          <a href="{{ settlement_high.source_url }}" target="_blank" rel="noopener"
+             class="flex items-center gap-1 hover:underline transition-colors"
+             style="color:var(--cyan)">
+            <span>↗ View Source Data</span>
+          </a>
+        </div>
+        {% elif forecasts.wu_history.url %}
         <div class="mt-2 pt-2 border-t" style="border-color:var(--border)">
           <a href="{{ forecasts.wu_history.url }}" target="_blank" rel="noopener"
              class="flex items-center gap-1 hover:underline transition-colors"
@@ -269,6 +277,15 @@
       <span class="mono opacity-70">{{ settlement_high.obs_time_local }}</span>
       {% endif %}
     </div>
+    {% if settlement_high.source_url %}
+    <div class="text-xs mt-1.5">
+      <a href="{{ settlement_high.source_url }}" target="_blank" rel="noopener"
+         class="flex items-center gap-1 hover:underline transition-colors"
+         style="color:var(--cyan)">
+        <span>↗ View Source Data</span>
+      </a>
+    </div>
+    {% endif %}
   </div>
 
   <!-- Model Forecast μ -->

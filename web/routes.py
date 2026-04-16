@@ -656,6 +656,12 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                 "high_f": settlement_result.get("high_f"),
                 "source_used": settlement_result.get("source_used"),
                 "obs_time_local": _sh_obs_time_local,
+                "source_url": {
+                    "tgftp": f"https://tgftp.nws.noaa.gov/data/observations/metar/stations/{city.metar_station}.TXT" if city.metar_station else None,
+                    "wu_history": f"https://www.wunderground.com/history/daily/{city.metar_station}/date/{target_date_et}" if city.metar_station else None,
+                    "resolution_metar": f"https://aviationweather.gov/api/data/metar?ids={city.metar_station}&format=json&latest=1" if city.metar_station else None,
+                    "raw_metar": f"https://aviationweather.gov/api/data/metar?ids={city.metar_station}&format=json&latest=1" if city.metar_station else None,
+                }.get(settlement_result.get("source_used") or ""),
             },
             "metar": {
                 "temp_f": metar.temp_f if (metar and target_date_et == real_today_et) else None,

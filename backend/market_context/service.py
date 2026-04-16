@@ -688,15 +688,12 @@ async def _resolve_realized_high_with_source(
 
     # ── TGFTP primary path ────────────────────────────────────────────────
     if primary == "tgftp":
-        tgftp_high = await get_daily_high_metar(
+        from backend.storage.repos import get_daily_high_metar_obs
+        tgftp_row = await get_daily_high_metar_obs(
             sess, city.id, date_et, city_tz=city_tz, source="tgftp",
         )
-        if tgftp_high is not None:
-            # Get the latest TGFTP observation for the obs_time
-            from backend.storage.repos import get_latest_metar_by_source
-            latest_tgftp = await get_latest_metar_by_source(sess, city.id, "tgftp")
-            obs_time = latest_tgftp.observed_at if latest_tgftp else None
-            return {"high_f": float(tgftp_high), "source_used": "tgftp", "obs_time": obs_time}
+        if tgftp_row is not None and tgftp_row.temp_f is not None:
+            return {"high_f": float(tgftp_row.temp_f), "source_used": "tgftp", "obs_time": tgftp_row.observed_at}
 
     # ── WU history (always available as fallback or primary) ──────────────
     wu_history = await get_latest_successful_forecast(sess, city.id, "wu_history", date_et)
