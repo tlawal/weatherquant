@@ -178,6 +178,8 @@ class MetarObsExtended(Base):
     wind_gust_kt: Mapped[Optional[float]] = mapped_column(Float)
     altimeter_inhg: Mapped[Optional[float]] = mapped_column(Float)
     precip_in: Mapped[Optional[float]] = mapped_column(Float)
+    cloud_cover: Mapped[Optional[str]] = mapped_column(String(4))  # CLR/FEW/SCT/BKN/OVC
+    wx_string: Mapped[Optional[str]] = mapped_column(String(64))  # -RA, TS, etc.
     condition: Mapped[Optional[str]] = mapped_column(String(32))
 
     metar_obs_ref: Mapped["MetarObs"] = relationship("MetarObs", back_populates="extended")

@@ -199,6 +199,8 @@ async def init_db() -> None:
     await _run_ddl("ALTER TABLE metar_obs_extended ADD COLUMN IF NOT EXISTS wind_gust_kt FLOAT")
     await _run_ddl("ALTER TABLE metar_obs_extended ADD COLUMN IF NOT EXISTS altimeter_inhg FLOAT")
     await _run_ddl("ALTER TABLE metar_obs_extended ADD COLUMN IF NOT EXISTS precip_in FLOAT")
+    await _run_ddl("ALTER TABLE metar_obs_extended ADD COLUMN IF NOT EXISTS cloud_cover VARCHAR(4)")
+    await _run_ddl("ALTER TABLE metar_obs_extended ADD COLUMN IF NOT EXISTS wx_string VARCHAR(64)")
     await _run_ddl("ALTER TABLE metar_obs_extended ADD COLUMN IF NOT EXISTS condition VARCHAR(32)")
 
     # station_calibrations — per-source MAE breakdown
