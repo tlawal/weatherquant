@@ -311,11 +311,9 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
         metar = await get_latest_metar(sess, city.id)
         # MADIS benchmarking obs (US cities only)
         madis_obs = None
-        tgftp_obs = None
         if city.is_us:
-            from backend.storage.repos import get_latest_madis_obs, get_latest_metar_by_source
+            from backend.storage.repos import get_latest_madis_obs
             madis_obs = await get_latest_madis_obs(sess, city.id)
-            tgftp_obs = await get_latest_metar_by_source(sess, city.id, "tgftp")
         # For the selected date, we also want the official high observed by METAR
         obs_high_f = await get_daily_high_metar(sess, city.id, target_date_et, city_tz=getattr(city, "tz", "America/New_York"))
         avg_peak_timing = await get_avg_peak_timing(sess, city.id, days_back=3, et_tz=et_tz)
@@ -427,8 +425,8 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
             dt = dt.replace(tzinfo=timezone.utc)
         return dt.astimezone(et_tz).strftime("%-I:%M %p ET")
 
-    def _format_madis_benchmark(madis_obs, tgftp_obs, city) -> dict | None:
-        """Format MADIS + TGFTP obs for the benchmarking panel."""
+    def _format_madis_benchmark(madis_obs, metar, city) -> dict | None:
+        """Format NWS + MADIS obs for the benchmarking panel."""
         city_tz_obj = ZoneInfo(getattr(city, "tz", "America/New_York"))
 
         # MADIS side
@@ -445,17 +443,17 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
             except Exception:
                 pass
 
-        # TGFTP side
-        tgftp_temp = tgftp_obs.temp_f if tgftp_obs else None
-        tgftp_age = None
-        tgftp_obs_local = None
-        if tgftp_obs and tgftp_obs.observed_at:
-            t_dt = tgftp_obs.observed_at
-            if t_dt.tzinfo is None:
-                t_dt = t_dt.replace(tzinfo=timezone.utc)
-            tgftp_age = _age(t_dt)
+        # NWS side (api.weather.gov — the standard MetarObs with source='aviation')
+        nws_temp = metar.temp_f if (metar and target_date_et == real_today_et) else None
+        nws_age = None
+        nws_obs_local = None
+        nws_dt = metar.observed_at if (metar and target_date_et == real_today_et) else None
+        if nws_dt:
+            if nws_dt.tzinfo is None:
+                nws_dt = nws_dt.replace(tzinfo=timezone.utc)
+            nws_age = _age(nws_dt)
             try:
-                tgftp_obs_local = t_dt.astimezone(city_tz_obj).strftime("%-I:%M %p %Z")
+                nws_obs_local = nws_dt.astimezone(city_tz_obj).strftime("%-I:%M %p %Z")
             except Exception:
                 pass
 
@@ -464,9 +462,9 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
             "madis_obs_time_local": madis_obs_local,
             "madis_age_s": madis_age,
             "madis_source_file": madis_obs.source_file if madis_obs else None,
-            "tgftp_temp_f": tgftp_temp,
-            "tgftp_obs_time_local": tgftp_obs_local,
-            "tgftp_age_s": tgftp_age,
+            "nws_temp_f": nws_temp,
+            "nws_obs_time_local": nws_obs_local,
+            "nws_age_s": nws_age,
         }
 
     wu_history_raw = json.loads(wu_history.raw_json) if (wu_history and wu_history.raw_json) else {}
@@ -740,8 +738,8 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                     )()
                 ) if (metar and metar.observed_at and target_date_et == real_today_et) else None,
             },
-            # MADIS benchmarking — side-by-side with TGFTP for US cities only
-            "madis_benchmark": _format_madis_benchmark(madis_obs, tgftp_obs, city) if city.is_us else None,
+            # MADIS benchmarking — NWS API vs MADIS side-by-side for US cities
+            "madis_benchmark": _format_madis_benchmark(madis_obs, metar, city) if city.is_us else None,
             "forecasts": {
                 "primary": {
                     "source": "nws" if city.is_us else "Open-Meteo",

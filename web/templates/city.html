@@ -207,24 +207,24 @@
   </div>
 
   {% if madis_benchmark %}
-  <!-- TGFTP vs MADIS Benchmark Panel (US cities only) -->
+  <!-- NWS vs MADIS Benchmark Panel (US cities only) -->
   <div class="card p-4 relative" style="border:1px solid rgba(139,92,246,0.3)">
     <div class="flex items-center justify-between text-[10px] uppercase tracking-widest mb-2" style="color:var(--text-muted)">
       <span>Source Speed Benchmark</span>
       <span class="px-1.5 py-0.5 rounded text-[9px] font-bold" style="background:rgba(139,92,246,0.2);color:#a78bfa">BETA</span>
     </div>
     <div class="grid grid-cols-2 gap-3">
-      <!-- TGFTP side -->
+      <!-- NWS API side -->
       <div class="text-center">
-        <div class="text-[9px] uppercase tracking-widest mb-1" style="color:var(--text-muted)">TGFTP</div>
-        <div class="text-2xl font-bold mono" style="color:#22c55e">
-          {% if madis_benchmark.tgftp_temp_f is not none %}{{ "%.1f"|format(madis_benchmark.tgftp_temp_f) }}°{% else %}—{% endif %}
+        <div class="text-[9px] uppercase tracking-widest mb-1" style="color:var(--text-muted)">NWS API</div>
+        <div class="text-2xl font-bold mono" style="color:var(--cyan)">
+          {% if madis_benchmark.nws_temp_f is not none %}{{ "%.1f"|format(madis_benchmark.nws_temp_f) }}°{% else %}—{% endif %}
         </div>
         <div class="text-[10px] mt-1" style="color:var(--text-muted)">
-          {{ madis_benchmark.tgftp_obs_time_local or '—' }}
+          {{ madis_benchmark.nws_obs_time_local or '—' }}
         </div>
-        {% if madis_benchmark.tgftp_age_s is not none %}
-        <div class="text-[9px] mt-0.5 opacity-60">{{ madis_benchmark.tgftp_age_s|int }}s ago</div>
+        {% if madis_benchmark.nws_age_s is not none %}
+        <div class="text-[9px] mt-0.5 opacity-60">{{ madis_benchmark.nws_age_s|int }}s ago</div>
         {% endif %}
       </div>
       <!-- MADIS side -->
@@ -242,15 +242,15 @@
       </div>
     </div>
     <!-- FASTER badge -->
-    {% if madis_benchmark.tgftp_age_s is not none and madis_benchmark.madis_age_s is not none %}
-    {% set tgftp_faster = madis_benchmark.tgftp_age_s <= madis_benchmark.madis_age_s %}
+    {% if madis_benchmark.nws_age_s is not none and madis_benchmark.madis_age_s is not none %}
+    {% set nws_faster = madis_benchmark.nws_age_s <= madis_benchmark.madis_age_s %}
     <div class="flex items-center justify-center gap-2 mt-2 pt-2 border-t text-[10px]" style="border-color:var(--border)">
-      {% if tgftp_faster %}
-      <span class="px-2 py-0.5 rounded font-bold" style="background:rgba(34,197,94,0.2);color:#22c55e">⚡ TGFTP FASTER</span>
-      <span style="color:var(--text-muted)">by {{ (madis_benchmark.madis_age_s - madis_benchmark.tgftp_age_s)|int }}s</span>
+      {% if nws_faster %}
+      <span class="px-2 py-0.5 rounded font-bold" style="background:rgba(34,211,238,0.2);color:#22d3ee">⚡ NWS FASTER</span>
+      <span style="color:var(--text-muted)">by {{ (madis_benchmark.madis_age_s - madis_benchmark.nws_age_s)|int }}s</span>
       {% else %}
       <span class="px-2 py-0.5 rounded font-bold" style="background:rgba(139,92,246,0.2);color:#a78bfa">⚡ MADIS FASTER</span>
-      <span style="color:var(--text-muted)">by {{ (madis_benchmark.tgftp_age_s - madis_benchmark.madis_age_s)|int }}s</span>
+      <span style="color:var(--text-muted)">by {{ (madis_benchmark.nws_age_s - madis_benchmark.madis_age_s)|int }}s</span>
       {% endif %}
     </div>
     {% elif madis_benchmark.madis_temp_f is none %}

@@ -146,10 +146,29 @@ async def fetch_madis_latest() -> None:
             return
 
         try:
-            # Extract arrays
+            # Debug: log available variables
+            var_names = list(ds.variables.keys())
+            log.debug("madis: netCDF variables in %s: %s", filename, var_names[:20])
+
+            # Extract arrays — MADIS METAR uses stationName, temperature, timeObs
+            if "stationName" not in ds.variables:
+                log.error("madis: 'stationName' variable not found in %s (vars: %s)", filename, var_names[:10])
+                return
+            if "temperature" not in ds.variables:
+                log.error("madis: 'temperature' variable not found in %s (vars: %s)", filename, var_names[:10])
+                return
+
             station_names = ds.variables["stationName"][:]  # char array
             temperatures = ds.variables["temperature"][:]   # Kelvin
-            obs_times = ds.variables["observationTime"][:]  # epoch seconds
+
+            # MADIS uses 'timeObs' for observation time (not 'observationTime')
+            if "timeObs" in ds.variables:
+                obs_times = ds.variables["timeObs"][:]
+            elif "observationTime" in ds.variables:
+                obs_times = ds.variables["observationTime"][:]
+            else:
+                log.error("madis: no time variable found in %s (tried timeObs, observationTime; vars: %s)", filename, var_names[:10])
+                return
 
             n_stations = len(temperatures)
 
@@ -200,6 +219,8 @@ async def fetch_madis_latest() -> None:
                     inserted += 1
 
                 await update_heartbeat(sess, "fetch_madis")
+        except Exception as e:
+            log.error("madis: error parsing netCDF file %s: %s", filename, e)
         finally:
             ds.close()
 
