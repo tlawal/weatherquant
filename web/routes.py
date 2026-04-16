@@ -16,7 +16,7 @@ from fastapi.templating import Jinja2Templates
 
 from backend.config import Config
 from backend.city_registry import get_city_priority, CITY_REGISTRY_BY_SLUG
-from backend.market_context.service import serialize_market_context_snapshot
+from backend.market_context.service import serialize_market_context_snapshot, _resolve_realized_high_with_source
 from backend.tz_utils import city_local_date, city_local_now, city_local_tomorrow, et_today
 from backend.strategy.kelly import calculate_expected_value, calculate_kelly_fraction
 from backend.modeling.calibration_engine import get_reliability_metrics
@@ -336,6 +336,21 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
         event = await get_event(sess, city.id, target_date_et)
         market_context_snapshot = await get_market_context_snapshot(sess, city.id, target_date_et)
 
+        # Settlement high with source tracking
+        settlement_result = await _resolve_realized_high_with_source(
+            sess, city=city, date_et=target_date_et,
+            observation_minutes=obs_minutes_list or [],
+        )
+        # Format obs_time in city TZ
+        _sh_obs_time = settlement_result.get("obs_time")
+        _sh_obs_time_local = None
+        if _sh_obs_time:
+            try:
+                city_tz_obj = ZoneInfo(getattr(city, "tz", "America/New_York"))
+                _sh_obs_time_local = _sh_obs_time.astimezone(city_tz_obj).strftime("%-I:%M %p %Z")
+            except Exception:
+                pass
+
     model = None
     buckets_with_signals = []
 
@@ -637,6 +652,11 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
             "ground_truth_high": model_inputs.get("ground_truth_high") if isinstance(model_inputs, dict) else None,
             "ground_truth_source": model_inputs.get("ground_truth_source") if isinstance(model_inputs, dict) else None,
             "settlement_source_verified": event.settlement_source_verified if event else None,
+            "settlement_high": {
+                "high_f": settlement_result.get("high_f"),
+                "source_used": settlement_result.get("source_used"),
+                "obs_time_local": _sh_obs_time_local,
+            },
             "metar": {
                 "temp_f": metar.temp_f if (metar and target_date_et == real_today_et) else None,
                 "daily_high_f": obs_high_f,

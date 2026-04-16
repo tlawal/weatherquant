@@ -100,6 +100,11 @@ class Config:
     WU_STALE_TTL_SECONDS: int = _int("WU_STALE_TTL_SECONDS", 7200)  # 2 hours
     METAR_STALE_TTL_SECONDS: int = _int("METAR_STALE_TTL_SECONDS", 300)  # 5 min
 
+    # ── Settlement High Source ────────────────────────────────────────────────
+    # "tgftp" (default) uses TGFTP METAR as primary; "wu_history" falls back
+    # to the old WU history API. Flip via env var for safe rollback.
+    SETTLEMENT_HIGH_PRIMARY: str = os.environ.get("SETTLEMENT_HIGH_PRIMARY", "tgftp").strip().lower()
+
     # ── API Rate Limiting ─────────────────────────────────────────────────────
     WU_MIN_SCRAPE_INTERVAL_SECONDS: int = _int("WU_MIN_SCRAPE_INTERVAL_SECONDS", 1800)
     WU_FAILED_RETRY_INTERVAL_SECONDS: int = _int("WU_FAILED_RETRY_INTERVAL_SECONDS", 300)

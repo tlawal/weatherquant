@@ -206,14 +206,24 @@
     </div>
   </div>
 
-  <!-- WU Actual History (Settlement) -->
+  <!-- Settlement High (TGFTP primary, WU fallback) -->
   <div class="card p-4 relative" x-data="{ showMeta: false }" style="border:1px solid rgba(234,179,8,0.3)">
     <div class="flex items-center justify-between text-[10px] uppercase tracking-widest mb-2" style="color:var(--text-muted)">
       <div class="flex items-center gap-1.5">
-        <span>WU Settlement High</span>
+        <span>Settlement High</span>
         <button @click="showMeta = !showMeta" @click.outside="showMeta = false"
                 class="hover:text-cyan-400 opacity-50 hover:opacity-100 transition-all">ⓘ</button>
       </div>
+      {% if settlement_high.source_used %}
+      {% set src = settlement_high.source_used %}
+      {% if src == 'tgftp' %}
+      <span class="px-1.5 py-0.5 rounded text-[9px] font-bold" style="background:rgba(34,197,94,0.2);color:#22c55e">TGFTP</span>
+      {% elif src == 'wu_history' %}
+      <span class="px-1.5 py-0.5 rounded text-[9px] font-bold" style="background:rgba(245,158,11,0.2);color:#f59e0b">WU</span>
+      {% elif src == 'resolution_metar' or src == 'raw_metar' %}
+      <span class="px-1.5 py-0.5 rounded text-[9px] font-bold" style="background:rgba(156,163,175,0.2);color:#9ca3af">Aviation</span>
+      {% endif %}
+      {% endif %}
     </div>
     <!-- Meta Popover -->
     <div x-show="showMeta" x-cloak
@@ -223,39 +233,42 @@
          class="absolute left-2 right-2 top-10 w-auto p-3 rounded-xl shadow-2xl z-50 border text-[10px] normal-case tracking-tight font-medium sm:left-auto sm:right-4 sm:w-80"
          style="background:var(--bg-card); border-color:var(--border);">
       <div class="font-bold mb-2 pb-1 border-b" style="color:var(--cyan); border-color:var(--border)">
-        <span>Weather Underground History</span>
+        <span>Settlement High Resolution</span>
       </div>
       <div class="space-y-1.5">
-        <div class="opacity-80 py-1 italic mb-2">Official Polymarket settlement ground truth. Running high updated hourly after station observations.</div>
+        <div class="opacity-80 py-1 italic mb-2">Official daily high used for market settlement. Primary source is TGFTP METAR (fast NOAA feed); falls back to WU History, then resolution METAR, then raw METAR aggregate.</div>
         <div class="flex justify-between"><span style="color:var(--text-muted)">Station</span><span class="mono">{{ city.metar_station }}</span></div>
-        <div class="flex justify-between"><span style="color:var(--text-muted)">Status</span>
-          {% if forecasts.wu_history.high_f is not none %}
-          <span class="text-green-400">Settled</span>
+        <div class="flex justify-between"><span style="color:var(--text-muted)">Source</span>
+          {% if settlement_high.source_used %}
+          <span class="mono">{{ settlement_high.source_used }}</span>
           {% else %}
           <span class="text-yellow-400">Pending</span>
           {% endif %}
         </div>
-        {% if forecasts.wu_history.obs_time %}
-        <div class="flex justify-between"><span style="color:var(--text-muted)">High Observed</span><span class="mono">{{ forecasts.wu_history.obs_time }}</span></div>
-        {% endif %}
-        {% if forecasts.wu_history.collected_at %}
-        <div class="flex justify-between"><span style="color:var(--text-muted)">Data Collected</span><span class="mono">{{ forecasts.wu_history.collected_at }}</span></div>
+        {% if settlement_high.obs_time_local %}
+        <div class="flex justify-between"><span style="color:var(--text-muted)">Obs Time</span><span class="mono">{{ settlement_high.obs_time_local }}</span></div>
         {% endif %}
         {% if forecasts.wu_history.url %}
         <div class="mt-2 pt-2 border-t" style="border-color:var(--border)">
           <a href="{{ forecasts.wu_history.url }}" target="_blank" rel="noopener"
              class="flex items-center gap-1 hover:underline transition-colors"
              style="color:var(--cyan)">
-            <span>↗ View Source Page</span>
+            <span>↗ View WU History Page</span>
           </a>
         </div>
         {% endif %}
       </div>
     </div>
     <div class="text-4xl font-bold mono" style="color:#FBBF24">
-      {% if forecasts.wu_history.high_f is not none %}{{ "%.1f"|format(forecasts.wu_history.high_f) }}°{{ city.unit|default('F') }}{% else %}—{% endif %}
+      {% if settlement_high.high_f is not none %}{{ "%.1f"|format(settlement_high.high_f) }}°{{ city.unit|default('F') }}{% else %}—{% endif %}
     </div>
-    <div class="text-xs mt-2" style="color:var(--text-muted)">Settlement Source (WU)</div>
+    <div class="flex items-center gap-2 text-xs mt-2" style="color:var(--text-muted)">
+      <span>Settlement Source</span>
+      {% if settlement_high.obs_time_local %}
+      <span class="opacity-50">·</span>
+      <span class="mono opacity-70">{{ settlement_high.obs_time_local }}</span>
+      {% endif %}
+    </div>
   </div>
 
   <!-- Model Forecast μ -->
@@ -1054,7 +1067,7 @@
             <tr class="border-b hover:bg-white/5 transition-colors
               {% if surpassed %}opacity-30 line-through{% elif b.actionable %}edge-hot{% elif b.ev and b.ev >= 0.10 %}edge-warm{% else %}edge-cold{% endif %}"
               style="border-color:rgba(26,58,107,0.4)"
-              {% if surpassed %}title="Surpassed: WU Settlement High {{ '%.1f'|format(forecasts.wu_history.high_f) }}° > bucket ceiling {{ '%.1f'|format(b.high_f) }}°"{% endif %}>
+              {% if surpassed %}title="Surpassed: Settlement High {{ '%.1f'|format(settlement_high.high_f or forecasts.wu_history.high_f) }}° > bucket ceiling {{ '%.1f'|format(b.high_f) }}°"{% endif %}>
               <td class="px-3 py-2.5 mono font-medium text-xs relative" x-data="{ showCancel: false }">
                 <div class="mb-1">
                 {% if b.low_f is not none and b.high_f is not none %}

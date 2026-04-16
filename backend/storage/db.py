@@ -173,6 +173,10 @@ async def init_db() -> None:
     await _run_ddl("UPDATE calibration_params SET bias_nbm = bias_gfs WHERE bias_nbm = 0.0 AND bias_gfs != 0.0")
     await _run_ddl("UPDATE calibration_params SET weight_nbm = weight_gfs WHERE weight_nbm = 0.2 AND weight_gfs != 0.2")
 
+    # metar_obs — source column for TGFTP vs aviation distinction
+    await _run_ddl("ALTER TABLE metar_obs ADD COLUMN source VARCHAR(16) NOT NULL DEFAULT 'aviation'")
+    await _run_ddl("CREATE INDEX IF NOT EXISTS ix_metar_source_station_ts ON metar_obs (source, metar_station, observed_at)")
+
     # station_calibrations — per-source MAE breakdown
     await _run_ddl("ALTER TABLE station_calibrations ADD COLUMN source_mae_json TEXT")
     await _run_ddl("ALTER TABLE station_calibrations ADD COLUMN rmse_f FLOAT DEFAULT 0.0")

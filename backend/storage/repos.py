@@ -296,23 +296,42 @@ async def get_latest_metar(
     return result.scalar_one_or_none()
 
 
+async def get_latest_metar_by_source(
+    session: AsyncSession, city_id: int, source: str
+) -> Optional[MetarObs]:
+    """Latest MetarObs for a city filtered by source (e.g. 'tgftp', 'aviation')."""
+    result = await session.execute(
+        select(MetarObs)
+        .where(MetarObs.city_id == city_id, MetarObs.source == source)
+        .order_by(desc(MetarObs.observed_at))
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
 async def get_daily_high_metar(
     session: AsyncSession, city_id: int, date_et: str,
     city_tz: str = "America/New_York",
+    source: Optional[str] = None,
 ) -> Optional[float]:
-    """Max temp_f observed for a city on the given local date."""
+    """Max temp_f observed for a city on the given local date.
+
+    When source is provided, only consider observations from that source
+    (e.g. 'tgftp' or 'aviation'). When None, aggregate across all sources.
+    """
     tz = ZoneInfo(city_tz)
     start_dt = datetime.strptime(date_et, "%Y-%m-%d").replace(tzinfo=tz)
     end_dt = start_dt + timedelta(days=1)
 
-    result = await session.execute(
-        select(func.max(MetarObs.temp_f))
-        .where(
-            MetarObs.city_id == city_id,
-            MetarObs.observed_at >= start_dt,
-            MetarObs.observed_at < end_dt,
-        )
+    q = select(func.max(MetarObs.temp_f)).where(
+        MetarObs.city_id == city_id,
+        MetarObs.observed_at >= start_dt,
+        MetarObs.observed_at < end_dt,
     )
+    if source is not None:
+        q = q.where(MetarObs.source == source)
+
+    result = await session.execute(q)
     return result.scalar_one_or_none()
 
 

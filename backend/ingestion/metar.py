@@ -482,6 +482,7 @@ async def _insert_or_merge_metar_observation(
                 daily_high_f=daily_high,
                 raw_text=raw_text,
                 raw_json=raw_json,
+                source="aviation",
             )
 
         if ext_data:
@@ -757,6 +758,7 @@ async def _fetch_intl_open_meteo(cities: list[City]) -> None:
                 daily_high_f=daily_high,
                 raw_text=None,
                 raw_json=raw_str,
+                source="open_meteo",
             )
 
 

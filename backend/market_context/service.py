@@ -667,6 +667,75 @@ async def _compute_recent_high_summary(
     }
 
 
+async def _resolve_realized_high_with_source(
+    sess,
+    *,
+    city: City,
+    date_et: str,
+    observation_minutes: list[int],
+) -> dict[str, Any]:
+    """Resolve the realized daily high with source tracking.
+
+    Returns dict with keys: high_f (Optional[float]), source_used (Optional[str]),
+    obs_time (Optional[datetime]).
+
+    Fallback chain is controlled by Config.SETTLEMENT_HIGH_PRIMARY:
+      - "tgftp" (default): TGFTP daily high → wu_history → resolution_metar → raw_metar
+      - "wu_history": wu_history → resolution_metar → raw_metar (legacy behavior)
+    """
+    primary = Config.SETTLEMENT_HIGH_PRIMARY
+    city_tz = getattr(city, "tz", "America/New_York")
+
+    # ── TGFTP primary path ────────────────────────────────────────────────
+    if primary == "tgftp":
+        tgftp_high = await get_daily_high_metar(
+            sess, city.id, date_et, city_tz=city_tz, source="tgftp",
+        )
+        if tgftp_high is not None:
+            # Get the latest TGFTP observation for the obs_time
+            from backend.storage.repos import get_latest_metar_by_source
+            latest_tgftp = await get_latest_metar_by_source(sess, city.id, "tgftp")
+            obs_time = latest_tgftp.observed_at if latest_tgftp else None
+            return {"high_f": float(tgftp_high), "source_used": "tgftp", "obs_time": obs_time}
+
+    # ── WU history (always available as fallback or primary) ──────────────
+    wu_history = await get_latest_successful_forecast(sess, city.id, "wu_history", date_et)
+    if wu_history and wu_history.high_f is not None:
+        wu_raw = json.loads(wu_history.raw_json) if wu_history.raw_json else {}
+        obs_time_str = wu_raw.get("obs_time")
+        obs_time = None
+        if obs_time_str:
+            try:
+                obs_time = datetime.fromisoformat(str(obs_time_str).rstrip("Z")).replace(tzinfo=timezone.utc)
+            except Exception:
+                pass
+        return {"high_f": float(wu_history.high_f), "source_used": "wu_history", "obs_time": obs_time}
+
+    # ── Resolution METAR (valid observation minutes only) ─────────────────
+    if observation_minutes:
+        resolution_high = await get_resolution_high_metar(
+            sess,
+            city.id,
+            date_et,
+            observation_minutes,
+            city_tz=city_tz,
+        )
+        if resolution_high is not None:
+            return {"high_f": float(resolution_high), "source_used": "resolution_metar", "obs_time": None}
+
+    # ── Raw METAR (aggregate all sources) ─────────────────────────────────
+    daily_high = await get_daily_high_metar(
+        sess,
+        city.id,
+        date_et,
+        city_tz=city_tz,
+    )
+    if daily_high is not None:
+        return {"high_f": float(daily_high), "source_used": "raw_metar", "obs_time": None}
+
+    return {"high_f": None, "source_used": None, "obs_time": None}
+
+
 async def _resolve_realized_high(
     sess,
     *,
@@ -674,28 +743,14 @@ async def _resolve_realized_high(
     date_et: str,
     observation_minutes: list[int],
 ) -> Optional[float]:
-    wu_history = await get_latest_successful_forecast(sess, city.id, "wu_history", date_et)
-    if wu_history and wu_history.high_f is not None:
-        return float(wu_history.high_f)
-
-    if observation_minutes:
-        resolution_high = await get_resolution_high_metar(
-            sess,
-            city.id,
-            date_et,
-            observation_minutes,
-            city_tz=getattr(city, "tz", "America/New_York"),
-        )
-        if resolution_high is not None:
-            return float(resolution_high)
-
-    daily_high = await get_daily_high_metar(
+    """Backward-compatible wrapper — returns just the float."""
+    result = await _resolve_realized_high_with_source(
         sess,
-        city.id,
-        date_et,
-        city_tz=getattr(city, "tz", "America/New_York"),
+        city=city,
+        date_et=date_et,
+        observation_minutes=observation_minutes,
     )
-    return float(daily_high) if daily_high is not None else None
+    return result["high_f"]
 
 
 def _summarize_sources(

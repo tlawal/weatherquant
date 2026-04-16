@@ -137,7 +137,10 @@ class Bucket(Base):
 class MetarObs(Base):
     """Raw METAR observation per station per poll."""
     __tablename__ = "metar_obs"
-    __table_args__ = (Index("ix_metar_station_ts", "metar_station", "observed_at"),)
+    __table_args__ = (
+        Index("ix_metar_station_ts", "metar_station", "observed_at"),
+        Index("ix_metar_source_station_ts", "source", "metar_station", "observed_at"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     city_id: Mapped[int] = mapped_column(Integer, ForeignKey("cities.id"), nullable=False)
@@ -150,6 +153,7 @@ class MetarObs(Base):
     report_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     raw_text: Mapped[Optional[str]] = mapped_column(Text)
     raw_json: Mapped[Optional[str]] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(String(16), default="aviation", nullable=False)
 
     city_ref: Mapped[City] = relationship("City", back_populates="metar_obs")
     extended: Mapped[Optional["MetarObsExtended"]] = relationship(
