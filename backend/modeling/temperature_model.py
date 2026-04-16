@@ -70,7 +70,7 @@ _METAR_WEIGHT_TABLE = [
     (14, 16, 0.40),
     (16, 18, 0.55),
     (18, 20, 0.70),   # late afternoon/evening — METAR is the dominant signal
-    (20, 24, 0.99),
+    (20, 24, 0.85),   # capped at 0.85 — forecasts always retain ≥15% influence
 ]
 
 
@@ -497,6 +497,35 @@ def compute_model(
         )
         projected_high = min(projected_high, projected_ceiling)
 
+    # ── Divergence-aware METAR weight reduction ──────────────────────────────
+    # When the METAR projection diverges significantly from the multi-model
+    # forecast consensus, the METAR data is likely incomplete (missed the peak
+    # due to sparse observations, station gaps, etc.). Reduce w_metar and
+    # inflate sigma to reflect this uncertainty.
+    divergence = abs(projected_high - mu_forecast)
+    divergence_f = divergence / unit_mult if unit_mult else divergence
+    if divergence_f > 3.0:
+        # Linear penalty: 0% at 3°F, 50% reduction at 10°F divergence
+        penalty = min(1.0, (divergence_f - 3.0) / 7.0)
+        w_metar *= (1.0 - penalty * 0.50)
+        log.debug(
+            "model: divergence penalty %.1f°F → w_metar %.3f → %.3f",
+            divergence_f, _metar_weight(hour_local), w_metar,
+        )
+
+    # ── Observation-density gating ────────────────────────────────────────────
+    # With few METAR observations (e.g. 8 vs expected ~24 for hourly station),
+    # the daily high may have missed the actual peak. Scale down w_metar.
+    if adaptive is not None and adaptive.kalman is not None:
+        n_obs = adaptive.kalman.n_observations
+        if n_obs < 12:
+            density_factor = n_obs / 12.0  # 0.0 at 0 obs, 1.0 at 12+
+            w_metar *= max(0.30, density_factor)
+            log.debug(
+                "model: sparse obs (%d) → density_factor %.2f → w_metar %.3f",
+                n_obs, density_factor, w_metar,
+            )
+
     # Weighted combination
     mu_final = (1.0 - w_metar) * mu_forecast + w_metar * projected_high
 
@@ -504,6 +533,10 @@ def compute_model(
     # forecast spread becomes less relevant because ground truth dominates.
     # Blend from full forecast sigma toward a tight observation-based sigma.
     observation_sigma = max(1.0, remaining_rise + 0.5) * unit_mult
+    # Inflate observation sigma when METAR and forecasts diverge —
+    # disagreement means more uncertainty, not less.
+    if divergence_f > 3.0:
+        observation_sigma += divergence * 0.3
     sigma_final = (1.0 - w_metar) * sigma_raw + w_metar * observation_sigma
 
     # Apply adaptive sigma adjustment (tightens when trend data is rich)
@@ -579,7 +612,9 @@ def compute_model(
             else None
         ),
         "projected_high": float(projected_high),
+        "metar_forecast_divergence_f": round(divergence_f, 2),
         "w_metar": float(w_metar),
+        "w_metar_base": float(_metar_weight(hour_local)),
         "remaining_rise": remaining_rise,
         "hour_local": hour_local,
         "spread": float(max(vals) - min(vals)) if len(vals) >= 2 else 0.0,
