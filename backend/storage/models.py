@@ -173,6 +173,8 @@ class MetarObsExtended(Base):
     dewpoint_c: Mapped[Optional[float]] = mapped_column(Float)
     dewpoint_f: Mapped[Optional[float]] = mapped_column(Float)
 
+    metar_obs_ref: Mapped["MetarObs"] = relationship("MetarObs", back_populates="extended")
+
 
 class MadisObs(Base):
     """MADIS HFMETAR observation — benchmarking only, does NOT feed trading logic."""
