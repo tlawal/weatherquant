@@ -36,6 +36,10 @@ _MAX_RETRIES = 3
 # METAR temperature regex: M##/M## (e.g. "18/06", "M01/M03")
 _TEMP_RE = re.compile(r"\b(M?)(\d{2})/(M?\d{2})\b")
 
+# METAR T-group in remarks: T02830089 → temp 28.3°C, dewpoint 08.9°C
+# 1st digit = sign (0=positive, 1=negative), next 3 = value in tenths
+_T_GROUP_RE = re.compile(r"\bT(\d{4})(\d{4})\b")
+
 # METAR observation time regex: DDHHMMZ (e.g. "141853Z")
 _OBS_TIME_RE = re.compile(r"\b(\d{2})(\d{2})(\d{2})Z\b")
 
@@ -45,7 +49,23 @@ def _c_to_f(c: float) -> float:
 
 
 def _parse_tgftp_temp(raw_metar: str) -> Optional[tuple[float, float]]:
-    """Parse temperature from raw METAR string. Returns (temp_c, temp_f) or None."""
+    """Parse temperature from raw METAR string. Returns (temp_c, temp_f) or None.
+
+    Prefers the T-group in remarks (tenths of degrees) over the rounded
+    body temperature. E.g. T02830089 → 28.3°C instead of 28/09 → 28°C.
+    """
+    # Try T-group first (more precise, in remarks)
+    tg = _T_GROUP_RE.search(raw_metar)
+    if tg:
+        try:
+            raw_temp = tg.group(1)
+            sign = -1 if raw_temp[0] == "1" else 1
+            tc = sign * float(raw_temp[1:]) / 10.0
+            return tc, _c_to_f(tc)
+        except (ValueError, TypeError, IndexError):
+            pass
+
+    # Fallback: body temperature (rounded to whole degrees)
     m = _TEMP_RE.search(raw_metar)
     if not m:
         return None

@@ -346,6 +346,9 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
         _sh_obs_time_local = None
         if _sh_obs_time:
             try:
+                # Safety: if DB returns naive datetime, assume UTC
+                if _sh_obs_time.tzinfo is None:
+                    _sh_obs_time = _sh_obs_time.replace(tzinfo=timezone.utc)
                 city_tz_obj = ZoneInfo(getattr(city, "tz", "America/New_York"))
                 _sh_obs_time_local = _sh_obs_time.astimezone(city_tz_obj).strftime("%-I:%M %p %Z")
             except Exception:
