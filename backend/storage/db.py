@@ -192,6 +192,15 @@ async def init_db() -> None:
     """)
     await _run_ddl("CREATE INDEX IF NOT EXISTS ix_madis_station_ts ON madis_obs (metar_station, observed_at)")
 
+    # metar_obs_extended — add columns expected by routes.py
+    await _run_ddl("ALTER TABLE metar_obs_extended ADD COLUMN IF NOT EXISTS humidity_pct FLOAT")
+    await _run_ddl("ALTER TABLE metar_obs_extended ADD COLUMN IF NOT EXISTS wind_dir_deg INTEGER")
+    await _run_ddl("ALTER TABLE metar_obs_extended ADD COLUMN IF NOT EXISTS wind_speed_kt FLOAT")
+    await _run_ddl("ALTER TABLE metar_obs_extended ADD COLUMN IF NOT EXISTS wind_gust_kt FLOAT")
+    await _run_ddl("ALTER TABLE metar_obs_extended ADD COLUMN IF NOT EXISTS altimeter_inhg FLOAT")
+    await _run_ddl("ALTER TABLE metar_obs_extended ADD COLUMN IF NOT EXISTS precip_in FLOAT")
+    await _run_ddl("ALTER TABLE metar_obs_extended ADD COLUMN IF NOT EXISTS condition VARCHAR(32)")
+
     # station_calibrations — per-source MAE breakdown
     await _run_ddl("ALTER TABLE station_calibrations ADD COLUMN source_mae_json TEXT")
     await _run_ddl("ALTER TABLE station_calibrations ADD COLUMN rmse_f FLOAT DEFAULT 0.0")

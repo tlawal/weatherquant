@@ -172,6 +172,13 @@ class MetarObsExtended(Base):
     )
     dewpoint_c: Mapped[Optional[float]] = mapped_column(Float)
     dewpoint_f: Mapped[Optional[float]] = mapped_column(Float)
+    humidity_pct: Mapped[Optional[float]] = mapped_column(Float)
+    wind_dir_deg: Mapped[Optional[int]] = mapped_column(Integer)
+    wind_speed_kt: Mapped[Optional[float]] = mapped_column(Float)
+    wind_gust_kt: Mapped[Optional[float]] = mapped_column(Float)
+    altimeter_inhg: Mapped[Optional[float]] = mapped_column(Float)
+    precip_in: Mapped[Optional[float]] = mapped_column(Float)
+    condition: Mapped[Optional[str]] = mapped_column(String(32))
 
     metar_obs_ref: Mapped["MetarObs"] = relationship("MetarObs", back_populates="extended")
 
