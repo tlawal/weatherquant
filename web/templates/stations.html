@@ -49,7 +49,13 @@
     <span class="text-[10px] px-2 py-0.5 rounded-full font-bold"
           style="background:rgba(34,211,238,0.12);color:var(--cyan)">30-Day Rolling</span>
   </div>
-  <div class="flex items-center gap-2">
+  <div class="flex items-center gap-2 flex-wrap">
+    <button onclick="forceComputeNow(this)"
+            class="px-3 py-1.5 rounded-lg text-[10px] font-bold tracking-widest transition-all border"
+            style="background:var(--bg-panel);border-color:#EAB308;color:#FDE047"
+            title="Compute with any available data, no admin token required. Use this for fresh deployments or sparse data scenarios.">
+      FORCE COMPUTE NOW (ANY DATA)
+    </button>
     <button onclick="refreshCalibrations(this)"
             class="px-3 py-1.5 rounded-lg text-[10px] font-bold tracking-widest transition-all border"
             style="background:var(--bg-panel);border-color:var(--cyan);color:var(--cyan)">
@@ -70,8 +76,18 @@
   <template x-if="loading && stations.length === 0 && !emptyReason">
     <div class="card p-8 text-center space-y-3">
       <div class="spinner mx-auto"></div>
-      <div class="text-sm font-medium" style="color:var(--cyan)" x-text="refreshing ? 'Computing 30-day station calibration... (this happens automatically on first load and daily thereafter)' : 'Loading station data...'"></div>
-      <div class="text-[10px]" style="color:var(--text-muted)" x-show="refreshing">This may take a minute. The page will update automatically when complete.</div>
+      <div class="text-sm font-medium" style="color:var(--cyan)"
+           x-text="refreshing ? 'Computing station calibration with any available data...' : 'Loading station data...'"></div>
+      <div class="text-[10px]" style="color:var(--text-muted)" x-show="refreshing && (diag.total_metar_rows_30d != null || diag.total_forecast_rows_30d != null)">
+        Computing with
+        <span class="mono" style="color:var(--cyan)" x-text="(diag.total_metar_rows_30d ?? 0).toLocaleString()"></span>
+        METAR observations +
+        <span class="mono" style="color:var(--cyan)" x-text="(diag.total_forecast_rows_30d ?? 0).toLocaleString()"></span>
+        forecast logs (last 30 days)…
+      </div>
+      <div class="text-[10px]" style="color:var(--text-muted)" x-show="refreshing">
+        Full 30-day calibration activates automatically once enough history accumulates.
+      </div>
     </div>
   </template>
 
@@ -84,6 +100,21 @@
         Expand the Diagnostics panel below for details, or press
         <span style="color:var(--cyan)">REFRESH CALIBRATION NOW</span> to retry.
       </div>
+    </div>
+  </template>
+
+  <!-- Fallback-mode banner (shown when any station has < 30 days of history) -->
+  <template x-if="fallbackCount > 0">
+    <div class="card p-3 flex items-start gap-2 text-[11px]"
+         style="border-left:3px solid #EAB308; background:rgba(234,179,8,0.05)">
+      <span style="color:#FDE047" class="mt-0.5">⚠</span>
+      <span style="color:var(--text-main)">
+        <span class="font-bold" style="color:#FDE047" x-text="fallbackCount"></span>
+        of <span class="font-bold" x-text="stations.length"></span> station(s) running in
+        <strong style="color:#FDE047">fallback mode</strong> (using &lt;30 days of history).
+        Full 30-day calibration activates automatically as more observations accumulate.
+        Avg days used: <span class="mono font-bold" x-text="avgSamples.toFixed(1)"></span>.
+      </span>
     </div>
   </template>
 
@@ -220,7 +251,12 @@
               <td class="px-2 py-2.5 text-right mono"
                   :style="s.bias_f > 0 ? 'color:#F97316' : 'color:#60A5FA'"
                   x-text="(s.bias_f > 0 ? '+' : '') + s.bias_f.toFixed(2) + '°'"></td>
-              <td class="px-2 py-2.5 text-right mono" style="color:var(--text-muted)" x-text="s.n_samples"></td>
+              <td class="px-2 py-2.5 text-right mono"
+                  :style="s.n_samples < 30 ? 'color:#FDE047' : 'color:var(--text-muted)'"
+                  :title="s.n_samples < 30 ? 'Fallback mode — using <30 days of history. Full calibration activates automatically once enough data accumulates.' : '30 days of data — full calibration.'">
+                <span x-text="s.n_samples"></span>
+                <span x-show="s.n_samples < 30" class="opacity-75 ml-0.5">⚠</span>
+              </td>
               <td class="px-2 py-2.5 text-right mono" style="color:var(--text-muted)" x-text="s.pct_days_traded.toFixed(0) + '%'"></td>
               <td class="px-2 py-2.5 text-center">
                 <span class="text-[10px] font-bold px-2 py-0.5 rounded-full"
@@ -258,6 +294,9 @@
       <div>Refresh in progress: <span style="color:var(--cyan)" x-text="diag.refresh_in_progress ?? '—'"></span></div>
       <div>Enabled cities: <span style="color:var(--cyan)" x-text="diag.enabled_cities_count ?? '—'"></span></div>
       <div>Cities with METAR station: <span style="color:var(--cyan)" x-text="diag.cities_with_station_count ?? '—'"></span></div>
+      <div>MetarObs rows (last 30d): <span style="color:var(--cyan)" x-text="diag.total_metar_rows_30d != null ? diag.total_metar_rows_30d.toLocaleString() : '—'"></span></div>
+      <div>ForecastObs rows (last 30d): <span style="color:var(--cyan)" x-text="diag.total_forecast_rows_30d != null ? diag.total_forecast_rows_30d.toLocaleString() : '—'"></span></div>
+      <div>Fallback stations (n_samples &lt; 30): <span style="color:#FDE047" x-text="fallbackCount"></span> / <span style="color:var(--cyan)" x-text="stations.length"></span></div>
       <div x-show="diag.error">Error: <span style="color:#EF4444" x-text="diag.error"></span></div>
     </div>
   </div>
@@ -292,6 +331,8 @@
       countGreen: 0,
       countAmber: 0,
       countRed: 0,
+      fallbackCount: 0,
+      avgSamples: 0,
       diag: {},
       emptyReason: '',
       _pollTimer: null,
@@ -383,7 +424,7 @@
           // Auto-trigger refresh on empty table
           this.refreshing = true;
           try {
-            await fetch('/api/station-calibrations/auto-refresh', { method: 'POST' });
+            await fetch('/api/station-calibrations/force-compute', { method: 'POST' });
           } catch (e) { console.error('Auto-refresh trigger failed:', e); }
           // Poll every 5s, but give up after 60s with an informative message.
           const stopPolling = () => {
@@ -414,7 +455,7 @@
             this.loading = false;
             await this.fetchDiagnostics();
             this.emptyReason = this.deriveEmptyReason();
-          }, 60000);
+          }, 30000);
         } else {
           this.loading = false;
         }
@@ -447,12 +488,18 @@
       },
 
       computeStats() {
-        if (this.stations.length === 0) return;
+        if (this.stations.length === 0) {
+          this.fallbackCount = 0;
+          this.avgSamples = 0;
+          return;
+        }
         this.avgMae = this.stations.reduce((s, c) => s + c.mae_f, 0) / this.stations.length;
         this.avgTraded = this.stations.reduce((s, c) => s + c.pct_days_traded, 0) / this.stations.length;
         this.countGreen = this.stations.filter(s => s.tradeability === 'GREEN').length;
         this.countAmber = this.stations.filter(s => s.tradeability === 'AMBER').length;
         this.countRed = this.stations.filter(s => s.tradeability === 'RED').length;
+        this.fallbackCount = this.stations.filter(s => (s.n_samples ?? 0) < 30).length;
+        this.avgSamples = this.stations.reduce((s, c) => s + (c.n_samples ?? 0), 0) / this.stations.length;
       },
 
       initMap() {
@@ -533,6 +580,32 @@
         }
       },
     };
+  }
+
+  async function forceComputeNow(btn) {
+    btn.disabled = true;
+    const orig = btn.textContent;
+    btn.textContent = 'COMPUTING…';
+    let pollTimer = null;
+    let timeoutTimer = null;
+    const clear = () => { if (pollTimer) clearInterval(pollTimer); if (timeoutTimer) clearTimeout(timeoutTimer); };
+    try {
+      await fetch('/api/station-calibrations/force-compute', { method: 'POST' });
+      pollTimer = setInterval(async () => {
+        try {
+          const r = await fetch('/api/station-calibrations');
+          if (r.ok) {
+            const data = await r.json();
+            if (data.length > 0) { clear(); location.reload(); }
+          }
+        } catch (e) { /* keep polling */ }
+      }, 3000);
+      timeoutTimer = setTimeout(() => { clear(); location.reload(); }, 30000);
+    } catch (e) {
+      clear();
+      btn.textContent = 'ERROR';
+      setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 2000);
+    }
   }
 
   async function refreshCalibrations(btn) {

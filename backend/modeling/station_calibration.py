@@ -160,11 +160,24 @@ async def _get_pct_days_traded(
     return round(len(traded_dates) / len(dates) * 100, 1)
 
 
-async def compute_station_calibration(city: City) -> Optional[dict]:
-    """Compute 30-day rolling calibration metrics for a single city/station.
+async def compute_station_calibration(
+    city: City,
+    *,
+    min_samples: int = 1,
+    max_days: int = 30,
+) -> Optional[dict]:
+    """Compute rolling calibration metrics for a single city/station.
+
+    Args:
+        city: The city to compute for.
+        min_samples: Minimum observed days required. Default 1 (fallback mode);
+            was implicitly 3 previously. With 1, any station that has at least one
+            day of obs + forecast gets a row — `n_samples < 30` signals fallback.
+        max_days: Size of rolling window. Default 30. Fewer obs than max_days is
+            normal in fallback mode.
 
     Returns a dict of kwargs for upsert_station_calibration, or None if
-    insufficient data.
+    even the relaxed threshold is not met.
     """
     station_id = city.metar_station
     if not station_id:
@@ -174,16 +187,19 @@ async def compute_station_calibration(city: City) -> Optional[dict]:
     now = datetime.now(ZoneInfo(city_tz))
     today_str = now.strftime("%Y-%m-%d")
 
-    # Build list of past 30 dates (excluding today — not settled yet)
-    dates = []
-    for i in range(1, 31):
-        d = now - timedelta(days=i)
-        dates.append(d.strftime("%Y-%m-%d"))
+    # Build list of past max_days dates (excluding today — not settled yet)
+    dates = [
+        (now - timedelta(days=i)).strftime("%Y-%m-%d")
+        for i in range(1, max_days + 1)
+    ]
 
     # Fetch observed highs
     obs_highs = await _get_daily_highs(city.id, city_tz, dates)
-    if len(obs_highs) < 3:
-        log.info("station_cal: %s only %d observed highs, skipping", station_id, len(obs_highs))
+    if len(obs_highs) < min_samples:
+        log.info(
+            "station_cal: %s only %d obs highs (< %d min), skipping",
+            station_id, len(obs_highs), min_samples,
+        )
         return None
 
     # Fetch per-source forecast highs (includes ecmwf_ifs for model comparison)
@@ -219,7 +235,10 @@ async def compute_station_calibration(city: City) -> Optional[dict]:
                 fused_errors.append(avg_fc - obs)
 
     if not fused_errors:
-        log.info("station_cal: %s no fused errors computable", station_id)
+        log.info(
+            "station_cal: %s no fused errors (obs_dates=%d, fc_dates=%d)",
+            station_id, len(obs_highs), len(fc_highs),
+        )
         return None
 
     # ── Aggregate metrics ──────────────────────────────────────────────────
@@ -262,6 +281,8 @@ async def compute_station_calibration(city: City) -> Optional[dict]:
     # % days traded
     pct_traded = await _get_pct_days_traded(city.id, dates)
 
+    # is_fallback is derived client-side from n_samples < 30
+    # but we include days_window_used for future configurability
     return {
         "city_slug": city.city_slug,
         "city_name": city.display_name,
@@ -283,8 +304,13 @@ async def compute_station_calibration(city: City) -> Optional[dict]:
     }
 
 
-async def refresh_all_station_calibrations() -> int:
-    """Recompute 30-day rolling calibration for all enabled cities.
+async def refresh_all_station_calibrations(min_samples: int = 1) -> int:
+    """Recompute rolling calibration for all enabled cities.
+
+    Args:
+        min_samples: Minimum observed days required per station. Default 1
+            allows fallback-mode rows for stations with < 30 days of history.
+            Set higher (e.g. 3 or 10) for stricter quality gating.
 
     Returns number of stations updated.
     """
@@ -298,7 +324,7 @@ async def refresh_all_station_calibrations() -> int:
         if not city.metar_station:
             continue
         try:
-            cal_data = await compute_station_calibration(city)
+            cal_data = await compute_station_calibration(city, min_samples=min_samples)
             if cal_data is None:
                 continue
             async with get_session() as sess:

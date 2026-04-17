@@ -19,7 +19,7 @@ from backend.city_registry import get_city_priority, CITY_REGISTRY_BY_SLUG
 from backend.market_context.service import serialize_market_context_snapshot, _resolve_realized_high_with_source
 from backend.tz_utils import city_local_date, city_local_now, city_local_tomorrow, et_today
 from backend.strategy.kelly import calculate_expected_value, calculate_kelly_fraction
-from backend.modeling.calibration_engine import get_reliability_metrics
+from backend.modeling.calibration_engine import get_reliability_metrics, get_reliability_diagnostics
 from collections import defaultdict
 
 log = logging.getLogger(__name__)
@@ -480,6 +480,7 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                 hrrr_hourly.append({"time": t, "temp_f": temp})
 
     reliability_bins = await get_reliability_metrics(city.id)
+    reliability_diag = await get_reliability_diagnostics(city.id)
 
     # ── Adaptive predictions (obs table + station-time predictions) ─────────
     import math
@@ -806,6 +807,7 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                 for b in reliability_bins
             ]),
             "reliability_total_samples": sum(b.count for b in reliability_bins),
+            "reliability_diag": reliability_diag,
             "obs_table": obs_table,
             "obs_table_json": json.dumps(obs_table),
             "station_predictions": station_predictions,

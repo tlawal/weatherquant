@@ -1084,14 +1084,39 @@
         </div>
         <span class="text-[10px] uppercase tracking-widest px-2 py-0.5 rounded" style="color:var(--cyan); background:rgba(34,211,238,0.1)">Reliability</span>
       </div>
-      {% if reliability_total_samples is defined and reliability_total_samples < 50 %}
-      <div class="flex items-center justify-center" style="height:260px;color:var(--text-muted)">
-        <div class="text-center">
-          <div class="text-sm mb-1">Insufficient Data</div>
-          <div class="text-[10px]">Need at least 50 settled events (have {{ reliability_total_samples }})</div>
+      {% set _n = reliability_total_samples|default(0) %}
+      {% if _n == 0 %}
+      <div class="flex items-center justify-center" style="min-height:260px">
+        <div class="text-center text-[11px]" style="color:var(--text-muted)">
+          <div class="text-sm mb-2" style="color:#FDE047">No calibration data available yet</div>
+          <div class="mono space-y-0.5 text-left inline-block">
+            <div>Total events: <span style="color:var(--cyan)">{{ reliability_diag.total_events if reliability_diag else '—' }}</span></div>
+            <div>Past events (settled-eligible): <span style="color:var(--cyan)">{{ reliability_diag.past_events if reliability_diag else '—' }}</span></div>
+            <div>Resolved (redeemer ran): <span style="color:{{ '#22C55E' if (reliability_diag and reliability_diag.resolved_events) else '#EF4444' }}">{{ reliability_diag.resolved_events if reliability_diag else '—' }}</span></div>
+            <div>With ModelSnapshot: <span style="color:var(--cyan)">{{ reliability_diag.events_with_snapshot if reliability_diag else '—' }}</span></div>
+            <div>Dates with wu_history obs: <span style="color:{{ '#22C55E' if (reliability_diag and reliability_diag.dates_with_wu_history) else '#EF4444' }}">{{ reliability_diag.dates_with_wu_history if reliability_diag else '—' }}</span></div>
+            <div class="opacity-60 mt-1">Last resolved: {{ (reliability_diag.last_resolved_at if reliability_diag else None) or 'never' }}</div>
+          </div>
+          <div class="mt-3">
+            <button onclick="forceRedeemPending(this)"
+                    class="px-3 py-1 rounded text-[10px] font-bold border transition-all"
+                    style="background:var(--bg-panel);border-color:#EAB308;color:#FDE047"
+                    title="Manually trigger the redeemer to fetch Polymarket settlement outcomes for past events.">
+              FORCE REDEEM PENDING EVENTS
+            </button>
+          </div>
+          <div class="mt-2 opacity-60" style="max-width:320px; margin-left:auto; margin-right:auto">
+            The zero-count row above identifies the blocking filter. Red = blocker.
+          </div>
         </div>
       </div>
       {% else %}
+      {% if _n < 50 %}
+      <div class="mb-2 px-2 py-1 rounded text-[10px]"
+           style="background:rgba(234,179,8,0.08);border-left:2px solid #EAB308;color:#FDE047">
+        ⚠ Preview mode — {{ _n }} samples. Full calibration activates at 50+ samples.
+      </div>
+      {% endif %}
       <div id="reliability-plot" style="width:100%; height:260px"></div>
       {% endif %}
       <p class="text-[10px] mt-2" style="color:var(--text-muted)">
@@ -1597,9 +1622,12 @@ document.addEventListener('DOMContentLoaded', function() {
   }
 
   // Reliability Diagram
-  const reliabilityData = {{ reliability_json|safe }};
+  const reliabilityRaw = {{ reliability_json|safe }};
+  // Only plot bins that actually have samples — bins with count=0 would plot at observed=0
+  // which is misleading (especially in preview mode with <50 samples).
+  const reliabilityData = Array.isArray(reliabilityRaw) ? reliabilityRaw.filter(d => d && d.count > 0) : [];
   const relPlotEl = document.getElementById('reliability-plot');
-  if (reliabilityData && relPlotEl && typeof Plotly !== 'undefined') {
+  if (reliabilityData.length > 0 && relPlotEl && typeof Plotly !== 'undefined') {
     const x = reliabilityData.map(d => d.expected * 100);
     const y = reliabilityData.map(d => d.observed * 100);
     const text = reliabilityData.map(d => `n=${d.count}<br>Obs: ${(d.observed*100).toFixed(1)}%<br>Exp: ${(d.expected*100).toFixed(1)}%`);
@@ -2205,6 +2233,30 @@ async function refreshMarketContext(citySlug, dateEt, buttonEl) {
     alert(`Market Context refresh failed: ${err.message}`);
     buttonEl.disabled = false;
     buttonEl.textContent = originalText;
+  }
+}
+
+// Probability Calibration — manually trigger Polymarket redeemer for events
+// whose settlement outcome hasn't been fetched yet. Populates Event.resolved_at,
+// which is the primary gate keeping the reliability card empty on fresh deploys.
+async function forceRedeemPending(btn) {
+  btn.disabled = true;
+  const orig = btn.textContent;
+  btn.textContent = 'REDEEMING…';
+  try {
+    const r = await fetch('/api/reliability/force-redeem', { method: 'POST' });
+    const j = await r.json();
+    if (j.ok) {
+      btn.textContent = `RESOLVED ${j.resolved}`;
+      setTimeout(() => window.location.reload(), 1500);
+    } else {
+      btn.textContent = 'FAILED';
+      console.error('force-redeem error:', j.error);
+      setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 2500);
+    }
+  } catch (e) {
+    btn.textContent = 'ERROR';
+    setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 2500);
   }
 }
 </script>

@@ -2090,16 +2090,21 @@ _cal_refresh_in_progress = False
 
 @router.get("/api/station-calibrations/diagnostics")
 async def station_calibration_diagnostics():
-    """Debug info: table row count, last updated, refresh status, and city counts
-    so the UI can distinguish 'broken' from 'no cities qualify for calibration'."""
+    """Debug info: table row count, last updated, refresh status, city counts,
+    and data-density (metar + forecast rows in last 30d) so the UI can
+    distinguish 'broken' from 'no cities qualify for calibration'."""
+    from datetime import timedelta
     from sqlalchemy import func, select
-    from backend.storage.models import StationCalibration, City
+    from backend.storage.models import StationCalibration, City, MetarObs, ForecastObs
 
     error = None
     row_count = 0
     last_updated = None
     enabled_cities_count = 0
     cities_with_station_count = 0
+    total_metar_rows_30d = 0
+    total_forecast_rows_30d = 0
+    cutoff = datetime.now(timezone.utc) - timedelta(days=30)
     try:
         async with get_session() as sess:
             count_q = await sess.execute(
@@ -2121,6 +2126,20 @@ async def station_calibration_diagnostics():
                 )
             )
             cities_with_station_count = with_station_q.scalar_one()
+            metar_q = await sess.execute(
+                select(func.count(MetarObs.id)).where(
+                    MetarObs.observed_at >= cutoff,
+                    MetarObs.temp_f.isnot(None),
+                )
+            )
+            total_metar_rows_30d = metar_q.scalar_one()
+            forecast_q = await sess.execute(
+                select(func.count(ForecastObs.id)).where(
+                    ForecastObs.fetched_at >= cutoff,
+                    ForecastObs.high_f.isnot(None),
+                )
+            )
+            total_forecast_rows_30d = forecast_q.scalar_one()
     except Exception as e:
         error = str(e)
 
@@ -2131,6 +2150,8 @@ async def station_calibration_diagnostics():
         "refresh_in_progress": _cal_refresh_in_progress,
         "enabled_cities_count": enabled_cities_count,
         "cities_with_station_count": cities_with_station_count,
+        "total_metar_rows_30d": total_metar_rows_30d,
+        "total_forecast_rows_30d": total_forecast_rows_30d,
         "error": error,
     }
 
@@ -2156,6 +2177,56 @@ async def _do_cal_auto_refresh():
         log.error("auto-refresh station calibrations failed: %s", e, exc_info=True)
     finally:
         _cal_refresh_in_progress = False
+
+
+@router.post("/api/station-calibrations/force-compute")
+async def force_compute_station_calibrations():
+    """User-initiated compute with any available data (min_samples=1).
+
+    Unlike /auto-refresh (which defers to the scheduler's implicit gates),
+    this endpoint explicitly allows rows with <30 samples — the UI will label
+    them as fallback mode and upgrade them automatically as history accumulates.
+    No admin token required: this is the escape hatch from an empty /stations page.
+    """
+    global _cal_refresh_in_progress
+    if _cal_refresh_in_progress:
+        return {"ok": True, "status": "already_running"}
+    _cal_refresh_in_progress = True
+    asyncio.create_task(_do_cal_force_compute())
+    return {"ok": True, "status": "started"}
+
+
+async def _do_cal_force_compute():
+    global _cal_refresh_in_progress
+    try:
+        from backend.modeling.station_calibration import refresh_all_station_calibrations
+        count = await refresh_all_station_calibrations(min_samples=1)
+        log.info("force-compute station calibrations: updated %d stations", count)
+    except Exception as e:
+        log.error("force-compute station calibrations failed: %s", e, exc_info=True)
+    finally:
+        _cal_refresh_in_progress = False
+
+
+# ── Reliability: manual redeem trigger (no admin) ───────────────────────────
+# The Probability Calibration card on /city/{slug} is empty when no past events
+# have Event.resolved_at set. That's set by the Polymarket redeemer, which runs
+# on a cron — this endpoint lets a user force a run from the UI.
+@router.post("/api/reliability/force-redeem")
+async def force_redeem_pending():
+    """Run the Polymarket settlement check synchronously and report resolved count.
+
+    Fast enough to await inline (bounded by the number of unresolved events with
+    gamma_event_id); no background task needed.
+    """
+    try:
+        from backend.execution.redeemer import check_resolved_markets
+        count = await check_resolved_markets()
+        log.info("force-redeem: %d events newly resolved", count)
+        return {"ok": True, "resolved": int(count)}
+    except Exception as e:
+        log.error("force-redeem failed: %s", e, exc_info=True)
+        return {"ok": False, "error": str(e)}
 
 
 @router.post("/api/station-calibrations/refresh")

@@ -135,6 +135,73 @@ async def get_reliability_metrics(city_id: int, days_back: int = 30) -> List[Rel
              city_id, total, sum(1 for b in bins if b.count > 0))
     return bins
 
+async def get_reliability_diagnostics(city_id: int) -> dict:
+    """
+    Report exactly which calibration-query filter is failing for this city.
+    Lets the frontend show a specific reason instead of a blank card.
+
+    Returns counts for each gate in get_reliability_metrics():
+      - total_events / past_events: sanity counts
+      - resolved_events: Event.resolved_at IS NOT NULL (set by redeemer)
+      - events_with_snapshot: resolved events that also have a ModelSnapshot
+      - dates_with_wu_history: dates (any city_id scope) with wu_history ForecastObs
+      - last_resolved_at: most recent resolution timestamp for the city
+    """
+    from datetime import datetime, timezone
+    today_et = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    async with get_session() as sess:
+        total_events = (await sess.execute(
+            select(func.count(Event.id)).where(Event.city_id == city_id)
+        )).scalar_one()
+
+        past_events = (await sess.execute(
+            select(func.count(Event.id)).where(
+                Event.city_id == city_id,
+                Event.date_et < today_et,
+            )
+        )).scalar_one()
+
+        resolved = (await sess.execute(
+            select(func.count(Event.id)).where(
+                Event.city_id == city_id,
+                Event.date_et < today_et,
+                Event.resolved_at.isnot(None),
+            )
+        )).scalar_one()
+
+        with_snap = (await sess.execute(
+            select(func.count(func.distinct(ModelSnapshot.event_id)))
+            .join(Event, ModelSnapshot.event_id == Event.id)
+            .where(
+                Event.city_id == city_id,
+                Event.date_et < today_et,
+                Event.resolved_at.isnot(None),
+            )
+        )).scalar_one()
+
+        with_wu = (await sess.execute(
+            select(func.count(func.distinct(ForecastObs.date_et))).where(
+                ForecastObs.city_id == city_id,
+                ForecastObs.source == "wu_history",
+                ForecastObs.high_f.isnot(None),
+            )
+        )).scalar_one()
+
+        last_resolved = (await sess.execute(
+            select(func.max(Event.resolved_at)).where(Event.city_id == city_id)
+        )).scalar_one()
+
+    return {
+        "total_events": int(total_events or 0),
+        "past_events": int(past_events or 0),
+        "resolved_events": int(resolved or 0),
+        "events_with_snapshot": int(with_snap or 0),
+        "dates_with_wu_history": int(with_wu or 0),
+        "last_resolved_at": last_resolved.isoformat() if last_resolved else None,
+    }
+
+
 def remap_probability(prob: float, bins: List[ReliabilityBin]) -> float:
     """
     Adjust a raw model probability based on historical reliability bins.
