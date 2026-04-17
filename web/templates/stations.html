@@ -455,7 +455,7 @@
             this.loading = false;
             await this.fetchDiagnostics();
             this.emptyReason = this.deriveEmptyReason();
-          }, 30000);
+          }, 60000);
         } else {
           this.loading = false;
         }
@@ -475,9 +475,19 @@
           return `${enabled} cities enabled, but none have a METAR station configured.`;
         }
         if (d.refresh_in_progress) {
-          return 'Refresh still running after 60s — give it another minute and reload.';
+          return 'Refresh still running — give it another minute and reload.';
         }
-        return `${withStation} of ${enabled} enabled cities have a METAR station, but none produced 30 days of calibration data yet. Likely insufficient METAR/forecast history.`;
+        const metar = d.total_metar_rows_30d;
+        const forecast = d.total_forecast_rows_30d;
+        if (metar === 0) {
+          return 'No METAR observations in the last 30 days. METAR ingestion appears stalled — check scheduler heartbeats for fetch_metar / fetch_tgftp_metar / fetch_madis.';
+        }
+        if (forecast === 0) {
+          return `METAR has ${(metar ?? 0).toLocaleString()} rows but no ForecastObs in the last 30 days. Forecast ingestion is stalled — check heartbeats for fetch_nws / fetch_om_models / fetch_wu.`;
+        }
+        const metarStr = metar != null ? metar.toLocaleString() : '?';
+        const forecastStr = forecast != null ? forecast.toLocaleString() : '?';
+        return `${withStation} of ${enabled} cities have a METAR station. Last 30 days: ${metarStr} METAR rows, ${forecastStr} forecast rows. No station calibrated — check Railway logs for station_cal errors, or click FORCE COMPUTE NOW again.`;
       },
 
       async fetchDiagnostics() {

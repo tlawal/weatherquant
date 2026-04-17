@@ -76,7 +76,7 @@ class Config:
     MIN_ORDERBOOK_DEPTH_DOLLARS: float = _float("MIN_ORDERBOOK_DEPTH_DOLLARS", 2000.0)
 
     # ── Exit Engine ──────────────────────────────────────────────────────────
-    QUICK_FLIP_TARGET: float = _float("QUICK_FLIP_TARGET", 0.05)
+    QUICK_FLIP_TARGET: float = _float("QUICK_FLIP_TARGET", 0.08)
     URGENT_EXIT_MAX_SPREAD: float = _float("URGENT_EXIT_MAX_SPREAD", 0.06)
     CONSENSUS_DEBOUNCE_RUNS: int = _int("CONSENSUS_DEBOUNCE_RUNS", 2)
     EXPIRY_DISCOUNT: float = _float("EXPIRY_DISCOUNT", 0.10)

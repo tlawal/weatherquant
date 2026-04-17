@@ -1090,12 +1090,18 @@
         <div class="text-center text-[11px]" style="color:var(--text-muted)">
           <div class="text-sm mb-2" style="color:#FDE047">No calibration data available yet</div>
           <div class="mono space-y-0.5 text-left inline-block">
+            {# Sanity counts (not blockers) #}
             <div>Total events: <span style="color:var(--cyan)">{{ reliability_diag.total_events if reliability_diag else '—' }}</span></div>
-            <div>Past events (settled-eligible): <span style="color:var(--cyan)">{{ reliability_diag.past_events if reliability_diag else '—' }}</span></div>
-            <div>Resolved (redeemer ran): <span style="color:{{ '#22C55E' if (reliability_diag and reliability_diag.resolved_events) else '#EF4444' }}">{{ reliability_diag.resolved_events if reliability_diag else '—' }}</span></div>
-            <div>With ModelSnapshot: <span style="color:var(--cyan)">{{ reliability_diag.events_with_snapshot if reliability_diag else '—' }}</span></div>
-            <div>Dates with wu_history obs: <span style="color:{{ '#22C55E' if (reliability_diag and reliability_diag.dates_with_wu_history) else '#EF4444' }}">{{ reliability_diag.dates_with_wu_history if reliability_diag else '—' }}</span></div>
-            <div class="opacity-60 mt-1">Last resolved: {{ (reliability_diag.last_resolved_at if reliability_diag else None) or 'never' }}</div>
+            <div>Past events: <span style="color:{{ '#22C55E' if (reliability_diag and reliability_diag.past_events) else '#EF4444' }}">{{ reliability_diag.past_events if reliability_diag else '—' }}</span></div>
+            {# Real blockers — red = this is why calibration is empty #}
+            <div>Past events with Buckets: <span style="color:{{ '#22C55E' if (reliability_diag and reliability_diag.past_events_with_buckets) else '#EF4444' }}">{{ reliability_diag.past_events_with_buckets if reliability_diag else '—' }}</span></div>
+            <div>Past events with ModelSnapshot: <span style="color:{{ '#22C55E' if (reliability_diag and reliability_diag.past_events_with_snapshot) else '#EF4444' }}">{{ reliability_diag.past_events_with_snapshot if reliability_diag else '—' }}</span></div>
+            <div>Past dates with METAR high: <span style="color:{{ '#22C55E' if (reliability_diag and reliability_diag.past_dates_with_metar_high) else '#EF4444' }}">{{ reliability_diag.past_dates_with_metar_high if reliability_diag else '—' }}</span></div>
+            <div>Dates with wu_history (fallback): <span style="color:var(--text-muted)">{{ reliability_diag.dates_with_wu_history if reliability_diag else '—' }}</span></div>
+            <div class="opacity-50 mt-1">— informational —</div>
+            <div class="opacity-60">Resolved (redeemer): <span>{{ reliability_diag.resolved_events if reliability_diag else '—' }}</span> <span class="opacity-50">(no longer required)</span></div>
+            <div class="opacity-60">Last resolved: {{ (reliability_diag.last_resolved_at if reliability_diag else None) or 'never' }}</div>
+            <div class="opacity-60">Last past event: {{ (reliability_diag.last_event_date if reliability_diag else None) or 'never' }}</div>
           </div>
           <div class="mt-3">
             <button onclick="forceRedeemPending(this)"
