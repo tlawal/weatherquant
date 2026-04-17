@@ -537,6 +537,7 @@ async def execute_signal(
         order_id=order.id,
         clob_order_id=clob_order_id,
         token_id=token_id,
+        condition_id=bucket.condition_id if bucket else None,
         expected_size=shares,
         expected_price=limit_price,
         side=side,
@@ -685,6 +686,7 @@ async def _poll_for_fill(
     baseline_avg_cost: float = 0.0,
     timeout_s: float = 30.0,
     poll_interval_s: float = 2.0,
+    condition_id: Optional[str] = None,
 ) -> Optional[dict]:
     """Poll CLOB for fill confirmation, then read the actual fill from the
     Polymarket data API so the DB reflects on-chain reality (not the user's
@@ -704,11 +706,24 @@ async def _poll_for_fill(
                 break
             loop = asyncio.get_event_loop()
             from py_clob_client.clob_types import OpenOrderParams
+
+            # OpenOrderParams.market expects the condition_id (market ID), not
+            # the outcome token_id. Without condition_id we cannot safely query
+            # open orders, so skip this tick's open-orders check and rely on
+            # the next poll — the 30 s timeout still bounds the wait.
+            if not condition_id:
+                log.warning(
+                    "fill_poll: no condition_id available for order %s; "
+                    "skipping open-orders check this tick",
+                    clob_order_id,
+                )
+                continue
+
             open_orders = await asyncio.wait_for(
                 loop.run_in_executor(
                     None,
                     lambda: clob._client.get_orders(
-                        OpenOrderParams(market=token_id)
+                        OpenOrderParams(market=condition_id)
                     ),
                 ),
                 timeout=8.0,
@@ -727,23 +742,28 @@ async def _poll_for_fill(
                         break
                     await asyncio.sleep(1.5)
 
-                if real is not None:
-                    fill_qty, derived_price = real
-                    # For SELLs the derived_price is 0 (not recoverable from
-                    # positions API alone); use the limit/expected price.
-                    fill_price = derived_price if derived_price > 0 else expected_price
-                    log.info(
-                        "fill_poll: real fill qty=%.4f price=$%.4f (expected %.4f @ $%.4f)",
-                        fill_qty, fill_price, expected_size, expected_price,
-                    )
-                else:
+                if real is None:
+                    # Order left open-orders but data-api shows no on-chain
+                    # position delta. Could be indexer lag on a real fill, or
+                    # a transient / filtered get_orders response while the
+                    # order is still actually open. Do NOT declare a fill
+                    # here — continue polling until either a real delta
+                    # appears or the 30 s timeout fires.
                     log.warning(
-                        "fill_poll: data-api did not report fill; falling back to expected "
-                        "(qty=%.4f price=$%.4f)",
-                        expected_size, expected_price,
+                        "fill_poll: order %s absent from open-orders but no "
+                        "on-chain delta yet; continuing to poll",
+                        clob_order_id,
                     )
-                    fill_qty = expected_size
-                    fill_price = expected_price
+                    continue
+
+                fill_qty, derived_price = real
+                # For SELLs the derived_price is 0 (not recoverable from
+                # positions API alone); use the limit/expected price.
+                fill_price = derived_price if derived_price > 0 else expected_price
+                log.info(
+                    "fill_poll: real fill qty=%.4f price=$%.4f (expected %.4f @ $%.4f)",
+                    fill_qty, fill_price, expected_size, expected_price,
+                )
 
                 async with get_session() as sess:
                     await insert_fill(
