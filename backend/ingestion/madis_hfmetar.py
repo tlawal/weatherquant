@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import gzip
 import logging
+import ssl
 import tempfile
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -25,7 +26,19 @@ _USER_AGENT = "WeatherQuant/1.0 (contact@weatherquant.local)"
 _TIMEOUT = aiohttp.ClientTimeout(total=30)
 _MAX_RETRIES = 4  # step back 1 hour each → 4 hours back
 
-# Cache the last successful filename so repeated failures don't re-probe
+# MADIS public server's cert chain fails to verify under aiohttp's default
+# SSL context (see aio-libs/aiohttp#7287 — `requests` works, aiohttp does not).
+# NOAA's own support email documents `curl -k` / `wget` for this host, so
+# skipping verification matches the documented usage. Scoped to MADIS only —
+# every other ingestor keeps full TLS verification. MADIS is a public,
+# read-only gov data endpoint: no auth, no secrets in flight.
+_SSL_CTX: object = False  # value passed to aiohttp.TCPConnector(ssl=...)
+
+# Last successfully processed filename. Kept for informational logging only —
+# we intentionally do NOT use it to short-circuit future fetches, because
+# MADIS rewrites the current-hour file in place every ~5 min as new ASOS
+# observations append. Per-observation dedupe via get_madis_obs_by_key
+# handles repeated inserts cheaply.
 _last_success_file: Optional[str] = None
 
 
@@ -51,20 +64,41 @@ def _c_to_f(c: float) -> float:
 
 
 async def _fetch_netcdf(filename: str, http: aiohttp.ClientSession) -> Optional[bytes]:
-    """Fetch a gzipped netCDF file from MADIS. Returns raw bytes or None."""
+    """Fetch a gzipped netCDF file from MADIS. Returns raw bytes or None.
+
+    Logs include the full URL on every failure so a production operator can
+    reproduce with `curl -k URL`. TLS/cert failures are logged at ERROR with
+    a distinct tag and are not retried (retrying a handshake failure wastes
+    the retry budget).
+    """
     url = f"{MADIS_BASE_URL}/{filename}"
     for attempt in range(3):
         try:
             async with http.get(url) as resp:
                 if resp.status == 200:
                     return await resp.read()
-                elif resp.status == 404:
-                    log.debug("madis: file %s not found (404)", filename)
+                if resp.status == 404:
+                    log.debug("madis: 404 url=%s", url)
                     return None
-                else:
-                    log.warning("madis: HTTP %d for %s (attempt %d)", resp.status, filename, attempt + 1)
+                log.warning(
+                    "madis: HTTP %d url=%s (attempt %d)",
+                    resp.status, url, attempt + 1,
+                )
+        except (
+            aiohttp.ClientConnectorCertificateError,
+            aiohttp.ClientSSLError,
+            ssl.SSLError,
+        ) as e:
+            log.error(
+                "madis: TLS verification error url=%s err=%s (%s)",
+                url, e, type(e).__name__,
+            )
+            return None  # retrying a TLS handshake failure is pointless
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            log.warning("madis: fetch error for %s (attempt %d): %s", filename, attempt + 1, e)
+            log.warning(
+                "madis: fetch error url=%s attempt=%d err=%s (%s)",
+                url, attempt + 1, e, type(e).__name__,
+            )
     return None
 
 
@@ -98,19 +132,27 @@ async def fetch_madis_latest() -> None:
     now = datetime.now(timezone.utc)
     filename = None
     raw_gz = None
+    last_url: Optional[str] = None
 
-    async with aiohttp.ClientSession(timeout=_TIMEOUT, headers={"User-Agent": _USER_AGENT}) as http:
+    connector = aiohttp.TCPConnector(ssl=_SSL_CTX)
+    async with aiohttp.ClientSession(
+        connector=connector,
+        timeout=_TIMEOUT,
+        headers={"User-Agent": _USER_AGENT},
+    ) as http:
         for step in range(_MAX_RETRIES):
             # Compute filename for this step (top of each hour)
             offset_hours = step
             target = now - timedelta(hours=offset_hours)
             candidate = f"{target.strftime('%Y%m%d')}_{target.hour:02d}00.gz"
+            last_url = f"{MADIS_BASE_URL}/{candidate}"
             log.debug("madis: trying file %s (step=%d)", candidate, step)
 
-            # Skip if same as last success (already processed)
-            if candidate == _last_success_file:
-                log.debug("madis: skipping already-processed file %s", candidate)
-                return
+            # NOTE: we intentionally do NOT short-circuit on
+            # candidate == _last_success_file. The current-hour file is
+            # rewritten in place every ~5 min as new ASOS obs append; we
+            # must re-fetch to pick those up. Per-observation dedupe via
+            # get_madis_obs_by_key handles repeated inserts cheaply.
 
             raw = await _fetch_netcdf(candidate, http)
             if raw is not None:
@@ -119,7 +161,10 @@ async def fetch_madis_latest() -> None:
                 break
 
     if raw_gz is None:
-        log.warning("madis: no file found in last %d intervals", _MAX_RETRIES)
+        log.warning(
+            "madis: no file found in last %d intervals (last url=%s)",
+            _MAX_RETRIES, last_url,
+        )
         return
 
     # Gunzip and parse netCDF
