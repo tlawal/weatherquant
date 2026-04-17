@@ -20,7 +20,11 @@ from backend.api.deps import require_admin
 from backend.city_registry import CITY_REGISTRY_BY_SLUG
 from backend.tz_utils import city_local_date, et_today
 from backend.config import Config
-from backend.engine.signal_engine import classify_city_state
+from backend.engine.signal_engine import (
+    classify_city_state,
+    recompute_active_city_signals,
+    recompute_city_signals,
+)
 from backend.execution import arming as arming_mod
 from backend.market_context.adapter import MarketContextLLMError
 from backend.market_context.service import (
@@ -387,6 +391,12 @@ async def get_city_state(city_slug: str):
         "active_station_source": model_inputs.get("active_station_source"),
         "ground_truth_high": model_inputs.get("ground_truth_high"),
         "ground_truth_source": model_inputs.get("ground_truth_source"),
+        "observed_high_floor": model_inputs.get("observed_high_floor", model_inputs.get("ground_truth_high")),
+        "observed_high_floor_source": model_inputs.get("observed_high_floor_source", model_inputs.get("ground_truth_source")),
+        "official_observed_high": model_inputs.get("official_observed_high"),
+        "official_observed_high_source": model_inputs.get("official_observed_high_source"),
+        "raw_observed_high": model_inputs.get("raw_observed_high"),
+        "raw_observed_high_source": model_inputs.get("raw_observed_high_source"),
         "current_temp_f": metar.temp_f if metar else None,
         "daily_high_f": daily_high,
         "metar_observed_at": metar.observed_at.isoformat() if metar else None,
@@ -409,6 +419,7 @@ async def get_city_state(city_slug: str):
         "prob_hotter_bucket": prob_hotter_bucket,
         "prob_new_high_raw": model_inputs.get("prob_new_high_raw"),
         "lock_regime": model_inputs.get("lock_regime"),
+        "lock_trigger_reason": model_inputs.get("lock_trigger_reason"),
         "observed_bucket_idx": model_inputs.get("observed_bucket_idx"),
         "observed_bucket_upper_f": model_inputs.get("observed_bucket_upper_f"),
         "city_state": city_state,
@@ -493,6 +504,63 @@ async def refresh_market_context(
                 error_msg=str(exc),
             )
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+class ModelRecomputeRequest(BaseModel):
+    city_slug: Optional[str] = None
+    date_et: Optional[str] = None
+
+
+@router.post("/api/model/recompute")
+async def recompute_model_snapshots(
+    body: ModelRecomputeRequest,
+    actor: str = Depends(require_admin),
+):
+    try:
+        if body.city_slug:
+            signals = await recompute_city_signals(body.city_slug, body.date_et)
+            result = {
+                "mode": "single_city",
+                "city_slug": body.city_slug,
+                "date_et": body.date_et,
+                "signal_count": len(signals),
+                "actionable_count": sum(1 for s in signals if s.actionable),
+            }
+        else:
+            by_city = await recompute_active_city_signals(body.date_et)
+            result = {
+                "mode": "all_enabled",
+                "date_et": body.date_et,
+                "cities": {
+                    slug: {
+                        "signal_count": len(signals),
+                        "actionable_count": sum(1 for s in signals if s.actionable),
+                    }
+                    for slug, signals in by_city.items()
+                },
+            }
+        async with get_session() as sess:
+            await append_audit(
+                sess,
+                actor=actor,
+                action="model_recompute",
+                payload=result,
+                ok=True,
+            )
+        return {"ok": True, **result}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        async with get_session() as sess:
+            await append_audit(
+                sess,
+                actor=actor,
+                action="model_recompute",
+                payload={"city_slug": body.city_slug, "date_et": body.date_et},
+                ok=False,
+                error_msg=str(exc),
+            )
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 # ─── Markets ─────────────────────────────────────────────────────────────────
@@ -583,6 +651,7 @@ async def get_all_signals():
             "prob_hotter_bucket": reason.get("prob_hotter_bucket", reason.get("prob_new_high")),
             "prob_new_high_raw": reason.get("prob_new_high_raw"),
             "lock_regime": reason.get("lock_regime"),
+            "lock_trigger_reason": reason.get("lock_trigger_reason"),
             "observed_bucket_idx": reason.get("observed_bucket_idx"),
             "observed_bucket_upper_f": reason.get("observed_bucket_upper_f"),
             "city_state": reason.get("city_state"),
@@ -629,6 +698,7 @@ async def get_city_signals(city_slug: str):
                 "prob_hotter_bucket": reason.get("prob_hotter_bucket", reason.get("prob_new_high")),
                 "prob_new_high_raw": reason.get("prob_new_high_raw"),
                 "lock_regime": reason.get("lock_regime"),
+                "lock_trigger_reason": reason.get("lock_trigger_reason"),
                 "observed_bucket_idx": reason.get("observed_bucket_idx"),
                 "observed_bucket_upper_f": reason.get("observed_bucket_upper_f"),
                 "city_state": reason.get("city_state"),

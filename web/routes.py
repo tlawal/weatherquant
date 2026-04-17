@@ -376,7 +376,8 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                 mkt = await get_latest_market_snapshot(sess, bucket.id)
 
                 probs = json.loads(model.probs_json) if model and model.probs_json else []
-                model_prob = probs[bucket.bucket_idx] if bucket.bucket_idx < len(probs) else None
+                snapshot_prob = probs[bucket.bucket_idx] if bucket.bucket_idx < len(probs) else None
+                model_prob = sig.model_prob if sig is not None else snapshot_prob
 
                 yes_price = mkt.yes_ask if mkt else None
                 ev = calculate_expected_value(model_prob, yes_price) if model_prob is not None and yes_price else None
@@ -395,6 +396,7 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                     "high_f": bucket.high_f,
                     "yes_token_id": bucket.yes_token_id,
                     "model_prob": round(model_prob, 4) if model_prob is not None else None,
+                    "debug_snapshot_prob": round(snapshot_prob, 4) if snapshot_prob is not None else None,
                     "mkt_prob": mkt.yes_mid if mkt else None,
                     "yes_bid": mkt.yes_bid if mkt else None,
                     "yes_ask": mkt.yes_ask if mkt else None,
@@ -409,7 +411,6 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                 })
 
     model_inputs = json.loads(model.inputs_json) if model and model.inputs_json else {}
-    probs_json = json.dumps(json.loads(model.probs_json) if model and model.probs_json else [])
 
     def _age(dt):
         if not dt:
@@ -558,7 +559,8 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                     ))
                 obs_dicts.append(d)
 
-            wu_peak_time = wu_hourly_raw.get("peak_hour")
+            wu_peak_time = wu_hourly_raw.get("peak_hour_local") or wu_hourly_raw.get("peak_hour")
+            wu_peak_mins = wu_hourly_raw.get("peak_hour_local_mins")
             # Fused forecast high for adaptive remaining-rise cap
             _fc_vals = [
                 s.high_f for s in [primary_fc, wu_h]
@@ -572,6 +574,7 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                     now_local=now_local,
                     city_tz=city_tz_str,
                     wu_hourly_peak_time=wu_peak_time,
+                    wu_hourly_peak_mins=wu_peak_mins,
                     historical_peak_mins=None,
                     forecast_high=_adaptive_fc_high,
                     ml_features={
@@ -752,7 +755,7 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                     "high_f": wu_h.high_f if wu_h else None,
                     "age_s": _age(wu_h.fetched_at if wu_h else None),
                     "url": f"https://www.wunderground.com/hourly/{city.metar_station}/date/{target_date_et}" if city.metar_station else None,
-                    "peak_hour": wu_hourly_raw.get("peak_hour"),
+                    "peak_hour": wu_hourly_raw.get("peak_hour_local") or wu_hourly_raw.get("peak_hour"),
                     "collected_at": _fmt_time_et(wu_h.fetched_at if wu_h else None),
                 },
                 "wu_history": {
@@ -789,7 +792,11 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
             "model": {
                 "mu": model.mu if model else None,
                 "sigma": model.sigma if model else None,
-                "probs_json": probs_json,
+                "probs_json": json.dumps([
+                    (b.get("model_prob") if b.get("model_prob") is not None else None)
+                    for b in buckets_with_signals
+                ]),
+                "raw_probs_json": json.dumps(json.loads(model.probs_json) if model and model.probs_json else []),
                 "inputs": model_inputs,
             } if model else None,
             "now_hour_et": now_local.hour,

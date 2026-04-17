@@ -30,7 +30,9 @@ from backend.storage.repos import (
     get_all_cities,
     get_buckets_for_event,
     get_calibration,
+    get_city_by_slug,
     get_daily_high_metar,
+    get_daily_high_metar_obs,
     get_event,
     get_latest_forecast,
     get_latest_market_snapshot,
@@ -155,6 +157,35 @@ async def run_signal_engine() -> list[BucketSignal]:
     return signals
 
 
+async def recompute_city_signals(city_slug: str, date_et: Optional[str] = None) -> list[BucketSignal]:
+    """Recompute one city's signals for a specific date (or local today)."""
+    async with get_session() as sess:
+        city = await get_city_by_slug(sess, city_slug)
+    if city is None:
+        raise ValueError(f"city not found: {city_slug}")
+
+    target_date = date_et or city_local_date(city)
+    signals = await _compute_city_signals(city, target_date)
+    async with get_session() as sess:
+        await update_heartbeat(sess, "run_model_manual", success=True)
+    return signals
+
+
+async def recompute_active_city_signals(date_et: Optional[str] = None) -> dict[str, list[BucketSignal]]:
+    """Recompute all enabled cities for a shared date or each city's local today."""
+    async with get_session() as sess:
+        cities = await get_all_cities(sess, enabled_only=True)
+
+    out: dict[str, list[BucketSignal]] = {}
+    for city in cities:
+        target_date = date_et or city_local_date(city)
+        out[city.city_slug] = await _compute_city_signals(city, target_date)
+
+    async with get_session() as sess:
+        await update_heartbeat(sess, "run_model_manual", success=True)
+    return out
+
+
 def resolve_active_station(city: City, event: Optional[Event]) -> tuple[str, str]:
     """Resolve which observation station is active for this city/event today.
 
@@ -221,6 +252,16 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
             sess, city.id, today_et, city_tz=getattr(city, "tz", "America/New_York")
         )
 
+        # TGFTP official daily high — the NWS daily summary from
+        # tgftp.nws.noaa.gov. This is the most authoritative single-source
+        # high for settlement-verified events.
+        _tgftp_obs = await get_daily_high_metar_obs(
+            sess, city.id, today_et,
+            city_tz=getattr(city, "tz", "America/New_York"),
+            source="tgftp",
+        )
+        _tgftp_high = float(_tgftp_obs.temp_f) if _tgftp_obs and _tgftp_obs.temp_f is not None else None
+
     # Extract weather condition from METAR extended data for anomaly badges
     metar_condition = None
     if metar and metar.extended:
@@ -234,35 +275,48 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
     bucket_ranges = [(b.low_f, b.high_f) for b in buckets]
     canonical_ranges = canonical_bucket_ranges(bucket_ranges)
 
-    # Resolve ground truth: take the MAX of every observation source we trust.
-    # Using "first available in priority order" causes desync when the
-    # primary source (WU history) lags behind METAR — the model would then
-    # see a too-low observed high, fail to lock, and not zero out
-    # already-surpassed buckets even though the gates correctly do.
+    # Resolve the settlement-aware observation floor separately from the raw
+    # max observed temperature. Verified settlement events should condition on
+    # the official resolution source, not on any hotter off-cycle raw METAR.
     _wu_hist_high = wu_history_obs.high_f if wu_history_obs else None
-    _candidate_highs = [
-        v for v in (_wu_hist_high, resolution_high, daily_high)
-        if v is not None
-    ]
-    ground_truth_high = max(_candidate_highs) if _candidate_highs else None
+    raw_observed_high = daily_high
+    raw_observed_high_source: Optional[str] = "raw_metar" if raw_observed_high is not None else None
 
-    # Track which source supplied the winning value for audit/debug.
-    ground_truth_source: Optional[str] = None
-    if ground_truth_high is not None:
-        if _wu_hist_high == ground_truth_high:
-            ground_truth_source = "wu_history"
-        elif resolution_high == ground_truth_high:
-            ground_truth_source = "resolution_metar"
-        else:
-            ground_truth_source = "raw_metar"
+    observed_high_floor: Optional[float] = None
+    observed_high_floor_source: Optional[str] = None
+    if event.settlement_source_verified:
+        # For verified events, prefer official settlement sources in order
+        # of authority: tgftp (NWS daily summary) → wu_history →
+        # resolution_metar (valid-minutes-filtered) → raw_metar (fallback).
+        # This ensures the conditioning floor matches the settlement source
+        # rather than a hotter off-cycle raw METAR reading.
+        for source, value in (
+            ("tgftp", _tgftp_high),
+            ("wu_history", _wu_hist_high),
+            ("resolution_metar", resolution_high),
+            ("raw_metar", raw_observed_high),
+        ):
+            if value is not None:
+                observed_high_floor = value
+                observed_high_floor_source = source
+                break
+    else:
+        _candidate_highs = [v for v in (_wu_hist_high, resolution_high, raw_observed_high) if v is not None]
+        observed_high_floor = max(_candidate_highs) if _candidate_highs else None
+        if observed_high_floor is not None:
+            if _wu_hist_high == observed_high_floor:
+                observed_high_floor_source = "wu_history"
+            elif resolution_high == observed_high_floor:
+                observed_high_floor_source = "resolution_metar"
+            else:
+                observed_high_floor_source = "raw_metar"
 
     # Observed high floor for conditional probabilities:
-    # Use ground_truth_high if available, otherwise fall back to current METAR temp
-    # (current temp is always a lower bound for the daily high)
-    observed_high_floor = ground_truth_high
+    # Use the settlement-aware floor if available, otherwise fall back to the
+    # current METAR temperature (which is always a lower bound on the final high).
     if observed_high_floor is None and metar and metar.temp_f is not None:
         observed_high_floor = metar.temp_f
-        ground_truth_source = "current_metar"
+        observed_high_floor_source = "current_metar"
 
     # Resolution mismatch: raw_high exceeds resolution_high
     resolution_mismatch = None
@@ -292,9 +346,15 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
 
     # Extract WU hourly peak time for composite peak timing
     wu_hourly_peak_time = None
+    wu_hourly_peak_mins = None
     if wu_hourly_obs and wu_hourly_obs.raw_json:
         try:
-            wu_hourly_peak_time = json.loads(wu_hourly_obs.raw_json).get("peak_hour")
+            wu_hourly_raw = json.loads(wu_hourly_obs.raw_json)
+            wu_hourly_peak_time = (
+                wu_hourly_raw.get("peak_hour_local")
+                or wu_hourly_raw.get("peak_hour")
+            )
+            wu_hourly_peak_mins = wu_hourly_raw.get("peak_hour_local_mins")
         except Exception:
             pass
 
@@ -350,6 +410,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
                 now_local=now_local,
                 city_tz=city_tz_str,
                 wu_hourly_peak_time=wu_hourly_peak_time,
+                wu_hourly_peak_mins=wu_hourly_peak_mins,
                 historical_peak_mins=avg_peak_mins,
                 forecast_high=adaptive_forecast_high,
                 ml_features={
@@ -391,7 +452,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         hrrr_high=hrrr_obs.high_f if hrrr_obs else None,
         nbm_high=nbm_obs.high_f if nbm_obs else None,
         ecmwf_ifs_high=ecmwf_ifs_obs.high_f if ecmwf_ifs_obs else None,
-        daily_high_metar=ground_truth_high,
+        daily_high_metar=observed_high_floor,
         current_temp_f=metar.temp_f if metar else None,
         calibration=cal_dict,
         buckets=bucket_ranges,
@@ -399,6 +460,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         unit=getattr(city, "unit", "F"),
         city_tz=city_tz_str,
         observed_high=observed_high_floor,
+        raw_observed_high=raw_observed_high,
         ml_features={
             "temp_slope_3h": temp_slope_3h,
             "avg_peak_timing_mins": avg_peak_mins,
@@ -420,8 +482,14 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
     # actually driving today's model.
     model.inputs["active_station_id"] = active_station_id
     model.inputs["active_station_source"] = active_station_source
-    model.inputs["ground_truth_high"] = ground_truth_high
-    model.inputs["ground_truth_source"] = ground_truth_source
+    model.inputs["ground_truth_high"] = observed_high_floor
+    model.inputs["ground_truth_source"] = observed_high_floor_source
+    model.inputs["observed_high_floor"] = observed_high_floor
+    model.inputs["observed_high_floor_source"] = observed_high_floor_source
+    model.inputs["official_observed_high"] = observed_high_floor if event.settlement_source_verified else None
+    model.inputs["official_observed_high_source"] = observed_high_floor_source if event.settlement_source_verified else None
+    model.inputs["raw_observed_high"] = raw_observed_high
+    model.inputs["raw_observed_high_source"] = raw_observed_high_source
 
     # Use a single session for all DB writes (model snapshot + per-bucket reads/inserts)
     signals: list[BucketSignal] = []
@@ -457,8 +525,8 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
             # If METAR high already exceeds this bucket's ceiling, probability is 0
             # (the final daily high can only go up, never down)
             bucket_ceiling = bucket_upper_bound(canonical_ranges, i)
-            if ground_truth_high is not None and bucket_ceiling is not None:
-                if ground_truth_high >= bucket_ceiling:
+            if observed_high_floor is not None and bucket_ceiling is not None:
+                if observed_high_floor >= bucket_ceiling:
                     model_prob = 0.0
 
             # Get latest market snapshot (reuse session)
@@ -533,13 +601,17 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
                 "observed_bucket_upper_f": model.observed_bucket_upper_f,
                 "resolution_high": resolution_high,
                 "raw_high": daily_high,
-                "ground_truth_high": ground_truth_high,
-                "ground_truth_source": ground_truth_source,
+                "ground_truth_high": observed_high_floor,
+                "ground_truth_source": observed_high_floor_source,
                 "active_station_id": active_station_id,
                 "active_station_source": active_station_source,
                 "observation_minutes": valid_minutes,
                 "resolution_mismatch": resolution_mismatch,
                 "metar_condition": metar_condition,
+                "official_observed_high": model.inputs.get("official_observed_high"),
+                "official_observed_high_source": model.inputs.get("official_observed_high_source"),
+                "raw_observed_high": model.inputs.get("raw_observed_high"),
+                "raw_observed_high_source": model.inputs.get("raw_observed_high_source"),
             }
 
             actionable = (

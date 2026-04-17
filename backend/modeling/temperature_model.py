@@ -88,6 +88,7 @@ class ModelResult:
     prob_hotter_bucket: float = 1.0
     prob_new_high_raw: float = 1.0
     lock_regime: bool = False
+    lock_trigger_reason: Optional[str] = None
     observed_bucket_idx: Optional[int] = None
     observed_bucket_upper_f: Optional[float] = None
     inputs: dict = field(default_factory=dict)
@@ -204,7 +205,7 @@ def _reallocate_hotter_tail(
     return adjusted
 
 
-def _late_day_lock_active(
+def _late_day_lock_state(
     *,
     observed_high: Optional[float],
     current_temp_f: Optional[float],
@@ -212,7 +213,7 @@ def _late_day_lock_active(
     adaptive,
     hour_local: int,
     unit_mult: float,
-) -> bool:
+) -> tuple[bool, Optional[str]]:
     """Decide whether to engage the late-day lock regime.
 
     The lock concentrates probability on the bucket containing the observed
@@ -222,13 +223,16 @@ def _late_day_lock_active(
     observation-grounded fallback path so the lock still engages once it is
     physically clear we are post-peak (after 18:00 local, no residual rise,
     current temp at least 0.5°F below observed high, trend non-rising).
+
+    Returns (lock_regime, lock_trigger_reason) where reason is one of:
+      'adaptive_peak_passed' — Kalman trend negative for sustained period
+      'hard_cooling_gap' — large cooling deficit after 6 PM (ignores remaining_rise)
+      'observation_fallback' — post-6 PM with small cooling gap and non-rising trend
     """
     if observed_high is None or current_temp_f is None:
-        return False
-    if remaining_rise > 0.25 * unit_mult:
-        return False
-    if current_temp_f > observed_high - (0.5 * unit_mult):
-        return False
+        return False, None
+
+    deficit_from_high = observed_high - current_temp_f
 
     trend_per_hr = (
         adaptive.kalman.temp_trend_per_min * 60.0
@@ -238,10 +242,25 @@ def _late_day_lock_active(
 
     # Path 1 — adaptive engine declared peak passed (existing behavior).
     if adaptive is not None and adaptive.peak_already_passed:
-        return hour_local >= 18 or trend_per_hr is None or trend_per_hr <= 0.25
+        if hour_local >= 18 or trend_per_hr is None or trend_per_hr <= 0.25:
+            return True, "adaptive_peak_passed"
 
-    # Path 2 — observation fallback: physically post-peak even if adaptive lags.
-    # All four floor checks above already passed, so we know:
+    # remaining_rise gate — protects fallback paths from false positives when
+    # the ML model still predicts meaningful upside.
+    if remaining_rise > 0.25 * unit_mult:
+        return False, None
+
+    if deficit_from_high < 0.5 * unit_mult:
+        return False, None
+
+    # Path 2 — hard cooling-gap fallback. If we've already cooled by at least
+    # 1.5°F after 6 PM with no meaningful remaining rise, the physical
+    # evidence is overwhelming even if the adaptive trend is stale.
+    if hour_local >= 18 and deficit_from_high >= 1.5 * unit_mult:
+        return True, "hard_cooling_gap"
+
+    # Path 3 — observation fallback: physically post-peak even if adaptive lags.
+    # All checks above passed, so we know:
     #   - observed_high and current_temp_f exist
     #   - remaining_rise <= 0.25°F
     #   - current_temp is at least 0.5°F below observed_high
@@ -249,9 +268,9 @@ def _late_day_lock_active(
     # the trend isn't actively rising back up". Trend may be unknown (no
     # adaptive), in which case the time-of-day check alone is sufficient.
     if hour_local >= 18 and (trend_per_hr is None or trend_per_hr <= 0.25):
-        return True
+        return True, "observation_fallback"
 
-    return False
+    return False, None
 
 
 def _compute_lock_probs(
@@ -264,6 +283,7 @@ def _compute_lock_probs(
     existing_probs: list[float],
     existing_hotter_prob: float,
     unit_mult: float,
+    lock_trigger_reason: Optional[str] = None,
 ) -> tuple[list[float], float, float, float, float]:
     trend_per_hr = adaptive.kalman.temp_trend_per_min * 60.0 if adaptive and adaptive.kalman else 0.0
     future_predictions = []
@@ -273,6 +293,11 @@ def _compute_lock_probs(
             if not pred.is_past and pred.minutes_ahead > 0
         ]
 
+    if lock_trigger_reason == "hard_cooling_gap":
+        cap = min(existing_hotter_prob, 0.02)
+        lock_probs = _reallocate_hotter_tail(existing_probs, observed_bucket_idx, cap)
+        return lock_probs, cap, observed_high, 0.15 * unit_mult, observed_high
+
     if future_predictions:
         hottest_future = max(future_predictions, key=lambda pred: pred.predicted_temp)
         hottest_prediction = float(hottest_future.predicted_temp)
@@ -280,9 +305,13 @@ def _compute_lock_probs(
         lock_sigma = _clamp(hottest_uncertainty, 0.15 * unit_mult, 0.50 * unit_mult)
 
         deficit_from_high = observed_high - hottest_prediction
-        if trend_per_hr <= 0.0 and deficit_from_high >= 1.5 * unit_mult:
+        if deficit_from_high >= 1.5 * unit_mult and (
+            lock_trigger_reason == "hard_cooling_gap" or trend_per_hr <= 0.0
+        ):
             lock_sigma = min(lock_sigma, 0.15 * unit_mult)
-        elif trend_per_hr <= 0.0 and deficit_from_high >= 0.5 * unit_mult:
+        elif deficit_from_high >= 0.5 * unit_mult and (
+            lock_trigger_reason == "observation_fallback" or trend_per_hr <= 0.0
+        ):
             lock_sigma = min(lock_sigma, 0.25 * unit_mult)
 
         lock_mu = max(observed_high, hottest_prediction)
@@ -318,6 +347,7 @@ def compute_model(
     unit: str = "F",
     city_tz: str = "America/New_York",
     observed_high: Optional[float] = None,
+    raw_observed_high: Optional[float] = None,
     ml_features: Optional[dict] = None,
     adaptive=None,
     latest_weather: Optional[dict] = None,
@@ -569,7 +599,7 @@ def compute_model(
     else:
         prob_hotter_bucket = prob_new_high_raw
 
-    lock_regime = _late_day_lock_active(
+    lock_regime, lock_trigger_reason = _late_day_lock_state(
         observed_high=observed_high,
         current_temp_f=current_temp_f,
         remaining_rise=remaining_rise,
@@ -588,6 +618,7 @@ def compute_model(
             existing_probs=probs,
             existing_hotter_prob=prob_hotter_bucket,
             unit_mult=unit_mult,
+            lock_trigger_reason=lock_trigger_reason,
         )
         probs = lock_probs
         mu_final = float(lock_mu)
@@ -625,6 +656,8 @@ def compute_model(
         "prob_hotter_bucket": round(prob_hotter_bucket, 4),
         "prob_new_high_raw": round(prob_new_high_raw, 4),
         "lock_regime": lock_regime,
+        "lock_trigger_reason": lock_trigger_reason,
+        "raw_observed_high": raw_observed_high,
         "observed_high": observed_high,
         "observed_bucket_idx": observed_bucket_idx,
         "observed_bucket_upper_f": observed_bucket_upper_f,
@@ -660,6 +693,7 @@ def compute_model(
         prob_hotter_bucket=prob_hotter_bucket,
         prob_new_high_raw=prob_new_high_raw,
         lock_regime=lock_regime,
+        lock_trigger_reason=lock_trigger_reason,
         observed_bucket_idx=observed_bucket_idx,
         observed_bucket_upper_f=observed_bucket_upper_f,
         inputs=inputs,
