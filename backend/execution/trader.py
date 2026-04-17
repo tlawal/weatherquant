@@ -586,23 +586,20 @@ async def execute_signal(
         except Exception:
             log.debug("Telegram notification failed (non-critical)", exc_info=True)
     else:
-        result["status"] = "timeout"
-        result["error"] = "fill not confirmed within 30s"
+        # Non-marketable limit: 30 s poll finished without a confirmed fill.
+        # Leave the order live on Polymarket so the user can manage it
+        # manually (cancel or let it sit) via the OPEN LIMIT ORDERS panel.
+        # DB row stays "open" (set at order placement) — do not cancel.
+        result["status"] = "open"
+        result["error"] = "fill not confirmed within 30s; order left open on Polymarket"
+        result["clob_order_id"] = clob_order_id
         async with get_session() as sess:
-            await update_order_status(
-                sess, order.id, "timeout", cancel_reason="fill_poll_timeout"
-            )
-            # Attempt cancel
-            if clob and clob_order_id:
-                await clob.cancel_order(clob_order_id)
-                await update_order_status(sess, order.id, "cancelled", cancel_reason="timeout_cancel")
             await append_audit(
                 sess,
                 actor=actor,
-                action="trade_timeout",
+                action="trade_open_unfilled",
                 payload=result,
-                ok=False,
-                error_msg="fill poll timeout",
+                ok=True,
             )
 
     return result

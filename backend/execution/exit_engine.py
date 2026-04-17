@@ -215,7 +215,7 @@ async def run_exit_engine() -> None:
             )
             
             # ── Handle result ──
-            if result.get("status") in ("filled", "timeout"):
+            if result.get("status") in ("filled", "timeout", "open"):
                 try:
                     from backend.notifications.telegram import notify_exit_triggered
                     await notify_exit_triggered(
