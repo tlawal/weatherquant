@@ -215,16 +215,32 @@ async def fetch_madis_latest() -> None:
 
             n_stations = len(temperatures)
 
+            # Diagnostic: log a sample of the decoded station names so we can
+            # verify the char-array decoding matches our configured metar_station
+            # codes. Dump the first 10 names the file gave us; helpful when
+            # the file says "0 observations for N stations".
+            def _decode_station(raw):
+                """Decode a MADIS stationName entry to a stripped uppercase
+                ICAO code. Handles whitespace AND null-byte padding — some
+                MADIS files null-pad to the char-dim length."""
+                if hasattr(raw, "tobytes"):
+                    b = raw.tobytes()
+                else:
+                    b = str(raw).encode("ascii", errors="ignore")
+                # Some numpy char arrays have embedded null bytes before the
+                # first real character (e.g. b"\x00KATL"); safest to strip
+                # all whitespace AND nulls from both ends.
+                return b.decode("ascii", errors="ignore").strip(" \t\n\r\x00").upper()
+
+            sample_decoded = [_decode_station(station_names[i]) for i in range(min(10, n_stations))]
+            log.info(
+                "madis: file=%s n_records=%d configured_stations=%s sample_decoded=%s",
+                filename, n_stations, sorted(station_to_city.keys()), sample_decoded,
+            )
+
             async with get_session() as sess:
                 for i in range(n_stations):
-                    # Station name: char array → string
-                    raw_name = station_names[i]
-                    if hasattr(raw_name, "tobytes"):
-                        station = raw_name.tobytes().decode("ascii", errors="ignore").strip()
-                    else:
-                        station = str(raw_name).strip()
-
-                    station = station.upper()
+                    station = _decode_station(station_names[i])
                     if station not in station_to_city:
                         continue
 
