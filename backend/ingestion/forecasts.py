@@ -429,15 +429,9 @@ async def _scrape_wu_city(city: City, date_et: str) -> None:
             valid_minutes = json.loads(profile.observation_minutes)
 
     # Isolate each scraper so one failure doesn't block the others
-    hourly_peak, peak_hour, peak_hour_raw, peak_hour_local_iso, peak_hour_local_mins = None, None, None, None, None
+    hourly_peak, peak_hour = None, None
     try:
-        (
-            hourly_peak,
-            peak_hour,
-            peak_hour_raw,
-            peak_hour_local_iso,
-            peak_hour_local_mins,
-        ) = await _fetch_wu_hourly_api(city, date_et)
+        hourly_peak, peak_hour = await _fetch_wu_hourly_api(city, date_et)
     except Exception as e:
         log.exception("wu_hourly_api: %s date=%s scrape exception: %s", city.city_slug, date_et, e)
 
@@ -494,17 +488,7 @@ async def _scrape_wu_city(city: City, date_et: str) -> None:
     # DB inserts — isolate per source so one failure doesn't block others
     async with get_session() as sess:
         try:
-            raw = json.dumps(
-                {
-                    "high_f": hourly_peak,
-                    "peak_hour": peak_hour,
-                    "peak_hour_raw": peak_hour_raw,
-                    "peak_hour_local": peak_hour,
-                    "peak_hour_local_iso": peak_hour_local_iso,
-                    "peak_hour_local_mins": peak_hour_local_mins,
-                    "source": "wu_hourly",
-                }
-            )
+            raw = json.dumps({"high_f": hourly_peak, "peak_hour": peak_hour, "source": "wu_hourly"})
             await insert_forecast_obs(
                 sess,
                 city_id=city.id,
@@ -559,11 +543,8 @@ async def _scrape_wu_city(city: City, date_et: str) -> None:
     )
 
 
-async def _fetch_wu_hourly_api(
-    city: City,
-    date_et: str | None = None,
-) -> tuple[Optional[float], Optional[str], Optional[str], Optional[str], Optional[int]]:
-    """Fetch WU hourly forecast and return the peak plus local/legacy peak-time metadata.
+async def _fetch_wu_hourly_api(city: City, date_et: str | None = None) -> tuple[Optional[float], Optional[str]]:
+    """Fetch WU hourly forecast via weather.com v1 API, returning (max_temp_f, peak_hour_et_str).
 
     Uses the same v1 API pattern as wu_history to avoid HTML-scraping accuracy issues
     (the HTML page mixes actual temp and feels-like temp columns, causing off-by-1 errors).
@@ -600,35 +581,20 @@ async def _fetch_wu_hourly_api(
                         if date_forecasts:
                             best = max(date_forecasts, key=lambda f: f["temp"])
                             high_f = float(best["temp"])
-                            peak_hour_local = None
-                            peak_hour_raw = None
-                            peak_hour_local_iso = None
-                            peak_hour_local_mins = None
+                            peak_hour_str = None
                             local_dt_str = best.get("fcst_valid_local", "")
                             if local_dt_str:
                                 try:
-                                    dt_local = datetime.fromisoformat(local_dt_str)
-                                    city_tz = ZoneInfo(getattr(city, "tz", "America/New_York"))
-                                    dt_city = dt_local.astimezone(city_tz)
-                                    dt_et = dt_local.astimezone(ET)
-                                    peak_hour_local = dt_city.strftime("%-I:%M %p %Z")
-                                    peak_hour_raw = dt_et.strftime("%-I:%M %p ET")
-                                    peak_hour_local_iso = dt_city.isoformat()
-                                    peak_hour_local_mins = dt_city.hour * 60 + dt_city.minute
+                                    dt_et = datetime.fromisoformat(local_dt_str).astimezone(ET)
+                                    peak_hour_str = dt_et.strftime("%-I:%M %p ET")
                                 except Exception:
                                     pass
-                            return (
-                                high_f,
-                                peak_hour_local,
-                                peak_hour_raw,
-                                peak_hour_local_iso,
-                                peak_hour_local_mins,
-                            )
+                            return high_f, peak_hour_str
                         log.warning("wu_hourly_api: %s date=%s — no forecasts in response", city.city_slug, target_date)
-                        return None, None, None, None, None
+                        return None, None
                     elif resp.status == 404:
                         log.warning("wu_hourly_api: %s date=%s — 404", city.city_slug, target_date)
-                        return None, None, None, None, None
+                        return None, None
                     else:
                         body = await resp.text()
                         log.warning("wu_hourly_api: HTTP %d for %s date=%s — body: %.200s",
@@ -638,7 +604,7 @@ async def _fetch_wu_hourly_api(
             if attempt < 2:
                 await asyncio.sleep(2)
 
-    return None, None, None, None, None
+    return None, None
 
 
 def _at_valid_minute(obs: dict, valid_minutes: list[int], tolerance: int = 1) -> bool:

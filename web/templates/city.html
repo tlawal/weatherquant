@@ -1543,7 +1543,6 @@
 <script>
 document.addEventListener('DOMContentLoaded', function() {
   const probs = {{ model.probs_json if model else '[]' }};
-  const rawSnapshotProbs = {{ model.raw_probs_json if model and model.raw_probs_json is defined else '[]' }};
   const buckets = {{ buckets|tojson }};
 
   if (probs.length && typeof Plotly !== 'undefined') {

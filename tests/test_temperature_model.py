@@ -3,12 +3,7 @@ from zoneinfo import ZoneInfo
 
 import backend.modeling.temperature_model as temperature_model
 from backend.engine.signal_engine import classify_city_state
-from backend.modeling.adaptive import (
-    AdaptiveResult,
-    KalmanState,
-    StationTimePrediction,
-    compute_peak_timing,
-)
+from backend.modeling.adaptive import AdaptiveResult, KalmanState, StationTimePrediction
 from backend.modeling.temperature_model import compute_model
 
 
@@ -34,13 +29,6 @@ class _MorningDateTime(datetime):
     @classmethod
     def now(cls, tz=None):
         fixed = cls(2026, 4, 8, 9, 0, tzinfo=ZoneInfo("America/New_York"))
-        return fixed.astimezone(tz) if tz else fixed
-
-
-class _PacificEveningDateTime(datetime):
-    @classmethod
-    def now(cls, tz=None):
-        fixed = cls(2026, 4, 16, 18, 5, tzinfo=ZoneInfo("America/Los_Angeles"))
         return fixed.astimezone(tz) if tz else fixed
 
 
@@ -104,11 +92,10 @@ def test_compute_model_locks_current_bucket_after_peak(monkeypatch):
     assert model.lock_regime is True
     assert model.observed_bucket_idx == 0
     assert model.observed_bucket_upper_f == 70.0
-    assert model.probs[0] > 0.97
-    assert model.probs[1] < 0.02
-    assert model.prob_hotter_bucket <= 0.02
+    assert model.probs[0] > 0.99
+    assert model.probs[1] < 0.01
+    assert model.prob_hotter_bucket < 0.01
     assert model.prob_new_high_raw > 0.2
-    assert model.lock_trigger_reason == "adaptive_peak_passed"
     assert classify_city_state(model.prob_hotter_bucket) == "resolved"
 
 
@@ -185,7 +172,6 @@ def test_lock_falls_back_when_adaptive_lags(monkeypatch):
     # The observed bucket should hold the dominant mass.
     assert model.probs[2] > 0.9
     assert model.prob_hotter_bucket < 0.05
-    assert model.lock_trigger_reason == "hard_cooling_gap"
 
 
 
@@ -330,148 +316,3 @@ def test_ecmwf_ifs_included_in_sources_used(monkeypatch):
     # ECMWF IFS skews the multi-model mean slightly upward vs. the
     # no-ECMWF case; sanity check we're above 80.
     assert model.inputs["mu_multi_model"] > 80.0
-
-
-def test_compute_peak_timing_normalizes_legacy_et_string_to_city_local():
-    peak = compute_peak_timing(
-        wu_hourly_peak_time="10:00 PM ET",
-        wu_hourly_peak_mins=None,
-        historical_peak_mins=None,
-        kalman=None,
-        current_hour_local=17,
-        todays_obs=[],
-        city_tz="America/Los_Angeles",
-        reference_local_dt=datetime(2026, 4, 16, 17, 0, tzinfo=ZoneInfo("America/Los_Angeles")),
-    )
-
-    assert peak["estimated_peak_mins"] == 19 * 60
-    assert peak["estimated_peak_time"] == "7:00 PM"
-
-
-def test_la_regression_uses_official_floor_and_hard_cooling_lock(monkeypatch):
-    monkeypatch.setattr(temperature_model, "datetime", _PacificEveningDateTime)
-
-    local_tz = ZoneInfo("America/Los_Angeles")
-    adaptive = AdaptiveResult(
-        kalman=KalmanState(
-            smoothed_temp=66.7,
-            temp_trend_per_min=0.0355,
-            uncertainty=0.2,
-            n_observations=39,
-            process_noise_factor=1.0,
-        ),
-        regression_slope=-0.0008,
-        regression_r2=0.004,
-        regression_features_used=["time", "precip_flag"],
-        station_predictions=[
-            StationTimePrediction(
-                obs_time=datetime(2026, 4, 16, 18, 53, tzinfo=local_tz),
-                predicted_temp=66.7,
-                uncertainty=0.5,
-                minutes_ahead=48.0,
-                is_past=False,
-                actual_temp=None,
-                trend_per_hour=1.9,
-            ),
-            StationTimePrediction(
-                obs_time=datetime(2026, 4, 16, 19, 53, tzinfo=local_tz),
-                predicted_temp=66.7,
-                uncertainty=1.3,
-                minutes_ahead=108.0,
-                is_past=False,
-                actual_temp=None,
-                trend_per_hour=1.2,
-            ),
-        ],
-        predicted_daily_high=69.1,
-        predicted_high_time=datetime(2026, 4, 16, 12, 53, tzinfo=local_tz),
-        sigma_adjustment=0.85,
-        peak_already_passed=False,
-        composite_peak_timing="8:00 PM",
-        peak_timing_source="wu_hourly+historical+kalman_trend",
-    )
-
-    model = compute_model(
-        nws_high=70.0,
-        wu_hourly_peak=63.0,
-        daily_high_metar=69.1,
-        current_temp_f=64.4,
-        calibration=None,
-        buckets=[(68.0, 69.0), (70.0, 71.0), (72.0, 73.0), (74.0, None)],
-        forecast_quality="ok",
-        unit="F",
-        city_tz="America/Los_Angeles",
-        observed_high=69.1,
-        raw_observed_high=69.8,
-        ml_features={
-            "temp_slope_3h": -4.7,
-            "avg_peak_timing_mins": 960.0,
-            "day_of_year": 106,
-        },
-        adaptive=adaptive,
-        latest_weather=None,
-        hrrr_high=69.8,
-        nbm_high=66.5,
-        ecmwf_ifs_high=69.4,
-    )
-
-    assert model is not None
-    assert model.lock_regime is True
-    assert model.lock_trigger_reason == "hard_cooling_gap"
-    assert model.observed_bucket_idx == 0
-    assert model.probs[0] > 0.95
-    assert model.prob_hotter_bucket < 0.05
-    assert model.inputs["observed_high"] == 69.1
-    assert model.inputs["raw_observed_high"] == 69.8
-
-
-def test_hard_cooling_lock_does_not_fire_when_current_temp_is_still_near_high(monkeypatch):
-    monkeypatch.setattr(temperature_model, "datetime", _PacificEveningDateTime)
-
-    adaptive = AdaptiveResult(
-        kalman=KalmanState(
-            smoothed_temp=68.9,
-            temp_trend_per_min=0.03,
-            uncertainty=0.2,
-            n_observations=39,
-            process_noise_factor=1.0,
-        ),
-        regression_slope=0.0,
-        regression_r2=0.1,
-        regression_features_used=["time"],
-        station_predictions=[],
-        predicted_daily_high=69.1,
-        predicted_high_time=None,
-        sigma_adjustment=1.0,
-        peak_already_passed=False,
-        composite_peak_timing="8:00 PM",
-        peak_timing_source="kalman_trend",
-    )
-
-    model = compute_model(
-        nws_high=70.0,
-        wu_hourly_peak=69.5,
-        daily_high_metar=69.1,
-        current_temp_f=68.8,
-        calibration=None,
-        buckets=[(68.0, 69.0), (70.0, 71.0), (72.0, 73.0), (74.0, None)],
-        forecast_quality="ok",
-        unit="F",
-        city_tz="America/Los_Angeles",
-        observed_high=69.1,
-        raw_observed_high=69.8,
-        ml_features={
-            "temp_slope_3h": -0.2,
-            "avg_peak_timing_mins": 960.0,
-            "day_of_year": 106,
-        },
-        adaptive=adaptive,
-        latest_weather=None,
-        hrrr_high=69.8,
-        nbm_high=69.4,
-        ecmwf_ifs_high=69.6,
-    )
-
-    assert model is not None
-    assert model.lock_regime is False
-    assert model.lock_trigger_reason is None

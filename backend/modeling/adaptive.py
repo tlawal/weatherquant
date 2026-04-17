@@ -28,21 +28,6 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
-_TZ_ABBREV_TO_IANA = {
-    "ET": "America/New_York",
-    "EST": "America/New_York",
-    "EDT": "America/New_York",
-    "CT": "America/Chicago",
-    "CST": "America/Chicago",
-    "CDT": "America/Chicago",
-    "MT": "America/Denver",
-    "MST": "America/Denver",
-    "MDT": "America/Denver",
-    "PT": "America/Los_Angeles",
-    "PST": "America/Los_Angeles",
-    "PDT": "America/Los_Angeles",
-}
-
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -484,7 +469,6 @@ def compute_station_predictions(
 
 def compute_peak_timing(
     wu_hourly_peak_time: Optional[str],
-    wu_hourly_peak_mins: Optional[float],
     historical_peak_mins: Optional[float],
     kalman: Optional[KalmanState],
     current_hour_local: int,
@@ -492,7 +476,6 @@ def compute_peak_timing(
     dt_key: str = "observed_at",
     temp_key: str = "temp_f",
     city_tz: str = "America/New_York",
-    reference_local_dt: Optional[datetime] = None,
 ) -> dict:
     """Estimate when the daily peak temperature occurs/occurred.
 
@@ -560,20 +543,12 @@ def compute_peak_timing(
     estimates: list[tuple[float, float, str]] = []  # (mins, weight, label)
 
     # 1. WU hourly forecast peak time
-    if wu_hourly_peak_mins is not None:
-        wu_mins = float(wu_hourly_peak_mins)
-    elif wu_hourly_peak_time:
-        wu_mins = _normalize_peak_time_to_city_mins(
-            wu_hourly_peak_time,
-            city_tz=city_tz,
-            reference_local_dt=reference_local_dt,
-        )
-    else:
-        wu_mins = None
-    if wu_mins is not None:
-        # Weight WU higher in morning, lower in afternoon
-        wu_weight = 0.6 if current_hour_local < 14 else 0.3
-        estimates.append((wu_mins, wu_weight, "wu_hourly"))
+    if wu_hourly_peak_time:
+        wu_mins = _parse_time_to_mins(wu_hourly_peak_time)
+        if wu_mins is not None:
+            # Weight WU higher in morning, lower in afternoon
+            wu_weight = 0.6 if current_hour_local < 14 else 0.3
+            estimates.append((wu_mins, wu_weight, "wu_hourly"))
 
     # 2. Historical average peak timing
     if historical_peak_mins is not None and 600 < historical_peak_mins < 1200:
@@ -653,69 +628,6 @@ def _parse_time_to_mins(time_str: str) -> Optional[float]:
     return None
 
 
-def _normalize_peak_time_to_city_mins(
-    time_str: str,
-    *,
-    city_tz: str,
-    reference_local_dt: Optional[datetime] = None,
-) -> Optional[float]:
-    """Normalize a WU peak-time string into minutes since midnight in city local time.
-
-    New rows should pass `peak_hour_local_mins` directly. This helper exists for
-    legacy rows whose `peak_hour` strings may be ET-formatted.
-    """
-    import re
-
-    raw = (time_str or "").strip()
-    if not raw:
-        return None
-
-    # Prefer ISO timestamps when present.
-    try:
-        iso_dt = datetime.fromisoformat(raw)
-    except ValueError:
-        iso_dt = None
-    if iso_dt is not None and iso_dt.tzinfo is not None:
-        city_dt = iso_dt.astimezone(ZoneInfo(city_tz))
-        return float(city_dt.hour * 60 + city_dt.minute)
-
-    match = re.match(
-        r"^(?P<clock>\d{1,2}:\d{2}(?:\s*[AP]M)?)\s*(?P<abbr>ET|EST|EDT|CT|CST|CDT|MT|MST|MDT|PT|PST|PDT)$",
-        raw,
-        re.I,
-    )
-    if not match:
-        return _parse_time_to_mins(raw)
-
-    clock = match.group("clock").strip()
-    abbr = match.group("abbr").upper()
-    base_mins = _parse_time_to_mins(clock)
-    if base_mins is None:
-        return None
-
-    source_tz_name = _TZ_ABBREV_TO_IANA.get(abbr)
-    if source_tz_name is None:
-        return base_mins
-
-    city_zone = ZoneInfo(city_tz)
-    source_zone = ZoneInfo(source_tz_name)
-    ref_dt = reference_local_dt or datetime.now(city_zone)
-    if ref_dt.tzinfo is None:
-        ref_dt = ref_dt.replace(tzinfo=city_zone)
-    ref_city = ref_dt.astimezone(city_zone)
-    ref_source = ref_city.astimezone(source_zone)
-
-    hours = int(base_mins // 60)
-    minutes = int(base_mins % 60)
-    source_peak_dt = datetime.combine(
-        ref_source.date(),
-        datetime.min.time(),
-        tzinfo=source_zone,
-    ).replace(hour=hours, minute=minutes)
-    city_peak_dt = source_peak_dt.astimezone(city_zone)
-    return float(city_peak_dt.hour * 60 + city_peak_dt.minute)
-
-
 # ---------------------------------------------------------------------------
 # Main entry point — called from signal_engine
 # ---------------------------------------------------------------------------
@@ -726,7 +638,6 @@ def run_adaptive(
     now_local: datetime,
     city_tz: str = "America/New_York",
     wu_hourly_peak_time: Optional[str] = None,
-    wu_hourly_peak_mins: Optional[float] = None,
     historical_peak_mins: Optional[float] = None,
     forecast_high: Optional[float] = None,
     ml_features: Optional[dict] = None,
@@ -741,7 +652,6 @@ def run_adaptive(
         now_local: current datetime in city's local timezone
         city_tz: IANA timezone string
         wu_hourly_peak_time: e.g. "3:00 PM ET" from WU forecast
-        wu_hourly_peak_mins: normalized WU peak minutes in city-local time
         historical_peak_mins: average historical peak in minutes since midnight
         forecast_high: fused NWS/WU daily high forecast (used for remaining-rise cap)
         ml_features: dict with temp_slope_3h, avg_peak_timing_mins, day_of_year
@@ -761,13 +671,11 @@ def run_adaptive(
     #    the estimated peak time is available for diurnal decay)
     peak_info = compute_peak_timing(
         wu_hourly_peak_time=wu_hourly_peak_time,
-        wu_hourly_peak_mins=wu_hourly_peak_mins,
         historical_peak_mins=historical_peak_mins,
         kalman=kalman,
         current_hour_local=now_local.hour,
         todays_obs=todays_obs,
         city_tz=city_tz,
-        reference_local_dt=now_local,
     )
 
     # 4. ML remaining-rise cap (prevents runaway extrapolation)
