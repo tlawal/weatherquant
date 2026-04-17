@@ -13,9 +13,13 @@
         Walk-forward optimization trains on rolling windows — no lookahead bias.
       </p>
     </div>
-    <div class="flex items-center gap-2">
+    <div class="flex items-center gap-2 flex-wrap">
       <span class="text-xs mono px-2 py-1 rounded" style="background:var(--bg-panel);color:var(--text-muted)">
         Resolved Events: <strong style="color:var(--cyan)">{{ resolved_count }}</strong>
+      </span>
+      <span class="text-xs mono px-2 py-1 rounded" style="background:var(--bg-panel);color:var(--text-muted)"
+            title="Resolved markets pulled from Polymarket's Gamma API">
+        Gamma: <strong style="color:var(--cyan)">{{ gamma_resolved_count }}</strong>
       </span>
       <button @click="enrichGamma()" class="text-xs px-3 py-1.5 rounded cursor-pointer transition-colors"
               style="background:var(--bg-panel);color:var(--text-muted);border:1px solid var(--border)"
@@ -24,6 +28,37 @@
         <span x-show="enriching" x-cloak>Fetching...</span>
       </button>
     </div>
+  </div>
+
+  <!-- ── ENRICHMENT STATUS BANNER ────────────────────────────────────────────── -->
+  <div class="px-4 py-2 rounded text-xs flex items-center justify-between gap-3"
+       style="background:var(--bg-card);border:1px solid var(--border)">
+    <div class="flex-1 min-w-0">
+      <template x-if="status && status.last_enriched_at">
+        <div style="color:var(--text-muted)">
+          Last enriched:
+          <span class="mono" style="color:var(--text-primary)" x-text="formatEnrichedAt(status.last_enriched_at)"></span>
+          —
+          <span class="mono" style="color:var(--cyan)" x-text="status.matched_markets"></span>
+          /
+          <span class="mono" x-text="status.total_markets"></span>
+          markets matched
+          <span x-show="status.matched_events > 0" style="color:var(--text-muted)">
+            (<span x-text="status.matched_events"></span> with local event data)
+          </span>
+        </div>
+      </template>
+      <template x-if="!status || !status.last_enriched_at">
+        <div style="color:var(--text-muted)">
+          No enrichment yet — click <em>Enrich from Gamma</em> to pull resolved markets from Polymarket.
+        </div>
+      </template>
+    </div>
+    <template x-if="enrichResult">
+      <div class="text-[11px] mono whitespace-nowrap" style="color:var(--cyan)">
+        + <span x-text="enrichResult.stored"></span> this run
+      </div>
+    </template>
   </div>
 
   <!-- ── HOW IT WORKS (collapsible, for beginners) ───────────────────────────── -->
@@ -384,8 +419,32 @@ function backtestPage() {
     prevResult: null,
     runId: null,
     pollTimer: null,
+    status: null,          // { last_enriched_at, total_markets, matched_markets, matched_events }
+    enrichResult: null,    // last successful enrichment payload
 
-    init() {},
+    init() {
+      this.loadEnrichmentStatus();
+    },
+
+    async loadEnrichmentStatus() {
+      try {
+        const res = await fetch('/api/backtest/enrichment-status');
+        if (res.ok) {
+          this.status = await res.json();
+        }
+      } catch (e) {
+        // Non-fatal — banner just stays in its "no enrichment yet" state
+      }
+    },
+
+    formatEnrichedAt(iso) {
+      if (!iso) return '';
+      try {
+        return new Date(iso).toLocaleString();
+      } catch (e) {
+        return iso;
+      }
+    },
 
     async enrichGamma() {
       this.enriching = true;
@@ -393,9 +452,21 @@ function backtestPage() {
       try {
         const res = await fetch('/api/backtest/enrich-gamma', { method: 'POST' });
         const data = await res.json();
-        if (data.enriched !== undefined) {
-          alert('Enriched ' + data.enriched + ' events from Gamma API. Reload to update count.');
-        }
+        this.enrichResult = data;
+        // Refresh banner status
+        await this.loadEnrichmentStatus();
+        const matched = data.matched_events ?? 0;
+        const stored = data.stored ?? 0;
+        const metar = data.matched_metar ?? 0;
+        alert(
+          'Gamma enrichment complete.\n\n' +
+          'Fetched: ' + (data.fetched ?? 0) + ' closed markets\n' +
+          'Weather markets: ' + (data.weather_matched ?? 0) + '\n' +
+          'Stored: ' + stored + '\n' +
+          'Matched to local events: ' + matched + '\n' +
+          'Matched to METAR actuals: ' + metar + '\n\n' +
+          'Reload the page to update the counts at the top.'
+        );
       } catch (e) {
         this.error = 'Gamma enrichment failed: ' + e.message;
       }

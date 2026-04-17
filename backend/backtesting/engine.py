@@ -19,7 +19,7 @@ from itertools import product
 from typing import Optional
 
 import aiohttp
-from sqlalchemy import select, desc, func
+from sqlalchemy import String, desc, func, select
 
 from backend.backtesting.metrics import (
     BacktestMetrics,
@@ -34,12 +34,15 @@ from backend.engine.signal_engine import _execution_cost
 from backend.strategy.kelly import calculate_kelly_fraction
 from backend.storage.db import get_session
 from backend.storage.models import (
+    BacktestResolvedEvent,
     BacktestRun,
     BacktestTrade,
     Bucket,
     City,
     Event,
+    ForecastObs,
     MarketSnapshot,
+    MetarObs,
     ModelSnapshot,
 )
 
@@ -55,7 +58,34 @@ _MONTH_MAP = {
 }
 
 _SLUG_RE = re.compile(
-    r"highest-temperature-in-(.+?)-on-([a-z]+)-(\d{1,2})-(\d{4})"
+    r"(highest|lowest)-temperature-in-(.+?)-on-([a-z]+)-(\d{1,2})(?:-(\d{4}))?"
+)
+
+# Gamma + local cities generally use matching short slugs (nyc/sf/la). These
+# aliases only apply when a long form appears on one side (e.g. Gamma
+# occasionally uses `new-york` instead of `nyc`). Both directions are handled.
+_CITY_ALIASES: dict[str, str] = {
+    "new-york": "nyc",
+    "new-york-city": "nyc",
+    "san-francisco": "sf",
+    "los-angeles": "la",
+    "washington-dc": "dc",
+    "washington-d-c": "dc",
+}
+
+# Bucket range parsers (reused from backend/ingestion/polymarket_gamma.py patterns)
+_BUCKET_RANGE_RE = re.compile(
+    r"(\d+\.?\d*)\s*[-–—]\s*(\d+\.?\d*)\s*°?\s*[FCfc]?"
+)
+_BUCKET_ABOVE_RE = re.compile(
+    r"(?:(?:above|higher than|over|≥|>=)\s*(\d+\.?\d*)"
+    r"|(\d+\.?\d*)\s*°?\s*[FCfc]?\s*or\s*(?:higher|above|more))",
+    re.I,
+)
+_BUCKET_BELOW_RE = re.compile(
+    r"(?:(?:below|lower than|under|<)\s*(\d+\.?\d*)"
+    r"|(\d+\.?\d*)\s*°?\s*[FCfc]?\s*or\s*(?:below|lower|under|less))",
+    re.I,
 )
 
 
@@ -114,112 +144,496 @@ class Portfolio:
 
 # ─── Gamma API enrichment ────────────────────────────────────────────────────
 
-def parse_gamma_slug(slug: str) -> tuple[Optional[str], Optional[str]]:
-    """Parse 'highest-temperature-in-atlanta-on-april-12-2026' → ('atlanta', '2026-04-12')."""
+@dataclass
+class EnrichmentResult:
+    """Summary of one Gamma enrichment pass."""
+    fetched: int              # total closed markets pulled
+    weather_matched: int      # passed slug filter
+    stored: int               # inserted/updated in backtest_resolved_events
+    matched_events: int       # cross-referenced an existing events row
+    matched_metar: int        # found a MetarObs actual for that city/date
+    matched_forecast: int     # found forecast data (ModelSnapshot or ForecastObs)
+    last_enriched_at: datetime
+
+
+def parse_gamma_slug(
+    slug: str,
+    fallback_year: Optional[int] = None,
+) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """Parse a Polymarket event slug.
+
+    Examples:
+        'highest-temperature-in-atlanta-on-april-12-2026'
+            → ('high', 'atlanta', '2026-04-12')
+        'lowest-temperature-in-new-york-on-april-12-2026'
+            → ('low', 'new-york', '2026-04-12')
+        'highest-temperature-in-nyc-on-december-30'  (no year)
+            → ('high', 'new-york-city', f'{fallback_year}-12-30') if fallback given
+
+    City aliases (nyc, new-york, sf, …) are normalized to canonical slugs.
+    """
+    if not slug:
+        return None, None, None
     m = _SLUG_RE.search(slug)
     if not m:
-        return None, None
-    city_part = m.group(1)
-    month_name = m.group(2).lower()
-    day = int(m.group(3))
-    year = int(m.group(4))
-    month_num = _MONTH_MAP.get(month_name)
+        return None, None, None
+    kind = "high" if m.group(1) == "highest" else "low"
+    city_part = m.group(2)
+    city_part = _CITY_ALIASES.get(city_part, city_part)
+    month_num = _MONTH_MAP.get(m.group(3).lower())
     if not month_num:
-        return None, None
-    date_et = f"{year}-{month_num:02d}-{day:02d}"
-    return city_part, date_et
+        return None, None, None
+    try:
+        day = int(m.group(4))
+    except ValueError:
+        return None, None, None
+    year_str = m.group(5)
+    if year_str:
+        try:
+            year = int(year_str)
+        except ValueError:
+            return None, None, None
+    elif fallback_year is not None:
+        year = fallback_year
+    else:
+        return None, None, None
+    date_et = f"{year:04d}-{month_num:02d}-{day:02d}"
+    return kind, city_part, date_et
 
 
-def extract_winning_bucket(markets: list[dict]) -> Optional[int]:
-    """From a Gamma event's markets array, find which bucket index resolved YES.
+def _derive_parent_slug(market_slug: str) -> str:
+    """Extract the parent event slug from a bucket market slug.
 
-    Markets are sorted by bucket index in Gamma; the winning one has
-    outcome == 'Yes' or the highest resolution value.
+    'highest-temperature-in-atlanta-on-april-12-2026-65-69'
+        → 'highest-temperature-in-atlanta-on-april-12-2026'
     """
-    if not markets:
+    if not market_slug:
+        return ""
+    m = _SLUG_RE.search(market_slug)
+    return m.group(0) if m else market_slug
+
+
+def _parse_bucket_range(label: str) -> tuple[Optional[float], Optional[float]]:
+    """Extract (lo_f, hi_f) from a bucket market question/slug.
+
+    Handles '65-69°F', 'above 90°F', '60°F or lower', etc.
+    Returns (None, None) if unparseable.
+    """
+    if not label:
+        return None, None
+    m = _BUCKET_RANGE_RE.search(label)
+    if m:
+        try:
+            return float(m.group(1)), float(m.group(2))
+        except ValueError:
+            pass
+    m = _BUCKET_ABOVE_RE.search(label)
+    if m:
+        raw = m.group(1) or m.group(2)
+        try:
+            return float(raw), None  # open-ended upper
+        except (TypeError, ValueError):
+            pass
+    m = _BUCKET_BELOW_RE.search(label)
+    if m:
+        raw = m.group(1) or m.group(2)
+        try:
+            return None, float(raw)  # open-ended lower
+        except (TypeError, ValueError):
+            pass
+    return None, None
+
+
+def _extract_winner(market: dict) -> tuple[Optional[str], Optional[float]]:
+    """From a Polymarket market row, return (winning_outcome, final_price).
+
+    Polymarket encodes resolution in `outcomePrices` — a JSON-string of
+    [\"1\",\"0\"] or [\"0\",\"1\"]. The winning outcome is whichever index
+    equals "1".
+    """
+    try:
+        outcomes = json.loads(market.get("outcomes") or "[]")
+        prices = [float(p) for p in json.loads(market.get("outcomePrices") or "[]")]
+    except (ValueError, TypeError):
+        return None, None
+    if not outcomes or len(outcomes) != len(prices):
+        return None, None
+    for name, p in zip(outcomes, prices):
+        if p >= 0.99:
+            return str(name), float(p)
+    return None, None
+
+
+async def _lookup_metar_actual(
+    sess,
+    city_slug: str,
+    date_et: str,
+    kind: str,
+) -> Optional[float]:
+    """Return the observed max/min temperature (°F) for a city on a given ET date.
+
+    kind: 'high' → max(temp_f), 'low' → min(temp_f).
+    """
+    city = (await sess.execute(
+        select(City).where(City.city_slug == city_slug)
+    )).scalar_one_or_none()
+    if not city:
         return None
 
-    for i, mkt in enumerate(markets):
-        outcome = mkt.get("outcome")
-        if outcome and str(outcome).lower() == "yes":
-            return i
-        # Some formats use "winner" boolean
-        if mkt.get("winner") is True:
-            return i
+    # Date filter: ET calendar day. We approximate using the stored observed_at
+    # in UTC; this is coarse but adequate for a day-bucket match.
+    agg = func.max(MetarObs.temp_f) if kind == "high" else func.min(MetarObs.temp_f)
+    row = (await sess.execute(
+        select(agg)
+        .where(MetarObs.city_id == city.id)
+        .where(func.substr(func.cast(MetarObs.observed_at, String), 1, 10) == date_et)
+    )).scalar_one_or_none()
 
+    if row is None:
+        # Fall back: match by daily_high_f if we stored any row for that day
+        row = (await sess.execute(
+            select(MetarObs.daily_high_f)
+            .where(MetarObs.city_id == city.id)
+            .where(func.substr(func.cast(MetarObs.observed_at, String), 1, 10) == date_et)
+            .where(MetarObs.daily_high_f.isnot(None))
+            .limit(1)
+        )).scalar_one_or_none()
+
+    try:
+        return float(row) if row is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+async def _lookup_forecast_prob(
+    sess,
+    city_slug: str,
+    date_et: str,
+    winning_idx: Optional[int],
+    matched_event_id: Optional[int],
+) -> tuple[bool, Optional[float]]:
+    """Find the model's forecast probability for the winning bucket.
+
+    Returns (has_forecast_data, model_prob_for_winner).
+    - has_forecast_data: True if we have ANY ForecastObs or ModelSnapshot for
+      this city/date.
+    - model_prob_for_winner: the stored probability assigned to the winning
+      bucket, or None if we cannot identify it.
+    """
+    prob: Optional[float] = None
+    has_data = False
+
+    if matched_event_id is not None and winning_idx is not None:
+        snap = (await sess.execute(
+            select(ModelSnapshot)
+            .where(ModelSnapshot.event_id == matched_event_id)
+            .order_by(desc(ModelSnapshot.computed_at))
+            .limit(1)
+        )).scalar_one_or_none()
+        if snap and snap.probs_json:
+            has_data = True
+            try:
+                probs = json.loads(snap.probs_json)
+                if 0 <= winning_idx < len(probs):
+                    prob = float(probs[winning_idx])
+            except (ValueError, TypeError):
+                pass
+
+    if not has_data:
+        city = (await sess.execute(
+            select(City).where(City.city_slug == city_slug)
+        )).scalar_one_or_none()
+        if city:
+            row = (await sess.execute(
+                select(ForecastObs.id)
+                .where(ForecastObs.city_id == city.id)
+                .where(ForecastObs.date_et == date_et)
+                .limit(1)
+            )).scalar_one_or_none()
+            if row is not None:
+                has_data = True
+
+    return has_data, prob
+
+
+def _event_end_year(event_data: dict) -> Optional[int]:
+    """Extract the year from an event's endDate/closedTime (ISO-8601 UTC)."""
+    for key in ("endDate", "closedTime", "startDate"):
+        raw = event_data.get(key)
+        if not raw:
+            continue
+        try:
+            # endDate is like "2025-12-30T12:00:00Z" — first 4 chars are year
+            return int(str(raw)[:4])
+        except (ValueError, TypeError):
+            continue
     return None
 
 
-async def enrich_from_gamma() -> int:
-    """Fetch closed weather markets from Gamma API, fill missing winning_bucket_idx."""
-    enriched = 0
-    offset = 0
-    headers = {"User-Agent": "WeatherQuant-Backtest/1.0"}
+async def enrich_from_gamma() -> EnrichmentResult:
+    """Fetch closed weather markets from Gamma, resolve winners, cross-match.
+
+    Uses `GET /events?closed=true&tag_slug=daily-temperature` which returns
+    parent events with bucket markets already nested. For each event we:
+      1. Parse the city + date (falling back to endDate if the slug omits year)
+      2. Identify the winning bucket via each market's `outcomePrices` JSON
+      3. Upsert a row into `backtest_resolved_events` and back-fill the local
+         Event.winning_bucket_idx when a matching event exists.
+      4. Cross-reference MetarObs / ForecastObs for enrichment metadata.
+    """
+    fetched = 0
+    weather_matched = 0
+    stored = 0
+    matched_events = 0
+    matched_metar = 0
+    matched_forecast = 0
+    now = datetime.now(timezone.utc)
+
+    headers = {"User-Agent": "WeatherQuant/1.0 (contact@weatherquant.local)"}
     timeout = aiohttp.ClientTimeout(total=30)
 
+    # Collect (event_slug, markets, event_data) from Gamma
+    events_to_process: list[tuple[str, list[dict], dict]] = []
+
     async with aiohttp.ClientSession(headers=headers, timeout=timeout) as http:
+        offset = 0
+        page_size = 500
         while True:
             url = f"{GAMMA_API}/events"
             params = {
                 "closed": "true",
-                "tag": "Weather",
-                "limit": "100",
+                "limit": str(page_size),
                 "offset": str(offset),
+                "tag_slug": "daily-temperature",
             }
             try:
                 resp = await http.get(url, params=params)
+                resp.raise_for_status()
                 data = await resp.json(content_type=None)
             except Exception as e:
-                log.warning("gamma enrich: request failed at offset=%d: %s", offset, e)
+                log.warning("gamma enrich: request failed offset=%d: %s", offset, e)
                 break
 
             if not data or not isinstance(data, list):
                 break
 
-            for event_data in data:
-                slug = event_data.get("slug", "")
-                if "highest-temperature-in-" not in slug:
+            for ev in data:
+                fetched += 1
+                slug = ev.get("slug") or ""
+                if not (
+                    "highest-temperature-in-" in slug
+                    or "lowest-temperature-in-" in slug
+                ):
                     continue
-
-                city_slug, date_et = parse_gamma_slug(slug)
-                if not city_slug or not date_et:
+                weather_matched += 1
+                markets = ev.get("markets") or []
+                if not markets:
                     continue
+                events_to_process.append((slug, markets, ev))
 
-                event_markets = event_data.get("markets", [])
-                winning_idx = extract_winning_bucket(event_markets)
-                if winning_idx is None:
-                    continue
-
-                # Try to match to local DB
-                async with get_session() as sess:
-                    query = (
-                        select(Event)
-                        .join(City, Event.city_id == City.id)
-                        .where(City.city_slug == city_slug)
-                        .where(Event.date_et == date_et)
-                    )
-                    result = await sess.execute(query)
-                    local_event = result.scalar_one_or_none()
-
-                    if local_event and local_event.winning_bucket_idx is None:
-                        local_event.winning_bucket_idx = winning_idx
-                        if local_event.resolved_at is None:
-                            local_event.resolved_at = datetime.now(timezone.utc)
-                        await sess.commit()
-                        enriched += 1
-
-            offset += 100
-            if len(data) < 100:
+            if len(data) < page_size:
                 break
+            offset += page_size
 
-    log.info("gamma enrich: updated %d events with resolution data", enriched)
-    return enriched
+    # Persist + cross-reference
+    async with get_session() as sess:
+        for event_slug, markets, event_data in events_to_process:
+            fallback_year = _event_end_year(event_data)
+            kind, city_slug, date_et = parse_gamma_slug(event_slug, fallback_year)
+            if not city_slug or not date_et:
+                continue
+
+            # Sort bucket markets by parsed low bound so the index order
+            # matches the bot's own bucket convention (low → high).
+            ranked: list[tuple[float, Optional[float], dict]] = []
+            for m in markets:
+                label = m.get("question") or m.get("slug", "")
+                lo, hi = _parse_bucket_range(label)
+                sort_key = lo if lo is not None else (hi if hi is not None else 1e9)
+                ranked.append((sort_key, hi, m))
+            ranked.sort(key=lambda r: r[0])
+
+            buckets_out: list[dict] = []
+            winning_idx: Optional[int] = None
+            winning_label: Optional[str] = None
+            final_price: Optional[float] = None
+            resolved_outcome: Optional[str] = None
+
+            for idx, (lo_sort, _hi, m) in enumerate(ranked):
+                label = m.get("question") or m.get("slug", "")
+                lo, hi = _parse_bucket_range(label)
+                buckets_out.append({
+                    "idx": idx,
+                    "label": label,
+                    "lo": lo,
+                    "hi": hi,
+                    "slug": m.get("slug", ""),
+                })
+                name, price = _extract_winner(m)
+                if name is None or price is None:
+                    continue
+                if str(name).strip().lower() == "yes":
+                    winning_idx = idx
+                    winning_label = label
+                    final_price = price
+                    resolved_outcome = name
+
+            match_status = "unmatched"
+            matched_event_id: Optional[int] = None
+            matched_actual_f: Optional[float] = None
+            matched_forecast_prob: Optional[float] = None
+
+            # 1) Existing local events row
+            ev = (await sess.execute(
+                select(Event).join(City, Event.city_id == City.id)
+                .where(City.city_slug == city_slug)
+                .where(Event.date_et == date_et)
+            )).scalar_one_or_none()
+            if ev is not None:
+                matched_event_id = ev.id
+                match_status = "matched_event"
+                matched_events += 1
+                if ev.winning_bucket_idx is None and winning_idx is not None:
+                    ev.winning_bucket_idx = winning_idx
+                    if ev.resolved_at is None:
+                        ev.resolved_at = now
+
+            # 2) MetarObs actual
+            actual = await _lookup_metar_actual(sess, city_slug, date_et, kind or "high")
+            if actual is not None:
+                matched_actual_f = actual
+                if match_status == "unmatched":
+                    match_status = "matched_metar"
+                matched_metar += 1
+
+            # 3) Forecast data
+            has_forecast, fprob = await _lookup_forecast_prob(
+                sess, city_slug, date_et, winning_idx, matched_event_id
+            )
+            if fprob is not None:
+                matched_forecast_prob = fprob
+            if has_forecast:
+                if match_status == "unmatched":
+                    match_status = "matched_forecast"
+                matched_forecast += 1
+
+            # Upsert BacktestResolvedEvent
+            existing = (await sess.execute(
+                select(BacktestResolvedEvent)
+                .where(BacktestResolvedEvent.event_slug == event_slug)
+            )).scalar_one_or_none()
+
+            market_slug = markets[0].get("slug", "") if markets else ""
+            buckets_json = json.dumps(buckets_out)
+
+            if existing is not None:
+                existing.market_slug = market_slug
+                existing.city_slug = city_slug
+                existing.date_et = date_et
+                existing.market_kind = kind or "high"
+                existing.winning_bucket_idx = winning_idx
+                existing.winning_bucket_label = winning_label
+                existing.final_price = final_price
+                existing.resolved_outcome = resolved_outcome
+                existing.buckets_json = buckets_json
+                existing.matched_event_id = matched_event_id
+                existing.matched_metar_actual_f = matched_actual_f
+                existing.matched_forecast_prob = matched_forecast_prob
+                existing.match_status = match_status
+                existing.enriched_at = now
+                if existing.closed_at is None:
+                    existing.closed_at = now
+            else:
+                sess.add(BacktestResolvedEvent(
+                    event_slug=event_slug,
+                    market_slug=market_slug,
+                    city_slug=city_slug,
+                    date_et=date_et,
+                    market_kind=kind or "high",
+                    winning_bucket_idx=winning_idx,
+                    winning_bucket_label=winning_label,
+                    final_price=final_price,
+                    resolved_outcome=resolved_outcome,
+                    buckets_json=buckets_json,
+                    matched_event_id=matched_event_id,
+                    matched_metar_actual_f=matched_actual_f,
+                    matched_forecast_prob=matched_forecast_prob,
+                    match_status=match_status,
+                    enriched_at=now,
+                    closed_at=now,
+                ))
+            stored += 1
+
+        await sess.commit()
+
+    log.info(
+        "gamma enrich: fetched=%d weather=%d stored=%d events=%d metar=%d forecast=%d",
+        fetched, weather_matched, stored, matched_events, matched_metar, matched_forecast,
+    )
+    return EnrichmentResult(
+        fetched=fetched,
+        weather_matched=weather_matched,
+        stored=stored,
+        matched_events=matched_events,
+        matched_metar=matched_metar,
+        matched_forecast=matched_forecast,
+        last_enriched_at=now,
+    )
 
 
 # ─── Data loading ────────────────────────────────────────────────────────────
 
+async def get_enrichment_status() -> dict:
+    """Return summary stats for the backtest dashboard's "last enriched" banner."""
+    async with get_session() as sess:
+        latest = (await sess.execute(
+            select(BacktestResolvedEvent)
+            .order_by(desc(BacktestResolvedEvent.enriched_at))
+            .limit(1)
+        )).scalar_one_or_none()
+        total = (await sess.execute(
+            select(func.count(BacktestResolvedEvent.id))
+        )).scalar_one() or 0
+        matched = (await sess.execute(
+            select(func.count(BacktestResolvedEvent.id))
+            .where(BacktestResolvedEvent.match_status != "unmatched")
+        )).scalar_one() or 0
+        matched_event = (await sess.execute(
+            select(func.count(BacktestResolvedEvent.id))
+            .where(BacktestResolvedEvent.match_status == "matched_event")
+        )).scalar_one() or 0
+
+    return {
+        "last_enriched_at": latest.enriched_at.isoformat() if latest else None,
+        "total_markets": int(total),
+        "matched_markets": int(matched),
+        "matched_events": int(matched_event),
+    }
+
+
+async def count_resolved_sources() -> dict:
+    """Quick counts used for the /api/backtest/run debug print."""
+    async with get_session() as sess:
+        local = (await sess.execute(
+            select(func.count(Event.id))
+            .where(Event.winning_bucket_idx.isnot(None))
+        )).scalar_one() or 0
+        gamma = (await sess.execute(
+            select(func.count(BacktestResolvedEvent.id))
+            .where(BacktestResolvedEvent.winning_bucket_idx.isnot(None))
+        )).scalar_one() or 0
+    return {"resolved_local": int(local), "resolved_gamma": int(gamma)}
+
+
 async def fetch_resolved_events() -> list[dict]:
-    """Load all resolved events with their buckets, model snapshots, and market snapshots."""
+    """Load all resolved events with their buckets, model snapshots, and market snapshots.
+
+    Only returns events that have the data needed to replay simulation
+    (ModelSnapshot + MarketSnapshot per bucket). BacktestResolvedEvent rows
+    without a matching local Event cannot be simulated, but they already
+    backfill Event.winning_bucket_idx during enrich_from_gamma() — so
+    more events become "resolved" after enrichment without code changes here.
+    """
     async with get_session() as sess:
         # Get events with known outcomes
         query = (

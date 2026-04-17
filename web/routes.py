@@ -1023,7 +1023,7 @@ async def strategies_page(request: Request):
 async def backtest_page(request: Request):
     """Walk-forward backtester dashboard."""
     from backend.storage.db import get_session
-    from backend.storage.models import BacktestRun, Event
+    from backend.storage.models import BacktestResolvedEvent, BacktestRun, Event
     from sqlalchemy import select, desc, func
 
     async with get_session() as sess:
@@ -1031,9 +1031,15 @@ async def backtest_page(request: Request):
         runs_q = select(BacktestRun).order_by(desc(BacktestRun.created_at)).limit(20)
         runs = (await sess.execute(runs_q)).scalars().all()
 
-        # Count resolved events
+        # Count resolved events (local Events with known winner)
         count_q = select(func.count(Event.id)).where(Event.winning_bucket_idx.isnot(None))
         resolved_count = (await sess.execute(count_q)).scalar() or 0
+
+        # Count enrichment-sourced resolved markets (Gamma)
+        gamma_count = (await sess.execute(
+            select(func.count(BacktestResolvedEvent.id))
+            .where(BacktestResolvedEvent.winning_bucket_idx.isnot(None))
+        )).scalar() or 0
 
     arming_state = "DISARMED"
     try:
@@ -1054,6 +1060,7 @@ async def backtest_page(request: Request):
             "arming_state": arming_state,
             "runs": runs,
             "resolved_count": resolved_count,
+            "gamma_resolved_count": gamma_count,
             "default_params": asdict(BacktestParams()),
         },
     )
@@ -1063,7 +1070,11 @@ async def backtest_page(request: Request):
 async def api_run_backtest(request: Request):
     """Launch a backtest run (async background task)."""
     import asyncio
-    from backend.backtesting.engine import BacktestEngine, BacktestParams
+    from backend.backtesting.engine import (
+        BacktestEngine,
+        BacktestParams,
+        count_resolved_sources,
+    )
     from backend.storage.models import BacktestRun
     from backend.storage.db import get_session
     from dataclasses import fields, asdict
@@ -1090,6 +1101,18 @@ async def api_run_backtest(request: Request):
         await sess.commit()
         await sess.refresh(run)
         run_id = run.id
+
+    # Debug visibility: report how many resolved events exist from each source
+    # before we spin up the background engine.
+    try:
+        counts = await count_resolved_sources()
+        print(
+            f"[backtest] run_id={run_id} "
+            f"resolved_local={counts['resolved_local']} "
+            f"resolved_gamma={counts['resolved_gamma']}"
+        )
+    except Exception as e:
+        print(f"[backtest] run_id={run_id} resolved-source-count error: {e}")
 
     # Run in background
     async def _bg():
@@ -1127,5 +1150,22 @@ async def api_get_backtest(run_id: int):
 async def api_enrich_gamma():
     """Fetch resolved weather markets from Gamma API to enrich local DB."""
     from backend.backtesting.engine import enrich_from_gamma
-    count = await enrich_from_gamma()
-    return {"enriched": count}
+    result = await enrich_from_gamma()
+    return {
+        "fetched": result.fetched,
+        "weather_matched": result.weather_matched,
+        "stored": result.stored,
+        "matched_events": result.matched_events,
+        "matched_metar": result.matched_metar,
+        "matched_forecast": result.matched_forecast,
+        "last_enriched_at": result.last_enriched_at.isoformat(),
+        # Back-compat field for any older clients
+        "enriched": result.matched_events,
+    }
+
+
+@dashboard_router.get("/api/backtest/enrichment-status")
+async def api_backtest_enrichment_status():
+    """Return the "last enriched" summary used by the banner on /backtest."""
+    from backend.backtesting.engine import get_enrichment_status
+    return await get_enrichment_status()

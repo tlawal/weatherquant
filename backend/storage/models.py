@@ -579,6 +579,54 @@ class BacktestTrade(Base):
     run: Mapped["BacktestRun"] = relationship("BacktestRun", back_populates="trades")
 
 
+class BacktestResolvedEvent(Base):
+    """Resolved Polymarket weather market fetched from Gamma API.
+
+    Independent of the local `events` table so enrichment captures markets
+    the bot never tracked. Cross-referenced against MetarObs / ForecastObs
+    where possible to enable backtesting without a full local event row.
+    """
+    __tablename__ = "backtest_resolved_events"
+    __table_args__ = (
+        Index("ix_bt_resolved_city_date", "city_slug", "date_et"),
+        Index("ix_bt_resolved_slug", "event_slug", unique=True),
+        Index("ix_bt_resolved_enriched_at", "enriched_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    event_slug: Mapped[str] = mapped_column(String(256), nullable=False)
+    market_slug: Mapped[str] = mapped_column(String(256), nullable=False)
+    city_slug: Mapped[str] = mapped_column(String(64), nullable=False)
+    date_et: Mapped[str] = mapped_column(String(10), nullable=False)
+    # "high" | "low"
+    market_kind: Mapped[str] = mapped_column(String(16), default="high")
+
+    # Resolution
+    winning_bucket_idx: Mapped[Optional[int]] = mapped_column(Integer)
+    winning_bucket_label: Mapped[Optional[str]] = mapped_column(String(256))
+    final_price: Mapped[Optional[float]] = mapped_column(Float)
+    resolved_outcome: Mapped[Optional[str]] = mapped_column(String(32))
+
+    # JSON array: [{"idx", "label", "lo", "hi"}, ...]
+    buckets_json: Mapped[Optional[str]] = mapped_column(Text)
+
+    # Cross-reference to local data
+    matched_event_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("events.id")
+    )
+    matched_metar_actual_f: Mapped[Optional[float]] = mapped_column(Float)
+    matched_forecast_prob: Mapped[Optional[float]] = mapped_column(Float)
+    # "matched_event" | "matched_metar" | "matched_forecast" | "unmatched"
+    match_status: Mapped[str] = mapped_column(
+        String(16), default="unmatched", nullable=False
+    )
+
+    enriched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+
 class StationCalibration(Base):
     """Per-station 30-day rolling forecast calibration metrics.
 
