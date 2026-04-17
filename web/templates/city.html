@@ -788,10 +788,10 @@
     {% if adaptive_info %}
     <div class="flex flex-wrap items-center gap-3 text-[10px]">
       {% if model and model.inputs and model.inputs.mu_forecast is not none %}
-      <span class="px-2 py-0.5 rounded-full font-bold" style="background:rgba(34,211,238,0.15);color:var(--cyan)" title="Primary signal: 70% multi-model ensemble (NWS/WU/HRRR/NBM/ECMWF IFS) + 30% Kalman (post-11AM)">
+      <span class="px-2 py-0.5 rounded-full font-bold" style="background:rgba(34,211,238,0.15);color:var(--cyan)" title="Primary signal: multi-model ensemble (NWS/WU/HRRR/NBM/ECMWF IFS) + Kalman nowcast blended only in a ±2h window around anticipated peak and only when it agrees with consensus">
         Primary: {{ "%.1f"|format(model.mu) }}°{{ city.unit|default('F') }}{% if adaptive_info.composite_peak_timing %} @ {{ adaptive_info.composite_peak_timing }}{% endif %}
         <span class="opacity-60 text-[9px] ml-1">
-          {% if model.inputs.kalman_nowcast_active %}70/30 blend{% else %}multi-model only{% endif %}
+          {% if model.inputs.kalman_nowcast_active %}multi + {{ "%.0f"|format(model.inputs.kalman_weight * 100) }}% kalman{% else %}multi-model only{% endif %}
         </span>
       </span>
       {% elif adaptive_info.composite_peak_timing %}
@@ -877,10 +877,10 @@
   {% if adaptive_info %}
   <div class="mt-3 pt-3 border-t grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3 text-[10px]" style="border-color:var(--border)">
     <div>
-      <span style="color:var(--text-muted)">Predicted High</span>
+      <span style="color:var(--text-muted)" title="Kalman filter's short-horizon nowcast from live METAR trend. The market prediction is the 'Primary' value above — this tile is a diagnostic.">Kalman Nowcast</span>
       <div class="mono font-bold" style="color:var(--cyan)">{{ adaptive_info.predicted_daily_high }}°{{ city.unit|default('F') }}{% if adaptive_info.predicted_high_time %} @ {{ adaptive_info.predicted_high_time }}{% endif %}</div>
       {% if model and model.inputs and model.inputs.kalman_divergence_f is not none and model.inputs.kalman_divergence_f > 3.0 %}
-      <div class="text-[9px] opacity-70" style="color:#FBBF24">nowcast only — see blend above</div>
+      <div class="text-[9px] opacity-70" style="color:#FBBF24">diverges {{ "%.1f"|format(model.inputs.kalman_divergence_f) }}°F from consensus — downweighted</div>
       {% endif %}
     </div>
     <div>

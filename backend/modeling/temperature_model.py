@@ -8,19 +8,22 @@ Fuses five forecast sources using calibrated weights:
   - NBM (via Open-Meteo, NCEP National Blend of Models, US CONUS)
   - ECMWF IFS (via Open-Meteo, global 9–25 km, top-2 global NWP model)
 
-The ensemble μ is blended as 70% multi-model + 30% Kalman nowcast,
-with the Kalman slice gated to hour_local >= 11 (before 11 AM the
-Kalman engine has insufficient diurnal data and systematically
-under-shoots the peak). METAR-based intraday adjustment is applied
-downstream via the _METAR_WEIGHT_TABLE, unchanged.
+The ensemble μ is primarily the multi-model mean. The Kalman nowcast
+is blended in dynamically via `compute_kalman_weight`: it only earns
+weight inside a ±2h tent around the anticipated peak and only when it
+agrees with the multi-model panel within the panel's own spread.
+Outside that window or when badly diverged the weight collapses to 0
+and mu_forecast = mu_multi_model. METAR-based intraday adjustment is
+applied downstream via the _METAR_WEIGHT_TABLE, unchanged.
 
 Key design decisions:
   - sigma never collapses below 1.0°F (minimum uncertainty)
   - METAR weight increases continuously through the day
   - When METAR-heavy (late day), sigma widens slightly to reflect
     that we're trusting a single ground observation more
-  - Kalman is used only once: as the 30% slice of mu_forecast (post-11AM),
-    plus a capped (<=10%) residual nudge into projected_high
+  - Kalman is a nowcast, not a forecast: weighted only where its short-
+    horizon skill applies, and a secondary <=10% residual nudge into
+    projected_high gated on the same positive weight.
 """
 from __future__ import annotations
 
@@ -106,6 +109,44 @@ def _expected_remaining_rise(hour_local: int) -> float:
 
 def _metar_weight(hour_local: int) -> float:
     return _interpolate_table(_METAR_WEIGHT_TABLE, hour_local)
+
+
+def compute_kalman_weight(
+    hour_local_fractional: float,
+    peak_hour_local: Optional[float],
+    kalman_divergence: float,
+    spread: float,
+    n_obs: int,
+    peak_already_passed: bool,
+    max_weight: float = 0.45,
+    half_window_hours: float = 2.0,
+) -> float:
+    """Ensemble weight for the Kalman nowcast slice of mu_forecast.
+
+    The filter has short-horizon skill; it earns its keep in a ±2h tent
+    centered on the anticipated peak. Outside that window the multi-model
+    panel (ECMWF IFS, HRRR, NBM, NWS, WU) is strictly more skillful. When
+    the Kalman nowcast disagrees with consensus by more than the panel's
+    own spread, scale down sharply — a lone filter beating five physics
+    models is almost always the filter missing a regime change.
+
+    All temperature arguments are in the same unit (°F or °C). The helper
+    only uses ratios, so it is unit-agnostic.
+
+    Returns 0.0 when the filter is out-of-window, under-observed, or badly
+    diverged. Never exceeds `max_weight`.
+    """
+    if n_obs < 10 or peak_hour_local is None:
+        return 0.0
+    window_factor = max(0.0, 1.0 - abs(hour_local_fractional - peak_hour_local) / half_window_hours)
+    if window_factor <= 0.0:
+        return 0.0
+    div_budget = max(spread, 3.0)
+    div_excess = max(0.0, kalman_divergence - div_budget)
+    div_penalty = max(0.0, 1.0 - div_excess / div_budget)
+    if peak_already_passed:
+        window_factor *= 0.5
+    return max_weight * window_factor * div_penalty
 
 
 def weather_adjusted_sigma(
@@ -374,52 +415,77 @@ def compute_model(
         return None
 
     # Multi-model weighted mean of available sources (re-normalize weights).
-    # This is the 70% slice of the final ensemble mu.
     total_weight = sum(w for _, w in calibrated.values())
     mu_multi_model = sum(v * w for v, w in calibrated.values()) / total_weight
 
-    # ── 70% multi-model ensemble + 30% Kalman nowcast (post-11AM local) ─────
-    # Kalman is gated to hour_local >= 11: before that, the adaptive engine
-    # has insufficient diurnal data and systematically under-shoots the
-    # peak (observed: Atlanta 79.7 vs. 83+ consensus). After 11 AM local,
-    # the 30% Kalman slice acts as a nowcast correction toward the live
-    # trend. Before 11 AM we use a pure multi-model average.
-    kalman_nowcast_active = False
+    vals = [v for v, _ in calibrated.values()]
+    spread = (max(vals) - min(vals)) if len(vals) >= 2 else 0.0
+
+    # ── Multi-model + dynamic Kalman blend ─────────────────────────────────
+    # Kalman is a short-horizon nowcast, not a forecast. It earns weight
+    # only in a ±2h tent around the anticipated peak and only when it
+    # agrees with the multi-model panel within the panel's own spread.
+    # Outside that window or when badly diverged, consensus wins — the
+    # filter has no physics and no synoptic context.
+    hour_local_fractional = now_local.hour + now_local.minute / 60.0
     kalman_blend_high: Optional[float] = None
-    ensemble_breakdown = {
-        "multi_model": round(mu_multi_model, 2),
-        "kalman": None,
-        "mode": "pre_11am_multi_only",
-    }
-    if (
-        adaptive is not None
-        and getattr(adaptive, "predicted_daily_high", None) is not None
-        and hour_local >= 11
-    ):
+    kalman_divergence: Optional[float] = None
+    peak_hour_local: Optional[float] = None
+    kalman_w: float = 0.0
+    mode_reason = "no_adaptive"
+
+    if adaptive is not None and getattr(adaptive, "predicted_daily_high", None) is not None:
         kalman_blend_high = float(adaptive.predicted_daily_high)
         if daily_high_metar is not None:
             kalman_blend_high = max(kalman_blend_high, daily_high_metar)
-        mu_forecast = 0.70 * mu_multi_model + 0.30 * kalman_blend_high
-        kalman_nowcast_active = True
-        ensemble_breakdown = {
-            "multi_model": round(mu_multi_model, 2),
-            "kalman": round(kalman_blend_high, 2),
-            "mode": "70_multi_30_kalman",
-        }
+        kalman_divergence = abs(kalman_blend_high - mu_multi_model)
+        if getattr(adaptive, "predicted_high_time", None) is not None:
+            peak_dt_local = adaptive.predicted_high_time.astimezone(local_tz)
+            peak_hour_local = peak_dt_local.hour + peak_dt_local.minute / 60.0
+        n_obs = adaptive.kalman.n_observations if adaptive.kalman else 0
+        kalman_w = compute_kalman_weight(
+            hour_local_fractional=hour_local_fractional,
+            peak_hour_local=peak_hour_local,
+            kalman_divergence=kalman_divergence,
+            spread=spread,
+            n_obs=n_obs,
+            peak_already_passed=adaptive.peak_already_passed,
+        )
+        if kalman_w > 0.0:
+            mode_reason = "in_peak_window"
+        elif n_obs < 10:
+            mode_reason = "low_obs"
+        elif peak_hour_local is None:
+            mode_reason = "no_peak_time"
+        elif abs(hour_local_fractional - (peak_hour_local or 0.0)) > 2.0:
+            mode_reason = "outside_peak_window"
+        else:
+            mode_reason = "diverged"
+
+    kalman_nowcast_active = kalman_w > 0.0
+    if kalman_nowcast_active and kalman_blend_high is not None:
+        mu_forecast = (1.0 - kalman_w) * mu_multi_model + kalman_w * kalman_blend_high
+        mode = f"blend_multi_kalman_w{kalman_w:.2f}"
     else:
         mu_forecast = mu_multi_model
+        mode = f"multi_only:{mode_reason}"
+
+    ensemble_breakdown = {
+        "multi_model": round(mu_multi_model, 2),
+        "kalman": round(kalman_blend_high, 2) if kalman_blend_high is not None else None,
+        "kalman_weight": round(kalman_w, 3),
+        "peak_hour_local": round(peak_hour_local, 2) if peak_hour_local is not None else None,
+        "mode": mode,
+    }
 
     # Scale factor for Celsius
     unit_mult = 5.0 / 9.0 if unit == "C" else 1.0
     canonical_buckets = canonical_bucket_ranges(buckets)
 
     # Uncertainty from disagreement
-    vals = [v for v, _ in calibrated.values()]
     if len(vals) >= 2:
-        spread = max(vals) - min(vals)
         sigma_raw = max(1.0 * unit_mult, spread / 2.0)
     else:
-        # Only one source — use a conservative base uncertainty
         sigma_raw = 2.5 * unit_mult
 
     # ── Weather-conditioned sigma adjustment ─────────────────────────────────
@@ -453,6 +519,28 @@ def compute_model(
         day_of_year=_ml.get("day_of_year", now_local.timetuple().tm_yday),
         unit_mult=unit_mult,
     )
+
+    # When the live trend says we have much more heating ahead than the
+    # static table expects, lift `remaining_rise` to match the trajectory
+    # — capped against the forecast panel's upper envelope so we never
+    # project above max(sources) + 2°F headroom. This fixes the mid-morning
+    # under-projection that previously locked `projected_high` near the
+    # current reading on hot days (e.g. Atlanta at 11:00, 77°F, trend
+    # 3.77°F/hr, peak 15:43 → trend_rise ~15°F vs static 4°F).
+    if (
+        adaptive is not None
+        and adaptive.kalman is not None
+        and adaptive.kalman.n_observations >= 10
+        and adaptive.kalman.temp_trend_per_min > 0.0
+        and peak_hour_local is not None
+        and current_temp_f is not None
+        and vals
+    ):
+        hours_to_peak = max(0.0, peak_hour_local - hour_local_fractional)
+        trend_rise = adaptive.kalman.temp_trend_per_min * 60.0 * hours_to_peak
+        headroom = max(0.0, max(vals) + 2.0 * unit_mult - current_temp_f)
+        trend_rise = min(trend_rise, headroom)
+        remaining_rise = max(remaining_rise, trend_rise)
 
     # Projected high = max(daily high so far, current + expected rise)
     projected_high = mu_forecast  # default to forecast if no METAR
@@ -606,11 +694,8 @@ def compute_model(
         "mu_multi_model": float(mu_multi_model),
         "ensemble_breakdown": ensemble_breakdown,
         "kalman_nowcast_active": kalman_nowcast_active,
-        "kalman_divergence_f": (
-            round(abs(kalman_blend_high - mu_multi_model), 2)
-            if kalman_blend_high is not None
-            else None
-        ),
+        "kalman_weight": round(kalman_w, 3),
+        "kalman_divergence_f": round(kalman_divergence, 2) if kalman_divergence is not None else None,
         "projected_high": float(projected_high),
         "metar_forecast_divergence_f": round(divergence_f, 2),
         "w_metar": float(w_metar),

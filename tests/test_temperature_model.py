@@ -211,10 +211,11 @@ def _adaptive_with_high(predicted_high: float, n_obs: int = 30) -> AdaptiveResul
     )
 
 
-def test_ensemble_70_30_blend_post_11am(monkeypatch):
-    """At 14:00 local with ≥11 AM gate open, mu_forecast must be
-    70% multi-model + 30% Kalman. Exercise with Kalman under-shooting
-    (the Atlanta regression that motivated this change)."""
+def test_ensemble_kalman_zero_weight_when_diverged(monkeypatch):
+    """Atlanta regression: Kalman nowcast 70°F vs multi-model consensus ~84°F
+    is a >10°F divergence on a ~1°F consensus spread. The ensemble must
+    collapse to multi-model only — consensus wins when a single-station
+    filter fights five physics models."""
     monkeypatch.setattr(temperature_model, "datetime", _AfternoonDateTime)
 
     adaptive = _adaptive_with_high(predicted_high=70.0, n_obs=30)
@@ -239,26 +240,61 @@ def test_ensemble_70_30_blend_post_11am(monkeypatch):
     )
 
     assert model is not None
-    assert model.inputs["kalman_nowcast_active"] is True
+    assert model.inputs["kalman_nowcast_active"] is False
+    assert model.inputs["kalman_weight"] == 0.0
     mu_multi = model.inputs["mu_multi_model"]
     mu_forecast = model.inputs["mu_forecast"]
-    expected = 0.70 * mu_multi + 0.30 * 70.0
-    assert abs(mu_forecast - expected) < 0.05, (
-        f"mu_forecast={mu_forecast} expected≈{expected} (multi={mu_multi})"
-    )
-    assert model.inputs["ensemble_breakdown"]["mode"] == "70_multi_30_kalman"
-    assert model.inputs["kalman_divergence_f"] is not None
+    assert mu_forecast == mu_multi, f"Kalman must not influence mu_forecast when badly diverged (got {mu_forecast} vs multi {mu_multi})"
+    assert model.inputs["ensemble_breakdown"]["mode"].startswith("multi_only")
     assert model.inputs["kalman_divergence_f"] > 3.0
-    # Multi-model slice should still be near consensus (~84°)
     assert mu_multi > 83.0
 
 
-def test_ensemble_pre_11am_multi_only(monkeypatch):
-    """At 09:00 local Kalman must NOT influence mu_forecast — the 70/30
-    gate is closed and mu_forecast == mu_multi_model exactly."""
+def test_ensemble_kalman_active_in_peak_window_with_consensus(monkeypatch):
+    """When Kalman agrees with consensus and we are inside the ±2h peak
+    window, the filter contributes non-zero weight."""
+    monkeypatch.setattr(temperature_model, "datetime", _AfternoonDateTime)
+
+    # Consensus ~84, Kalman predicts 84.2 — divergence well inside spread budget
+    adaptive = _adaptive_with_high(predicted_high=84.2, n_obs=30)
+
+    model = compute_model(
+        nws_high=84.0,
+        wu_hourly_peak=84.5,
+        daily_high_metar=None,
+        current_temp_f=82.0,
+        calibration=None,
+        buckets=[(80.0, 81.0), (82.0, 83.0), (84.0, 85.0), (86.0, None)],
+        forecast_quality="ok",
+        unit="F",
+        city_tz="America/New_York",
+        observed_high=None,
+        ml_features=None,
+        adaptive=adaptive,
+        latest_weather=None,
+        hrrr_high=83.5,
+        nbm_high=83.8,
+        ecmwf_ifs_high=84.2,
+    )
+
+    assert model is not None
+    assert model.inputs["kalman_nowcast_active"] is True
+    assert model.inputs["kalman_weight"] > 0.0
+    assert model.inputs["kalman_weight"] <= 0.45
+    # mu_forecast is a blend: bracketed by multi and kalman
+    mu_multi = model.inputs["mu_multi_model"]
+    mu_forecast = model.inputs["mu_forecast"]
+    assert min(mu_multi, 84.2) <= mu_forecast <= max(mu_multi, 84.2) + 0.01
+    assert model.inputs["ensemble_breakdown"]["mode"].startswith("blend_multi_kalman_w")
+
+
+def test_ensemble_kalman_outside_peak_window(monkeypatch):
+    """At 09:00 local with peak at 15:20, we are >2h before peak; even
+    a well-calibrated Kalman gets zero weight because the filter has no
+    forecast skill at that horizon."""
     monkeypatch.setattr(temperature_model, "datetime", _MorningDateTime)
 
-    adaptive = _adaptive_with_high(predicted_high=65.0, n_obs=12)
+    adaptive = _adaptive_with_high(predicted_high=83.9, n_obs=20)
 
     model = compute_model(
         nws_high=84.0,
@@ -281,10 +317,117 @@ def test_ensemble_pre_11am_multi_only(monkeypatch):
 
     assert model is not None
     assert model.inputs["kalman_nowcast_active"] is False
+    assert model.inputs["kalman_weight"] == 0.0
     assert model.inputs["mu_forecast"] == model.inputs["mu_multi_model"]
-    assert model.inputs["ensemble_breakdown"]["mode"] == "pre_11am_multi_only"
-    assert model.inputs["ensemble_breakdown"]["kalman"] is None
-    assert model.inputs["kalman_divergence_f"] is None
+    assert model.inputs["ensemble_breakdown"]["mode"] == "multi_only:outside_peak_window"
+    assert model.inputs["ensemble_breakdown"]["kalman"] is not None  # still reported for diagnostics
+
+
+def test_compute_kalman_weight_helper():
+    """Direct unit test of the weight helper."""
+    from backend.modeling.temperature_model import compute_kalman_weight
+
+    # At peak, well-calibrated: near max_weight
+    w = compute_kalman_weight(
+        hour_local_fractional=15.33, peak_hour_local=15.33,
+        kalman_divergence=1.0, spread=2.0, n_obs=25, peak_already_passed=False,
+    )
+    assert abs(w - 0.45) < 1e-6
+
+    # Outside ±2h window: zero
+    w = compute_kalman_weight(
+        hour_local_fractional=11.0, peak_hour_local=15.7,
+        kalman_divergence=1.0, spread=2.0, n_obs=25, peak_already_passed=False,
+    )
+    assert w == 0.0
+
+    # Diverged >> spread: zero
+    w = compute_kalman_weight(
+        hour_local_fractional=15.0, peak_hour_local=15.5,
+        kalman_divergence=10.0, spread=2.0, n_obs=25, peak_already_passed=False,
+    )
+    assert w == 0.0
+
+    # Not enough observations: zero
+    w = compute_kalman_weight(
+        hour_local_fractional=15.3, peak_hour_local=15.3,
+        kalman_divergence=0.5, spread=2.0, n_obs=5, peak_already_passed=False,
+    )
+    assert w == 0.0
+
+    # Peak passed: halved
+    w_active = compute_kalman_weight(
+        hour_local_fractional=15.0, peak_hour_local=15.0,
+        kalman_divergence=0.5, spread=2.0, n_obs=25, peak_already_passed=False,
+    )
+    w_passed = compute_kalman_weight(
+        hour_local_fractional=15.0, peak_hour_local=15.0,
+        kalman_divergence=0.5, spread=2.0, n_obs=25, peak_already_passed=True,
+    )
+    assert abs(w_passed - 0.5 * w_active) < 1e-6
+
+
+def test_remaining_rise_uses_kalman_trend_when_aggressive(monkeypatch):
+    """Atlanta 11 AM scenario: current 77°F, Kalman trend 3.77°F/hr, peak
+    15:20 → ~4h of heating ahead → trend-based rise ~15°F dominates the
+    static 4°F table value and projected_high lands near consensus."""
+    class _LateMorningDT(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            fixed = cls(2026, 4, 8, 11, 20, tzinfo=ZoneInfo("America/New_York"))
+            return fixed.astimezone(tz) if tz else fixed
+
+    monkeypatch.setattr(temperature_model, "datetime", _LateMorningDT)
+
+    # Kalman sees 3.77°F/hr heating
+    local_tz = ZoneInfo("America/New_York")
+    adaptive = AdaptiveResult(
+        kalman=KalmanState(
+            smoothed_temp=77.2,
+            temp_trend_per_min=3.77 / 60.0,  # °/min
+            uncertainty=0.3,
+            n_observations=25,
+            process_noise_factor=1.0,
+        ),
+        regression_slope=4.46 / 60.0,
+        regression_r2=0.76,
+        regression_features_used=["time", "precip_flag"],
+        station_predictions=[],
+        predicted_daily_high=81.2,
+        predicted_high_time=datetime(2026, 4, 8, 15, 20, tzinfo=local_tz),
+        sigma_adjustment=0.85,
+        peak_already_passed=False,
+        composite_peak_timing="3:20 PM",
+        peak_timing_source="wu_hourly+kalman_trend",
+    )
+
+    model = compute_model(
+        nws_high=90.0,
+        wu_hourly_peak=88.0,
+        daily_high_metar=77.0,
+        current_temp_f=77.0,
+        calibration=None,
+        buckets=[(80.0, 81.0), (82.0, 83.0), (84.0, 85.0), (86.0, 87.0), (88.0, 89.0), (90.0, None)],
+        forecast_quality="ok",
+        unit="F",
+        city_tz="America/New_York",
+        observed_high=77.0,
+        ml_features=None,
+        adaptive=adaptive,
+        latest_weather=None,
+        hrrr_high=87.6,
+        nbm_high=88.0,
+        ecmwf_ifs_high=89.3,
+    )
+
+    assert model is not None
+    # remaining_rise must lift toward Kalman trend (>>4°F static), capped by max source + 2°F
+    assert model.remaining_rise >= 10.0, f"remaining_rise {model.remaining_rise} — trend fix not applied"
+    # projected_high reflects the lifted trajectory
+    assert model.mu_projected >= 86.0
+    # mu_forecast is mu_multi_model (Kalman is far diverged at 11:20 and outside peak window)
+    assert model.inputs["kalman_weight"] == 0.0
+    assert model.inputs["mu_forecast"] == model.inputs["mu_multi_model"]
 
 
 def test_ecmwf_ifs_included_in_sources_used(monkeypatch):
