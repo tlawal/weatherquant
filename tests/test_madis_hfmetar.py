@@ -92,7 +92,10 @@ class _FakeDataset:
 
     def __init__(self, records):
         self.variables = {
-            "stationName": _Var([_StationName(s) for s, _, _ in records]),
+            # Real MADIS HFMETAR files expose stationId (4-char ICAO) as the
+            # match field; stationName is the long-form location name.
+            "stationId": _Var([_StationName(s) for s, _, _ in records]),
+            "stationName": _Var([_StationName("LONG NAME") for _ in records]),
             "temperature": _Var([t for _, t, _ in records]),
             "timeObs": _Var([e for _, _, e in records]),
         }

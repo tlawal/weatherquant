@@ -189,19 +189,38 @@ async def fetch_madis_latest() -> None:
             return
 
         try:
-            # Debug: log available variables
+            # Log full variable list at INFO so a future schema change
+            # (e.g. field rename) is obvious from production logs.
             var_names = list(ds.variables.keys())
-            log.debug("madis: netCDF variables in %s: %s", filename, var_names[:20])
+            log.info("madis: netCDF variables in %s: %s", filename, var_names)
 
-            # Extract arrays — MADIS METAR uses stationName, temperature, timeObs
-            if "stationName" not in ds.variables:
-                log.error("madis: 'stationName' variable not found in %s (vars: %s)", filename, var_names[:10])
+            # MADIS HFMETAR: the ICAO code lives in `stationId` (4-char code
+            # like "KATL"). `stationName` is the long-form human-readable
+            # location ("ATLANTA HARTSFIELD INTL, GA"), which is useless for
+            # matching against our configured metar_station codes. Prefer
+            # stationId; fall back to a few known alternates only for
+            # schema robustness.
+            id_var = None
+            for cand in ("stationId", "stationID", "staId", "stationName"):
+                if cand in ds.variables:
+                    id_var = cand
+                    break
+            if id_var is None:
+                log.error(
+                    "madis: no station-id variable found in %s (tried stationId/stationID/staId/stationName; vars: %s)",
+                    filename, var_names,
+                )
                 return
+            if id_var == "stationName":
+                log.warning(
+                    "madis: falling back to stationName (long-form location) as station id — matches will likely fail. vars=%s",
+                    var_names,
+                )
             if "temperature" not in ds.variables:
-                log.error("madis: 'temperature' variable not found in %s (vars: %s)", filename, var_names[:10])
+                log.error("madis: 'temperature' variable not found in %s (vars: %s)", filename, var_names)
                 return
 
-            station_names = ds.variables["stationName"][:]  # char array
+            station_names = ds.variables[id_var][:]  # char array of ICAO codes
             temperatures = ds.variables["temperature"][:]   # Kelvin
 
             # MADIS uses 'timeObs' for observation time (not 'observationTime')
@@ -234,8 +253,8 @@ async def fetch_madis_latest() -> None:
 
             sample_decoded = [_decode_station(station_names[i]) for i in range(min(10, n_stations))]
             log.info(
-                "madis: file=%s n_records=%d configured_stations=%s sample_decoded=%s",
-                filename, n_stations, sorted(station_to_city.keys()), sample_decoded,
+                "madis: file=%s id_var=%s n_records=%d configured_stations=%s sample_decoded=%s",
+                filename, id_var, n_stations, sorted(station_to_city.keys()), sample_decoded,
             )
 
             async with get_session() as sess:
