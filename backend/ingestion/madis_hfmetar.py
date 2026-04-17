@@ -23,23 +23,21 @@ MADIS_BASE_URL = (
 )
 _USER_AGENT = "WeatherQuant/1.0 (contact@weatherquant.local)"
 _TIMEOUT = aiohttp.ClientTimeout(total=30)
-_MAX_RETRIES = 6  # step back 5 min each → 30 min back
+_MAX_RETRIES = 4  # step back 1 hour each → 4 hours back
 
 # Cache the last successful filename so repeated failures don't re-probe
 _last_success_file: Optional[str] = None
 
 
 def _compute_filename() -> str:
-    """Compute the MADIS HFMETAR filename for the current 5-min interval.
+    """Compute the MADIS HFMETAR filename for the current hour.
 
-    MADIS files are named YYYYMMDD_HHMM.gz where HHMM is the 5-minute
-    mark (e.g. 2000, 2005, 2010, ...). We round current UTC down to
-    the nearest 5-minute mark.
+    MADIS HFMETAR files are named YYYYMMDD_HHMM.gz where HHMM is
+    the top of the hour (e.g. 2000, 2100, ...). They are published
+    hourly, not every 5 minutes.
     """
     now = datetime.now(timezone.utc)
-    # Round down to nearest 5 minutes
-    minute = (now.minute // 5) * 5
-    return f"{now.strftime('%Y%m%d')}_{now.hour:02d}{minute:02d}.gz"
+    return f"{now.strftime('%Y%m%d')}_{now.hour:02d}00.gz"
 
 
 def _k_to_c(k: float) -> float:
@@ -73,7 +71,7 @@ async def _fetch_netcdf(filename: str, http: aiohttp.ClientSession) -> Optional[
 async def fetch_madis_latest() -> None:
     """Fetch the latest MADIS HFMETAR netCDF file and insert observations.
 
-    Tries the current 5-min mark, stepping back up to 6 intervals (30 min)
+    Tries the current hour, stepping back up to 4 hours
     if the file isn't available yet.
     """
     from backend.storage.db import get_session
@@ -96,18 +94,18 @@ async def fetch_madis_latest() -> None:
 
     station_to_city = {c.metar_station.upper(): c for c in eligible}
 
-    # Try filenames stepping back in 5-min intervals
+    # Try filenames stepping back in 1-hour intervals
     now = datetime.now(timezone.utc)
     filename = None
     raw_gz = None
 
     async with aiohttp.ClientSession(timeout=_TIMEOUT, headers={"User-Agent": _USER_AGENT}) as http:
         for step in range(_MAX_RETRIES):
-            # Compute filename for this step
-            offset_min = step * 5
-            target = now - timedelta(minutes=offset_min)
-            minute = (target.minute // 5) * 5
-            candidate = f"{target.strftime('%Y%m%d')}_{target.hour:02d}{minute:02d}.gz"
+            # Compute filename for this step (top of each hour)
+            offset_hours = step
+            target = now - timedelta(hours=offset_hours)
+            candidate = f"{target.strftime('%Y%m%d')}_{target.hour:02d}00.gz"
+            log.debug("madis: trying file %s (step=%d)", candidate, step)
 
             # Skip if same as last success (already processed)
             if candidate == _last_success_file:
