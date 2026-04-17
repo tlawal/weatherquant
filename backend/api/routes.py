@@ -1962,8 +1962,8 @@ async def update_config(body: ConfigUpdate, actor: str = Depends(require_admin))
         updates["max_spread"] = body.max_spread
 
     if body.quick_flip_target is not None:
-        if not (0.03 <= body.quick_flip_target <= 0.20):
-            raise HTTPException(status_code=400, detail="quick_flip_target must be in [0.03, 0.20]")
+        if not (0.03 <= body.quick_flip_target <= 0.40):
+            raise HTTPException(status_code=400, detail="quick_flip_target must be in [0.03, 0.40]")
         Config.QUICK_FLIP_TARGET = body.quick_flip_target
         updates["quick_flip_target"] = body.quick_flip_target
 
