@@ -119,80 +119,44 @@
   {% if current_temp_dual %}
   {# ── Dual-source Current Temp card (US cities w/ MADIS + NWS) ──────────── #}
   {% set primary = current_temp_dual.primary %}
-  <div class="card p-4 relative lg:col-span-2"
+  <div class="card p-4 relative"
        x-data="{ madisOpen: false, nwsOpen: false }">
-    <div class="flex items-center justify-between text-[10px] uppercase tracking-widest mb-2"
-         style="color:var(--text-muted)">
-      <span>Current Temp</span>
-      {% if current_temp_dual.delta_s is not none %}
-        {% if primary == 'madis' %}
-        <span class="px-2 py-0.5 rounded font-bold text-[10px]"
-              style="background:rgba(139,92,246,0.2);color:#a78bfa">
-          ⚡ MADIS FASTER
-          <span class="opacity-60 font-normal">by {{ current_temp_dual.delta_s | humanize_age | replace(' ago','') }}</span>
-        </span>
-        {% else %}
-        <span class="px-2 py-0.5 rounded font-bold text-[10px]"
-              style="background:rgba(34,211,238,0.2);color:#22d3ee">
-          ⚡ NWS FASTER
-          <span class="opacity-60 font-normal">by {{ current_temp_dual.delta_s | humanize_age | replace(' ago','') }}</span>
-        </span>
-        {% endif %}
-      {% else %}
-        <span class="px-1.5 py-0.5 rounded text-[9px] font-bold"
-              style="background:rgba(139,92,246,0.15);color:#a78bfa">DUAL-SOURCE</span>
-      {% endif %}
-    </div>
-    <div class="grid grid-cols-2 gap-3">
+    <div class="text-[10px] uppercase tracking-widest mb-1.5" style="color:var(--text-muted)">Current Temp</div>
+    <div class="grid grid-cols-2 gap-2 mb-1.5">
       {# ── MADIS side ── #}
       {% set m = current_temp_dual.madis %}
-      <div class="relative text-center p-2 rounded"
-           {% if primary == 'madis' %}style="background:rgba(139,92,246,0.07);border:1px solid rgba(139,92,246,0.25)"{% else %}style="opacity:0.75"{% endif %}>
-        <div class="flex items-center justify-center gap-1.5 text-[9px] uppercase tracking-widest mb-1" style="color:var(--text-muted)">
-          <span>{{ m.source_label }}</span>
+      <div class="relative text-center p-1.5 rounded"
+           {% if primary == 'madis' %}style="background:rgba(139,92,246,0.07);border:1px solid rgba(139,92,246,0.25)"{% else %}style="opacity:0.65"{% endif %}>
+        <div class="flex items-center justify-center gap-1 text-[8px] uppercase tracking-widest mb-0.5" style="color:var(--text-muted)">
+          <span>MADIS</span>
           <button @click="madisOpen = !madisOpen" @click.outside="madisOpen = false"
-                  class="hover:text-cyan-400 opacity-60 hover:opacity-100 transition-all"
+                  class="hover:text-cyan-400 opacity-60 hover:opacity-100 transition-all leading-none"
                   type="button">ⓘ</button>
         </div>
-        <div class="text-3xl font-bold mono leading-none"
+        <div class="text-2xl font-bold mono leading-none"
              style="color:{% if primary == 'madis' %}#a78bfa{% else %}var(--text-muted){% endif %}">
           {% if m.temp_f is not none %}{{ "%.1f"|format(m.temp_f) }}°{% else %}—{% endif %}
         </div>
-        <div class="text-[10px] mt-1.5" style="color:var(--text-muted)">
-          {{ m.obs_time_local or '—' }}
-        </div>
-        <div class="text-[9px] mt-0.5 opacity-70">{{ m.age_s | humanize_age }}</div>
-        {% if m.station %}
-        <div class="text-[9px] mt-1 mono opacity-50">{{ m.station }}</div>
-        {% endif %}
-        {# per-side popover #}
+        <div class="text-[9px] mt-1 opacity-70">{{ m.age_s | humanize_age }}</div>
+        {# MADIS popover — anchored to card edge so it stays in viewport #}
         <div x-show="madisOpen" x-cloak
              x-transition:enter="transition ease-out duration-100"
              x-transition:enter-start="opacity-0 scale-95"
              x-transition:enter-end="opacity-100 scale-100"
-             class="absolute left-0 right-0 top-full mt-1 p-3 rounded-xl shadow-2xl z-50 border text-[10px] normal-case tracking-tight font-medium text-left"
+             class="absolute left-0 top-full mt-1 w-56 p-3 rounded-xl shadow-2xl z-50 border text-[10px] normal-case tracking-tight font-medium text-left"
              style="background:var(--bg-card); border-color:var(--border);">
-          <div class="font-bold mb-2 pb-1 border-b" style="color:#a78bfa; border-color:var(--border)">
-            MADIS HFMETAR (NOAA)
-          </div>
+          <div class="font-bold mb-2 pb-1 border-b" style="color:#a78bfa; border-color:var(--border)">MADIS HFMETAR (NOAA)</div>
           <div class="space-y-1.5">
             <div class="flex justify-between"><span style="color:var(--text-muted)">Station</span><span class="mono">{{ m.station or '—' }}</span></div>
-            <div class="flex justify-between"><span style="color:var(--text-muted)">Obs Time</span><span class="mono text-right">{{ m.obs_time_local or '—' }}</span></div>
+            <div class="flex justify-between"><span style="color:var(--text-muted)">Obs Time</span><span class="mono">{{ m.obs_time_local or '—' }}</span></div>
             <div class="flex justify-between"><span style="color:var(--text-muted)">Age</span><span class="mono">{{ m.age_s | humanize_age }}</span></div>
-            {% if m.raw_text %}
-            <div class="mt-2 p-2 rounded bg-black/20 mono break-words leading-relaxed border border-white/5 opacity-80">{{ m.raw_text }}</div>
-            {% else %}
-            <div class="mt-2 pt-2 border-t text-[10px] opacity-60" style="border-color:var(--border)">
-              netCDF payload — no raw METAR string
-            </div>
+            {% if not m.raw_text %}
+            <div class="mt-1 opacity-50 italic">netCDF — no raw METAR string</div>
             {% endif %}
             {% if m.source_url %}
             <div class="mt-2 pt-2 border-t" style="border-color:var(--border)">
               <a href="{{ m.source_url }}" target="_blank" rel="noopener"
-                 class="flex items-center gap-1 hover:underline transition-colors"
-                 style="color:#a78bfa">
-                <span>↗ View Source</span>
-              </a>
+                 class="flex items-center gap-1 hover:underline" style="color:#a78bfa">↗ View Source</a>
             </div>
             {% endif %}
           </div>
@@ -200,57 +164,55 @@
       </div>
       {# ── NWS API side ── #}
       {% set n = current_temp_dual.nws %}
-      <div class="relative text-center p-2 rounded"
-           {% if primary == 'nws' %}style="background:rgba(34,211,238,0.07);border:1px solid rgba(34,211,238,0.25)"{% else %}style="opacity:0.75"{% endif %}>
-        <div class="flex items-center justify-center gap-1.5 text-[9px] uppercase tracking-widest mb-1" style="color:var(--text-muted)">
-          <span>{{ n.source_label }}</span>
+      <div class="relative text-center p-1.5 rounded"
+           {% if primary == 'nws' %}style="background:rgba(34,211,238,0.07);border:1px solid rgba(34,211,238,0.25)"{% else %}style="opacity:0.65"{% endif %}>
+        <div class="flex items-center justify-center gap-1 text-[8px] uppercase tracking-widest mb-0.5" style="color:var(--text-muted)">
+          <span>NWS API</span>
           <button @click="nwsOpen = !nwsOpen" @click.outside="nwsOpen = false"
-                  class="hover:text-cyan-400 opacity-60 hover:opacity-100 transition-all"
+                  class="hover:text-cyan-400 opacity-60 hover:opacity-100 transition-all leading-none"
                   type="button">ⓘ</button>
         </div>
-        <div class="text-3xl font-bold mono leading-none"
+        <div class="text-2xl font-bold mono leading-none"
              style="color:{% if primary == 'nws' %}var(--cyan){% else %}var(--text-muted){% endif %}">
           {% if n.temp_f is not none %}{{ "%.1f"|format(n.temp_f) }}°{% else %}—{% endif %}
         </div>
-        <div class="text-[10px] mt-1.5" style="color:var(--text-muted)">
-          {{ n.obs_time_local or '—' }}
-        </div>
-        <div class="text-[9px] mt-0.5 opacity-70">{{ n.age_s | humanize_age }}</div>
-        {% if n.station %}
-        <div class="text-[9px] mt-1 mono opacity-50">{{ n.station }}</div>
-        {% endif %}
+        <div class="text-[9px] mt-1 opacity-70">{{ n.age_s | humanize_age }}</div>
         <div x-show="nwsOpen" x-cloak
              x-transition:enter="transition ease-out duration-100"
              x-transition:enter-start="opacity-0 scale-95"
              x-transition:enter-end="opacity-100 scale-100"
-             class="absolute left-0 right-0 top-full mt-1 p-3 rounded-xl shadow-2xl z-50 border text-[10px] normal-case tracking-tight font-medium text-left"
+             class="absolute right-0 top-full mt-1 w-56 p-3 rounded-xl shadow-2xl z-50 border text-[10px] normal-case tracking-tight font-medium text-left"
              style="background:var(--bg-card); border-color:var(--border);">
-          <div class="font-bold mb-2 pb-1 border-b" style="color:var(--cyan); border-color:var(--border)">
-            NWS API (api.weather.gov)
-          </div>
+          <div class="font-bold mb-2 pb-1 border-b" style="color:var(--cyan); border-color:var(--border)">NWS API (api.weather.gov)</div>
           <div class="space-y-1.5">
             <div class="flex justify-between"><span style="color:var(--text-muted)">Station</span><span class="mono">{{ n.station or '—' }}</span></div>
-            <div class="flex justify-between"><span style="color:var(--text-muted)">Obs Time</span><span class="mono text-right">{{ n.obs_time_local or '—' }}</span></div>
+            <div class="flex justify-between"><span style="color:var(--text-muted)">Obs Time</span><span class="mono">{{ n.obs_time_local or '—' }}</span></div>
             <div class="flex justify-between"><span style="color:var(--text-muted)">Age</span><span class="mono">{{ n.age_s | humanize_age }}</span></div>
             {% if n.raw_text %}
-            <div class="mt-2 p-2 rounded bg-black/20 mono break-words leading-relaxed border border-white/5 opacity-80">{{ n.raw_text }}</div>
+            <div class="mt-2 p-2 rounded bg-black/20 mono break-words leading-relaxed border border-white/5 opacity-80 text-[9px]">{{ n.raw_text }}</div>
             {% endif %}
             {% if n.source_url %}
             <div class="mt-2 pt-2 border-t" style="border-color:var(--border)">
               <a href="{{ n.source_url }}" target="_blank" rel="noopener"
-                 class="flex items-center gap-1 hover:underline transition-colors"
-                 style="color:var(--cyan)">
-                <span>↗ View Source</span>
-              </a>
+                 class="flex items-center gap-1 hover:underline" style="color:var(--cyan)">↗ View Source</a>
             </div>
             {% endif %}
           </div>
         </div>
       </div>
     </div>
-    <div class="text-[9px] mt-2 pt-2 border-t text-center opacity-50" style="border-color:var(--border)">
-      Downstream models auto-select the freshest source
-    </div>
+    {# Speed badge — compact single line #}
+    {% if current_temp_dual.delta_s is not none %}
+      {% if primary == 'madis' %}
+      <div class="text-[9px] text-center font-bold" style="color:#a78bfa">
+        ⚡ MADIS <span class="font-normal opacity-70">faster by {{ current_temp_dual.delta_s | humanize_age | replace(' ago','') }}</span>
+      </div>
+      {% else %}
+      <div class="text-[9px] text-center font-bold" style="color:#22d3ee">
+        ⚡ NWS <span class="font-normal opacity-70">faster by {{ current_temp_dual.delta_s | humanize_age | replace(' ago','') }}</span>
+      </div>
+      {% endif %}
+    {% endif %}
   </div>
   {% else %}
   {# ── Fallback: Alpine.js single-reading card (non-US, or no obs yet) ───── #}
