@@ -292,6 +292,24 @@ def _late_day_lock_active(
     if hour_local >= 18 and (trend_per_hr is None or trend_per_hr <= 0.25):
         return True
 
+    # Path 3 — strong-cooling override for west-coast / late-peak cities.
+    # Seattle regression: at 17:47 local with observed 55°F, current 53.6°F
+    # (deficit 1.4°F) and a clearly negative Kalman trend, `peak_already_passed`
+    # hadn't flipped and path 2's 18:00 gate was too late. When the trend is
+    # firmly negative with reliable observations and we are at/past 15:00
+    # local (after solar noon for all continental US cities), the physics is
+    # unambiguous — lock.
+    n_obs = adaptive.kalman.n_observations if adaptive is not None and adaptive.kalman is not None else 0
+    deficit = observed_high - current_temp_f
+    if (
+        hour_local >= 15
+        and trend_per_hr is not None
+        and trend_per_hr <= -0.25
+        and n_obs >= 10
+        and deficit >= 1.0 * unit_mult
+    ):
+        return True
+
     return False
 
 
@@ -541,6 +559,23 @@ def compute_model(
         headroom = max(0.0, max(vals) + 2.0 * unit_mult - current_temp_f)
         trend_rise = min(trend_rise, headroom)
         remaining_rise = max(remaining_rise, trend_rise)
+
+    # Collapse remaining_rise to 0 when we are clearly past peak and
+    # cooling. Physics: the daily high can only go up, and once the
+    # observed high is firmly above current temp with a negative Kalman
+    # trend, a fresh rise is not plausible (Seattle regression: 17:47
+    # with observed 55°F, current 53.6°F, residual predictor was still
+    # emitting ~0.4°F remaining rise and inflating projected_high).
+    if (
+        adaptive is not None
+        and adaptive.kalman is not None
+        and adaptive.kalman.n_observations >= 5
+        and adaptive.kalman.temp_trend_per_min < -0.005  # ~-0.3°F/hr
+        and daily_high_metar is not None
+        and current_temp_f is not None
+        and current_temp_f < daily_high_metar - 0.5 * unit_mult
+    ):
+        remaining_rise = 0.0
 
     # Projected high = max(daily high so far, current + expected rise)
     projected_high = mu_forecast  # default to forecast if no METAR

@@ -367,6 +367,74 @@ def test_compute_kalman_weight_helper():
     assert abs(w_passed - 0.5 * w_active) < 1e-6
 
 
+def test_seattle_evening_cooling_lock_engages(monkeypatch):
+    """Seattle regression: 17:47 local, observed high 55°F reached earlier,
+    current 53.6°F and dropping with clear negative Kalman trend. Lock must
+    engage on path 3 (strong-cooling override) even though hour<18 and
+    adaptive.peak_already_passed hasn't flipped. Distribution must collapse
+    to the 54-55 bucket (canonical [54, 56))."""
+    class _SeattleDT(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            fixed = cls(2026, 4, 8, 17, 47, tzinfo=ZoneInfo("America/Los_Angeles"))
+            return fixed.astimezone(tz) if tz else fixed
+
+    monkeypatch.setattr(temperature_model, "datetime", _SeattleDT)
+
+    local_tz = ZoneInfo("America/Los_Angeles")
+    adaptive = AdaptiveResult(
+        kalman=KalmanState(
+            smoothed_temp=53.6,
+            temp_trend_per_min=-0.015,  # ~-0.9°F/hr
+            uncertainty=0.3,
+            n_observations=28,
+            process_noise_factor=1.0,
+        ),
+        regression_slope=-0.012,
+        regression_r2=0.7,
+        regression_features_used=["time"],
+        station_predictions=[],
+        predicted_daily_high=55.0,
+        predicted_high_time=datetime(2026, 4, 8, 15, 30, tzinfo=local_tz),
+        sigma_adjustment=0.85,
+        peak_already_passed=False,  # <-- adaptive lag
+        composite_peak_timing="3:30 PM",
+        peak_timing_source="wu_hourly",
+    )
+
+    # Polymarket Seattle-style 2°F buckets. Canonical ranges expand to [lo, lo+2).
+    model = compute_model(
+        nws_high=57.0,
+        wu_hourly_peak=56.5,
+        daily_high_metar=55.0,
+        current_temp_f=53.6,
+        calibration=None,
+        buckets=[(52.0, 53.0), (54.0, 55.0), (56.0, 57.0), (58.0, 59.0), (60.0, None)],
+        forecast_quality="ok",
+        unit="F",
+        city_tz="America/Los_Angeles",
+        observed_high=55.0,
+        ml_features=None,
+        adaptive=adaptive,
+        latest_weather=None,
+        hrrr_high=56.8,
+        nbm_high=57.2,
+        ecmwf_ifs_high=57.5,
+    )
+
+    assert model is not None, "compute_model should produce a result"
+    # Lock must engage via path 3 (strong cooling override pre-18:00).
+    assert model.lock_regime is True, "lock must engage on strong cooling + deficit"
+    # remaining_rise must be zeroed by the cooling clamp.
+    assert model.remaining_rise == 0.0
+    # The observed-bucket (54-55, canonical [54, 56)) dominates.
+    observed_idx = model.observed_bucket_idx
+    assert observed_idx is not None
+    assert model.probs[observed_idx] > 0.9
+    # Any bucket above observed gets near-zero mass.
+    assert model.prob_hotter_bucket < 0.08
+
+
 def test_remaining_rise_uses_kalman_trend_when_aggressive(monkeypatch):
     """Atlanta 11 AM scenario: current 77°F, Kalman trend 3.77°F/hr, peak
     15:20 → ~4h of heating ahead → trend-based rise ~15°F dominates the
