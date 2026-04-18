@@ -527,3 +527,94 @@ def test_ecmwf_ifs_included_in_sources_used(monkeypatch):
     # ECMWF IFS skews the multi-model mean slightly upward vs. the
     # no-ECMWF case; sanity check we're above 80.
     assert model.inputs["mu_multi_model"] > 80.0
+
+
+def test_projected_high_capped_against_forecast_consensus(monkeypatch):
+    """Atlanta 8:21 AM regression: stale daily_high_metar=81°F (prior day
+    leak) combined with Kalman-trend remaining_rise must not let
+    projected_high run 7°F past the forecast consensus."""
+    class _EarlyMorningDT(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            fixed = cls(2026, 4, 18, 8, 21, tzinfo=ZoneInfo("America/New_York"))
+            return fixed.astimezone(tz) if tz else fixed
+
+    monkeypatch.setattr(temperature_model, "datetime", _EarlyMorningDT)
+
+    local_tz = ZoneInfo("America/New_York")
+    adaptive = AdaptiveResult(
+        kalman=KalmanState(
+            smoothed_temp=66.2,
+            temp_trend_per_min=2.5 / 60.0,
+            uncertainty=0.3,
+            n_observations=20,
+            process_noise_factor=1.0,
+        ),
+        regression_slope=2.5 / 60.0,
+        regression_r2=0.7,
+        regression_features_used=["time"],
+        station_predictions=[],
+        predicted_daily_high=85.0,
+        predicted_high_time=datetime(2026, 4, 18, 15, 30, tzinfo=local_tz),
+        sigma_adjustment=0.9,
+        peak_already_passed=False,
+        composite_peak_timing="3:30 PM",
+        peak_timing_source="wu_hourly",
+    )
+
+    # Every forecast source in 85-88 range. Stale daily_high_metar=81 from
+    # a prior-day bleed. Without the cap, projected_high assembles to
+    # max(81, 81+14, 66.2+14) = 95.
+    model = compute_model(
+        nws_high=88.0,
+        wu_hourly_peak=87.0,
+        daily_high_metar=81.0,
+        current_temp_f=66.2,
+        calibration=None,
+        buckets=[(82.0, 83.0), (84.0, 85.0), (86.0, 87.0), (88.0, 89.0), (90.0, None)],
+        forecast_quality="ok",
+        unit="F",
+        city_tz="America/New_York",
+        observed_high=81.0,
+        ml_features=None,
+        adaptive=adaptive,
+        latest_weather=None,
+        hrrr_high=86.5,
+        nbm_high=87.2,
+        ecmwf_ifs_high=88.0,
+    )
+
+    assert model is not None
+    # max(sources)=88.0 → ceiling 90.0
+    assert model.mu_projected <= 90.0, (
+        f"projected_high {model.mu_projected} blew past forecast consensus + 2°F"
+    )
+    assert model.inputs.get("projected_high_capped") is True
+
+
+def test_projected_high_not_capped_when_within_headroom(monkeypatch):
+    """Sanity: when projected_high is at or below max(sources) + 2°F, the
+    cap is a no-op and projected_high_capped stays False."""
+    monkeypatch.setattr(temperature_model, "datetime", _AfternoonDateTime)
+
+    model = compute_model(
+        nws_high=85.0,
+        wu_hourly_peak=84.5,
+        daily_high_metar=82.0,
+        current_temp_f=80.0,
+        calibration=None,
+        buckets=[(80.0, 81.0), (82.0, 83.0), (84.0, 85.0), (86.0, None)],
+        forecast_quality="ok",
+        unit="F",
+        city_tz="America/New_York",
+        observed_high=82.0,
+        ml_features=None,
+        adaptive=None,
+        latest_weather=None,
+        hrrr_high=84.8,
+        nbm_high=85.2,
+        ecmwf_ifs_high=85.5,
+    )
+
+    assert model is not None
+    assert model.inputs.get("projected_high_capped") is False

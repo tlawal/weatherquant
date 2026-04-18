@@ -239,7 +239,25 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
     # primary source (WU history) lags behind METAR — the model would then
     # see a too-low observed high, fail to lock, and not zero out
     # already-surpassed buckets even though the gates correctly do.
-    _wu_hist_high = wu_history_obs.high_f if wu_history_obs else None
+    #
+    # Freshness gate: wu_history is keyed by today_et but its stored high_f
+    # can carry the prior local date's peak when WU hasn't updated. Reject
+    # the value if its observation timestamp resolves to a different local
+    # date. daily_high and resolution_high are already local-date scoped at
+    # the SQL level (observed_at in tz-aware bounds).
+    _city_tz = ZoneInfo(getattr(city, "tz", "America/New_York"))
+    _wu_hist_high = None
+    if wu_history_obs and wu_history_obs.high_f is not None:
+        _wu_obs_time = None
+        try:
+            _wu_raw = json.loads(wu_history_obs.raw_json) if wu_history_obs.raw_json else {}
+            _obs_time_str = _wu_raw.get("obs_time")
+            if _obs_time_str:
+                _wu_obs_time = datetime.fromisoformat(str(_obs_time_str).rstrip("Z")).replace(tzinfo=timezone.utc)
+        except Exception:
+            _wu_obs_time = None
+        if _wu_obs_time is None or _wu_obs_time.astimezone(_city_tz).strftime("%Y-%m-%d") == today_et:
+            _wu_hist_high = wu_history_obs.high_f
     _candidate_highs = [
         v for v in (_wu_hist_high, resolution_high, daily_high)
         if v is not None

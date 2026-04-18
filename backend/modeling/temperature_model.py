@@ -610,6 +610,19 @@ def compute_model(
                 adaptive_w = min(adaptive_w, 0.05)
             projected_high = (1.0 - adaptive_w) * projected_high + adaptive_w * adaptive_high
 
+    # Universal ceiling against forecast consensus (defense in depth).
+    # Stale or anomalous observed-high values (e.g. a daily_high_metar
+    # leaking across midnight, or a bad single observation) must not let
+    # projected_high run past the live forecast panel by more than a
+    # small headroom. Real hot-day spikes still pass — the cap is
+    # max(sources) + 2°F — but 7°F+ artifacts get clipped.
+    projected_high_capped = False
+    if vals:
+        consensus_ceiling = max(vals) + 2.0 * unit_mult
+        if projected_high > consensus_ceiling:
+            projected_high = consensus_ceiling
+            projected_high_capped = True
+
     # After 5 PM with declining temps, hard-cap projected_high.
     # This is a physical constraint (no meaningful rises after sunset)
     # and must be applied AFTER adaptive blending to prevent re-inflation.
@@ -732,6 +745,7 @@ def compute_model(
         "kalman_weight": round(kalman_w, 3),
         "kalman_divergence_f": round(kalman_divergence, 2) if kalman_divergence is not None else None,
         "projected_high": float(projected_high),
+        "projected_high_capped": projected_high_capped,
         "metar_forecast_divergence_f": round(divergence_f, 2),
         "w_metar": float(w_metar),
         "w_metar_base": float(_metar_weight(hour_local)),

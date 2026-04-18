@@ -685,6 +685,14 @@ async def _resolve_realized_high_with_source(
     """
     primary = Config.SETTLEMENT_HIGH_PRIMARY
     city_tz = getattr(city, "tz", "America/New_York")
+    tz = ZoneInfo(city_tz)
+
+    def _local_date_of(dt: Optional[datetime]) -> Optional[str]:
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(tz).strftime("%Y-%m-%d")
 
     # ── TGFTP primary path ────────────────────────────────────────────────
     if primary == "tgftp":
@@ -692,7 +700,11 @@ async def _resolve_realized_high_with_source(
         tgftp_row = await get_daily_high_metar_obs(
             sess, city.id, date_et, city_tz=city_tz, source="tgftp",
         )
-        if tgftp_row is not None and tgftp_row.temp_f is not None:
+        if (
+            tgftp_row is not None
+            and tgftp_row.temp_f is not None
+            and _local_date_of(tgftp_row.observed_at) == date_et
+        ):
             return {"high_f": float(tgftp_row.temp_f), "source_used": "tgftp", "obs_time": tgftp_row.observed_at}
 
     # ── WU history (always available as fallback or primary) ──────────────
@@ -706,7 +718,12 @@ async def _resolve_realized_high_with_source(
                 obs_time = datetime.fromisoformat(str(obs_time_str).rstrip("Z")).replace(tzinfo=timezone.utc)
             except Exception:
                 pass
-        return {"high_f": float(wu_history.high_f), "source_used": "wu_history", "obs_time": obs_time}
+        # Freshness gate: the wu_history row is keyed by date_et but its
+        # reported high can carry over the prior local date's peak when WU
+        # has not yet updated. Reject if obs_time resolves to a different
+        # local date.
+        if obs_time is None or _local_date_of(obs_time) == date_et:
+            return {"high_f": float(wu_history.high_f), "source_used": "wu_history", "obs_time": obs_time}
 
     # ── Resolution METAR (valid observation minutes only) ─────────────────
     if observation_minutes:
