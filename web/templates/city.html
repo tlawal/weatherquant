@@ -448,6 +448,30 @@
   <!-- Forecast Sources Summary -->
   <div class="card p-4">
     <div class="text-[10px] uppercase tracking-widest mb-3" style="color:var(--text-muted)">Forecast Sources</div>
+    {% macro skill_block(skill) %}
+      {% if skill %}
+      <div class="w-full mt-1 pt-2 border-t" style="border-color:var(--border)">
+        <div class="text-[9px] uppercase tracking-wider mb-1" style="color:var(--text-muted)">Per-Station Skill ({{ skill.n_samples }} days)</div>
+        <div class="space-y-0.5 w-full text-[10px]">
+          {% if skill.weight is not none %}
+          <div class="flex justify-between w-full"><span style="color:var(--text-muted)">Weight</span><span class="mono">{{ "%.0f"|format(skill.weight * 100) }}%</span></div>
+          {% endif %}
+          {% if skill.mae_7d is not none %}
+          <div class="flex justify-between w-full"><span style="color:var(--text-muted)">7-day MAE</span><span class="mono">{{ "%.2f"|format(skill.mae_7d) }}°F</span></div>
+          {% endif %}
+          {% if skill.mae_30d is not none %}
+          <div class="flex justify-between w-full"><span style="color:var(--text-muted)">30-day MAE</span><span class="mono">{{ "%.2f"|format(skill.mae_30d) }}°F</span></div>
+          {% endif %}
+          {% if skill.bias_f is not none %}
+          <div class="flex justify-between w-full"><span style="color:var(--text-muted)">Bias</span><span class="mono">{{ "%+.2f"|format(skill.bias_f) }}°F</span></div>
+          {% endif %}
+          {% if skill.yesterday_err_f is not none %}
+          <div class="flex justify-between w-full"><span style="color:var(--text-muted)">Yesterday</span><span class="mono">{{ "%+.1f"|format(skill.yesterday_err_f) }}°F</span></div>
+          {% endif %}
+        </div>
+      </div>
+      {% endif %}
+    {% endmacro %}
     <div class="space-y-2 text-[11px]">
       
       <!-- Primary Source -->
@@ -471,6 +495,7 @@
              {% if forecasts.primary.url %}
              <a href="{{ forecasts.primary.url }}" target="_blank" rel="noopener" class="text-[10px] flex items-center gap-1 hover:underline transition-colors" style="color:var(--cyan)">↗ View API Source</a>
              {% endif %}
+             {{ skill_block(forecasts.primary.skill) }}
         </div>
       </div>
 
@@ -500,6 +525,7 @@
              {% if forecasts.wu_hourly.url %}
              <a href="{{ forecasts.wu_hourly.url }}" target="_blank" rel="noopener" class="text-[10px] flex items-center gap-1 hover:underline transition-colors mt-2" style="color:var(--cyan)">↗ View WU Hourly Chart</a>
              {% endif %}
+             {{ skill_block(forecasts.wu_hourly.skill) }}
         </div>
       </div>
 
@@ -522,6 +548,7 @@
              {% if forecasts.hrrr.url %}
              <a href="{{ forecasts.hrrr.url }}" target="_blank" rel="noopener" class="text-[10px] flex items-center gap-1 hover:underline transition-colors" style="color:var(--cyan)">↗ View on Open-Meteo</a>
              {% endif %}
+             {{ skill_block(forecasts.hrrr.skill) }}
         </div>
       </div>
       {% endif %}
@@ -545,6 +572,7 @@
              {% if forecasts.nbm.url %}
              <a href="{{ forecasts.nbm.url }}" target="_blank" rel="noopener" class="text-[10px] flex items-center gap-1 hover:underline transition-colors" style="color:var(--cyan)">↗ View on Open-Meteo</a>
              {% endif %}
+             {{ skill_block(forecasts.nbm.skill) }}
         </div>
       </div>
       {% endif %}
@@ -568,6 +596,7 @@
              {% if forecasts.ecmwf_ifs.url %}
              <a href="{{ forecasts.ecmwf_ifs.url }}" target="_blank" rel="noopener" class="text-[10px] flex items-center gap-1 hover:underline transition-colors" style="color:var(--cyan)">↗ View on Open-Meteo</a>
              {% endif %}
+             {{ skill_block(forecasts.ecmwf_ifs.skill) }}
         </div>
       </div>
       {% endif %}

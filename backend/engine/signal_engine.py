@@ -316,6 +316,22 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
             "weight_nbm": v if (v := getattr(cal, "weight_nbm", None)) is not None else 0.2,
         }
 
+    # Overlay dynamic per-station weights + biases learned from forecast skill.
+    # Station-level values (when available) replace the city-level calibration
+    # for that source; compute_model falls back to cal_dict / defaults otherwise.
+    try:
+        from backend.modeling.station_weights import load_station_source_weights
+        station_weights, station_biases = await load_station_source_weights(
+            getattr(city, "metar_station", None)
+        )
+        if station_weights:
+            if cal_dict is None:
+                cal_dict = {}
+            cal_dict["station_source_weights"] = station_weights
+            cal_dict["station_source_biases"] = station_biases
+    except Exception:
+        log.exception("signal: %s — station weight load failed", city.city_slug)
+
     # ── Adaptive prediction engine (Kalman + regression) ────────────────────
     city_tz_str = getattr(city, "tz", "America/New_York")
     now_local = city_local_now(city)

@@ -405,27 +405,43 @@ def compute_model(
     # Historical CalibrationParams rows may still carry baked-in weight_wu_daily
     # values; we ignore them and renormalize defaults across the remaining sources.
     cal = calibration or {}
-    bias_nws = cal.get("bias_nws", 0.0)
-    bias_wuh = cal.get("bias_wu_hourly", 0.0)
-    w_nws = cal.get("weight_nws", 0.5)
-    w_wuh = cal.get("weight_wu_hourly", 0.5)
+    # Per-station dynamic weights/biases (from ForecastDailyError EWMA) override
+    # city-level calibration for any source that has enough samples.
+    station_w: dict = cal.get("station_source_weights") or {}
+    station_b: dict = cal.get("station_source_biases") or {}
+
+    def _debias(src: str, raw: float, legacy_default: float = 0.0) -> float:
+        # Station bias is EWMA(forecast - observed), so subtract it.
+        if src in station_b:
+            return raw - float(station_b[src])
+        # Legacy city-level bias is the *correction* (add it to the forecast).
+        return raw + float(cal.get(f"bias_{src}", legacy_default))
+
+    def _weight(src: str, default: float) -> float:
+        if src in station_w:
+            return float(station_w[src])
+        return float(cal.get(f"weight_{src}", default))
+
     local_tz = ZoneInfo(city_tz)
     now_local = datetime.now(local_tz)
     hour_local = now_local.hour
 
     calibrated = {}
     if nws_high is not None:
-        calibrated["nws"] = (nws_high + bias_nws, w_nws)
+        calibrated["nws"] = (_debias("nws", nws_high), _weight("nws", 0.5))
     if wu_hourly_peak is not None:
-        calibrated["wu_hourly"] = (wu_hourly_peak + bias_wuh, w_wuh)
+        calibrated["wu_hourly"] = (
+            _debias("wu_hourly", wu_hourly_peak),
+            _weight("wu_hourly", 0.5),
+        )
     if hrrr_high is not None:
-        calibrated["hrrr"] = (hrrr_high + cal.get("bias_hrrr", 0.0), cal.get("weight_hrrr", 0.5))
+        calibrated["hrrr"] = (_debias("hrrr", hrrr_high), _weight("hrrr", 0.5))
     if nbm_high is not None:
-        calibrated["nbm"] = (nbm_high + cal.get("bias_nbm", 0.0), cal.get("weight_nbm", 0.2))
+        calibrated["nbm"] = (_debias("nbm", nbm_high), _weight("nbm", 0.2))
     if ecmwf_ifs_high is not None:
         calibrated["ecmwf_ifs"] = (
-            ecmwf_ifs_high + cal.get("bias_ecmwf_ifs", 0.0),
-            cal.get("weight_ecmwf_ifs", 0.5),
+            _debias("ecmwf_ifs", ecmwf_ifs_high),
+            _weight("ecmwf_ifs", 0.5),
         )
 
     if not calibrated:

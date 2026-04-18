@@ -645,6 +645,60 @@ class RuntimeConfig(Base):
     updated_by: Mapped[Optional[str]] = mapped_column(String(64))
 
 
+class ForecastDailyError(Base):
+    """One row per (station, date_et, source): forecast high vs observed high.
+
+    Materialized after settlement from ForecastObs + MetarObs daily high.
+    Powers the dynamic per-station ensemble weights and the "yesterday's error"
+    field in the Forecast Sources tooltip.
+    """
+    __tablename__ = "forecast_daily_errors"
+    __table_args__ = (
+        UniqueConstraint("station_id", "date_et", "source",
+                         name="uq_fde_station_date_source"),
+        Index("ix_fde_station_source", "station_id", "source"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    station_id: Mapped[str] = mapped_column(String(8), nullable=False)
+    date_et: Mapped[str] = mapped_column(String(10), nullable=False)
+    source: Mapped[str] = mapped_column(String(16), nullable=False)
+    forecast_high_f: Mapped[float] = mapped_column(Float, nullable=False)
+    observed_high_f: Mapped[float] = mapped_column(Float, nullable=False)
+    err_f: Mapped[float] = mapped_column(Float, nullable=False)  # forecast - observed
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
+
+
+class StationSourceWeight(Base):
+    """Per-station, per-source dynamic ensemble weight + bias from EWMA of squared error.
+
+    Weight is inverse-variance (blended fast+slow EWMA) with empirical-Bayes
+    shrinkage toward a uniform prior when n_samples < 7. Updated once per
+    settlement from ForecastDailyError rows.
+    """
+    __tablename__ = "station_source_weights"
+    __table_args__ = (
+        UniqueConstraint("station_id", "source", name="uq_ssw_station_source"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    station_id: Mapped[str] = mapped_column(String(8), nullable=False)
+    source: Mapped[str] = mapped_column(String(16), nullable=False)
+    weight: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    bias_f: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    mse_fast: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    mse_slow: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    mae_7d: Mapped[Optional[float]] = mapped_column(Float)
+    mae_30d: Mapped[Optional[float]] = mapped_column(Float)
+    yesterday_err_f: Mapped[Optional[float]] = mapped_column(Float)
+    n_samples: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+
 class StationCalibration(Base):
     """Per-station 30-day rolling forecast calibration metrics.
 

@@ -319,6 +319,11 @@ async def refresh_all_station_calibrations(min_samples: int = 1) -> int:
     async with get_session() as sess:
         cities = await get_all_cities(sess, enabled_only=True)
 
+    from backend.modeling.station_weights import (
+        backfill_forecast_daily_errors,
+        update_station_weights,
+    )
+
     updated = 0
     for city in cities:
         if not city.metar_station:
@@ -335,6 +340,17 @@ async def refresh_all_station_calibrations(min_samples: int = 1) -> int:
                 city.metar_station, cal_data["mae_f"], cal_data["bias_f"],
                 cal_data["tradeability"], cal_data["n_samples"],
             )
+            # Refresh ForecastDailyError + dynamic per-source weights.
+            try:
+                city_tz = getattr(city, "tz", "America/New_York")
+                await backfill_forecast_daily_errors(
+                    city.metar_station, city.id, city_tz
+                )
+                await update_station_weights(city.metar_station)
+            except Exception:
+                log.exception(
+                    "station_weights: %s update failed", city.metar_station
+                )
         except Exception as e:
             log.error("station_cal: %s failed: %s", city.metar_station, e, exc_info=True)
 

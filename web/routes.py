@@ -483,6 +483,12 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
         hrrr_fc = await get_latest_successful_forecast(sess, city.id, "hrrr", target_date_et)
         nbm_fc = await get_latest_successful_forecast(sess, city.id, "nbm", target_date_et)
         ecmwf_ifs_fc = await get_latest_successful_forecast(sess, city.id, "ecmwf_ifs", target_date_et)
+        # Per-source skill (dynamic weight, MAE, bias, yesterday's error) for tooltips.
+        try:
+            from backend.modeling.station_weights import load_source_skill_summary
+            source_skill = await load_source_skill_summary(city.metar_station)
+        except Exception:
+            source_skill = {}
         
         primary_fc = None
         if city.is_us:
@@ -863,7 +869,8 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                     "high_f": primary_fc.high_f if primary_fc else None,
                     "age_s": _age(primary_fc.fetched_at if primary_fc else None),
                     "collected_at": _fmt_time_et(primary_fc.fetched_at if primary_fc else None),
-                    "url": f"https://api.weather.gov/gridpoints/{city.nws_office}/{city.nws_grid_x},{city.nws_grid_y}/forecast" if city.is_us else f"https://api.open-meteo.com/v1/forecast?latitude={city.lat}&longitude={city.lon}&hourly=temperature_2m&forecast_days=1"
+                    "url": f"https://api.weather.gov/gridpoints/{city.nws_office}/{city.nws_grid_x},{city.nws_grid_y}/forecast" if city.is_us else f"https://api.open-meteo.com/v1/forecast?latitude={city.lat}&longitude={city.lon}&hourly=temperature_2m&forecast_days=1",
+                    "skill": source_skill.get("nws"),
                 },
                 "wu_hourly": {
                     "high_f": wu_h.high_f if wu_h else None,
@@ -871,6 +878,7 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                     "url": f"https://www.wunderground.com/hourly/{city.metar_station}/date/{target_date_et}" if city.metar_station else None,
                     "peak_hour": wu_hourly_raw.get("peak_hour"),
                     "collected_at": _fmt_time_et(wu_h.fetched_at if wu_h else None),
+                    "skill": source_skill.get("wu_hourly"),
                 },
                 "wu_history": {
                     "high_f": wu_history.high_f if wu_history else None,
@@ -884,12 +892,14 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                     "age_s": _age(hrrr_fc.fetched_at if hrrr_fc else None),
                     "collected_at": _fmt_time_et(hrrr_fc.fetched_at if hrrr_fc else None),
                     "url": f"https://open-meteo.com/en/docs?latitude={city.lat}&longitude={city.lon}&hourly=temperature_2m&models=gfs_hrrr&temperature_unit=fahrenheit&forecast_days=1" if city.lat else None,
+                    "skill": source_skill.get("hrrr"),
                 },
                 "nbm": {
                     "high_f": nbm_fc.high_f if nbm_fc else None,
                     "age_s": _age(nbm_fc.fetched_at if nbm_fc else None),
                     "collected_at": _fmt_time_et(nbm_fc.fetched_at if nbm_fc else None),
                     "url": f"https://open-meteo.com/en/docs?latitude={city.lat}&longitude={city.lon}&hourly=temperature_2m&models=ncep_nbm_conus&temperature_unit=fahrenheit&forecast_days=1" if city.lat else None,
+                    "skill": source_skill.get("nbm"),
                 },
                 "ecmwf_ifs": {
                     "high_f": ecmwf_ifs_fc.high_f if ecmwf_ifs_fc else None,
@@ -900,6 +910,7 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                         f"&longitude={city.lon}&hourly=temperature_2m&models=ecmwf_ifs"
                         f"&forecast_days=1&temperature_unit=fahrenheit"
                     ) if city.lat is not None else None,
+                    "skill": source_skill.get("ecmwf_ifs"),
                 },
             },
             "event": event,
