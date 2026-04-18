@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 import backend.ingestion.madis_hfmetar as madis_mod
 import backend.storage.db as storage_db
-from backend.storage.models import Base, City, MadisObs
+from backend.storage.models import Base, City, MadisObs, MetarObs, MetarObsExtended
 
 
 def _run(coro):
@@ -63,6 +63,35 @@ async def _count_madis(session_factory):
         return int(result.scalar_one())
 
 
+async def _count_metar(session_factory, source=None):
+    async with session_factory() as session:
+        q = select(func.count()).select_from(MetarObs)
+        if source is not None:
+            q = q.where(MetarObs.source == source)
+        result = await session.execute(q)
+        return int(result.scalar_one())
+
+
+async def _fetch_metar_rows(session_factory, source=None):
+    async with session_factory() as session:
+        q = select(MetarObs)
+        if source is not None:
+            q = q.where(MetarObs.source == source)
+        q = q.order_by(MetarObs.observed_at)
+        rows = (await session.execute(q)).scalars().all()
+        return list(rows)
+
+
+async def _fetch_extended(session_factory, metar_obs_id):
+    async with session_factory() as session:
+        result = await session.execute(
+            select(MetarObsExtended).where(
+                MetarObsExtended.metar_obs_id == metar_obs_id
+            )
+        )
+        return result.scalar_one_or_none()
+
+
 # ---------------------------------------------------------------------------
 # Fake netCDF4.Dataset — minimal surface to let the parser run without the
 # real HDF5/netCDF C stack.
@@ -88,16 +117,35 @@ class _Var:
 
 
 class _FakeDataset:
-    """Records: list of (station_str, temp_k, epoch_s)."""
+    """Records: list of dicts with keys: station, temp_k, epoch,
+    and optionally dewpoint_k, rh, wind_dir, wind_speed_ms, wind_gust_ms,
+    altimeter_pa, precip_m."""
 
     def __init__(self, records):
+        def _col(key, default=None):
+            return [r.get(key, default) for r in records]
+
         self.variables = {
-            # Real MADIS HFMETAR files expose stationId (4-char ICAO) as the
-            # match field; stationName is the long-form location name.
-            "stationId": _Var([_StationName(s) for s, _, _ in records]),
+            # Required.
+            "stationId": _Var([_StationName(r["station"]) for r in records]),
             "stationName": _Var([_StationName("LONG NAME") for _ in records]),
-            "temperature": _Var([t for _, t, _ in records]),
-            "timeObs": _Var([e for _, _, e in records]),
+            "temperature": _Var(_col("temp_k")),
+            "timeObs": _Var(_col("epoch")),
+            # Optional — only include the key when at least one record has it.
+            **({"dewpoint": _Var(_col("dewpoint_k", 1e36))}
+               if any("dewpoint_k" in r for r in records) else {}),
+            **({"relHumidity": _Var(_col("rh", 1e36))}
+               if any("rh" in r for r in records) else {}),
+            **({"windDir": _Var(_col("wind_dir", -9999))}
+               if any("wind_dir" in r for r in records) else {}),
+            **({"windSpeed": _Var(_col("wind_speed_ms", -9999))}
+               if any("wind_speed_ms" in r for r in records) else {}),
+            **({"windGust": _Var(_col("wind_gust_ms", -9999))}
+               if any("wind_gust_ms" in r for r in records) else {}),
+            **({"altimeter": _Var(_col("altimeter_pa", -9999))}
+               if any("altimeter_pa" in r for r in records) else {}),
+            **({"precip1hr": _Var(_col("precip_m", -9999))}
+               if any("precip_m" in r for r in records) else {}),
         }
 
     def close(self):
@@ -106,10 +154,18 @@ class _FakeDataset:
 
 def _install_fake_netcdf(monkeypatch, records):
     """Patch sys.modules so `import netCDF4` inside fetch_madis_latest
-    resolves to our fake."""
+    resolves to our fake. `records` is a list of dicts (see _FakeDataset).
+    For backward compat, also accepts tuples (station, temp_k, epoch)."""
+
+    def _normalize(r):
+        if isinstance(r, tuple):
+            return {"station": r[0], "temp_k": r[1], "epoch": r[2]}
+        return dict(r)
+
+    normed = [_normalize(r) for r in records]
 
     def _ctor(path, mode):
-        return _FakeDataset(records)
+        return _FakeDataset(normed)
 
     monkeypatch.setitem(sys.modules, "netCDF4", SimpleNamespace(Dataset=_ctor))
 
@@ -141,11 +197,94 @@ def test_fetch_madis_inserts_new_observations(tmp_path, monkeypatch, caplog):
         with caplog.at_level(logging.INFO, logger="backend.ingestion.madis_hfmetar"):
             await madis_mod.fetch_madis_latest()
 
-        count = await _count_madis(session_factory)
-        assert count == 2
+        # Legacy MadisObs rows still get written.
+        assert await _count_madis(session_factory) == 2
+        # Unified MetarObs rows (source='madis') — this is the new primary path.
+        assert await _count_metar(session_factory, source="madis") == 2
         assert any(
             "fetched 2 observations" in r.getMessage() for r in caplog.records
         ), f"expected success log; got: {[r.getMessage() for r in caplog.records]}"
+
+    _run(go())
+
+
+def test_fetch_madis_writes_extended_fields(tmp_path, monkeypatch):
+    """Dew point, humidity, wind, gust, altimeter, precip get parsed with
+    proper unit conversions and stored in MetarObsExtended."""
+
+    async def go():
+        _, session_factory = await _setup_test_db(tmp_path, monkeypatch)
+        await _create_atlanta(session_factory)
+
+        async def fake_fetch(filename, http):
+            return gzip.compress(b"fake")
+
+        monkeypatch.setattr(madis_mod, "_fetch_netcdf", fake_fetch)
+        monkeypatch.setattr(madis_mod, "_last_success_file", None)
+
+        t0 = int(datetime(2026, 4, 17, 22, 0, tzinfo=timezone.utc).timestamp())
+        _install_fake_netcdf(
+            monkeypatch,
+            [{
+                "station": "KATL",
+                "temp_k": 297.15,      # 24°C / 75.2°F
+                "epoch": t0,
+                "dewpoint_k": 288.15,   # 15°C / 59°F
+                "rh": 55.0,             # 55%
+                "wind_dir": 270,
+                "wind_speed_ms": 5.0,   # 5 m/s ≈ 9.7 kt
+                "wind_gust_ms": 8.0,    # 8 m/s ≈ 15.5 kt
+                "altimeter_pa": 101325, # 1 atm ≈ 29.92 inHg
+                "precip_m": 0.0025,     # 2.5 mm ≈ 0.098 in
+            }],
+        )
+
+        await madis_mod.fetch_madis_latest()
+
+        rows = await _fetch_metar_rows(session_factory, source="madis")
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.source == "madis"
+        assert row.metar_station == "KATL"
+        assert row.temp_f is not None
+        assert 74.5 < row.temp_f < 76.0  # ~75.2
+
+        ext = await _fetch_extended(session_factory, row.id)
+        assert ext is not None, "MetarObsExtended row must exist for extended data"
+        assert ext.dewpoint_f is not None and 58.0 < ext.dewpoint_f < 60.0
+        assert ext.humidity_pct == 55.0
+        assert ext.wind_dir_deg == 270
+        assert ext.wind_speed_kt is not None and 9.0 < ext.wind_speed_kt < 10.5
+        assert ext.wind_gust_kt is not None and 15.0 < ext.wind_gust_kt < 16.0
+        assert ext.altimeter_inhg is not None and 29.8 < ext.altimeter_inhg < 30.0
+        assert ext.precip_in is not None and 0.09 < ext.precip_in < 0.11
+
+    _run(go())
+
+
+def test_fetch_madis_skips_extended_when_no_optional_vars(tmp_path, monkeypatch):
+    """When the netCDF file lacks dewpoint/wind/etc., we still write the
+    MetarObs row but omit the MetarObsExtended row."""
+
+    async def go():
+        _, session_factory = await _setup_test_db(tmp_path, monkeypatch)
+        await _create_atlanta(session_factory)
+
+        async def fake_fetch(filename, http):
+            return gzip.compress(b"fake")
+
+        monkeypatch.setattr(madis_mod, "_fetch_netcdf", fake_fetch)
+        monkeypatch.setattr(madis_mod, "_last_success_file", None)
+
+        t0 = int(datetime(2026, 4, 17, 22, 0, tzinfo=timezone.utc).timestamp())
+        _install_fake_netcdf(monkeypatch, [("KATL", 293.15, t0)])  # no extended keys
+
+        await madis_mod.fetch_madis_latest()
+
+        rows = await _fetch_metar_rows(session_factory, source="madis")
+        assert len(rows) == 1
+        ext = await _fetch_extended(session_factory, rows[0].id)
+        assert ext is None
 
     _run(go())
 

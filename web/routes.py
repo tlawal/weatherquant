@@ -95,6 +95,148 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _TEMPLATES_DIR = os.path.join(_HERE, "templates")
 
 templates = Jinja2Templates(directory=_TEMPLATES_DIR)
+
+
+def humanize_age(seconds):
+    """Format an age in seconds as 'Xh Ym ago' / 'Xm Ys ago' / 'Xs ago'.
+
+    Falls back to '—' for None so templates can pipe raw values without
+    extra existence checks.
+    """
+    if seconds is None:
+        return "—"
+    try:
+        s = int(seconds)
+    except (TypeError, ValueError):
+        return "—"
+    if s < 0:
+        s = 0
+    if s < 60:
+        return f"{s}s ago"
+    m, s = divmod(s, 60)
+    if m < 60:
+        return f"{m}m {s}s ago" if s else f"{m}m ago"
+    h, m = divmod(m, 60)
+    return f"{h}h {m}m ago" if m else f"{h}h ago"
+
+
+templates.env.filters["humanize_age"] = humanize_age
+
+
+def _format_current_temp_dual(
+    madis_metar,
+    nws_metar,
+    madis_obs,
+    city,
+    *,
+    target_date_et=None,
+    real_today_et=None,
+    now=None,
+) -> dict | None:
+    """Build dual-source (MADIS + NWS) Current Temp payload for US cities.
+
+    Returns None for non-US cities, stale dates, or when neither source has
+    a row yet. Each side carries temp / obs time / age / station / raw METAR /
+    source URL so the template can render a ⓘ tooltip with "↗ View Source".
+    `primary` names whichever side is fresher (ties → MADIS per unified-arch
+    decision); `delta_s` is the age gap (int seconds, or None).
+
+    Module-level so unit tests can call it without spinning up the full
+    FastAPI route. `now` defaults to datetime.now(UTC) for live callers.
+    """
+    if not getattr(city, "is_us", False):
+        return None
+    # Viewing a past/future date: suppress the live Current Temp dual card.
+    if target_date_et is not None and real_today_et is not None and target_date_et != real_today_et:
+        return None
+
+    now = now or datetime.now(timezone.utc)
+    city_tz_obj = ZoneInfo(getattr(city, "tz", "America/New_York"))
+
+    def _age(dt):
+        if not dt:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return round((now - dt).total_seconds(), 0)
+
+    def _local(dt):
+        if not dt:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        try:
+            return dt.astimezone(city_tz_obj).strftime("%-I:%M %p %Z")
+        except Exception:
+            return None
+
+    # ── MADIS side ──────────────────────────────────────────────────────────
+    madis_side = {
+        "temp_f": None, "obs_time_local": None, "age_s": None,
+        "station": None, "raw_text": None,
+        "source_url": None, "source_label": "MADIS HFMETAR",
+    }
+    if madis_metar:
+        madis_side["temp_f"] = madis_metar.temp_f
+        madis_side["obs_time_local"] = _local(madis_metar.observed_at)
+        madis_side["age_s"] = _age(madis_metar.observed_at)
+        madis_side["station"] = madis_metar.metar_station
+        # netCDF payload has no raw METAR string; rendered as — in template.
+        madis_side["raw_text"] = getattr(madis_metar, "raw_text", None)
+    # source_file lives on the legacy MadisObs row — still useful for the link.
+    source_file = getattr(madis_obs, "source_file", None) if madis_obs else None
+    if source_file:
+        madis_side["source_url"] = (
+            "https://madis-data.ncep.noaa.gov/madisPublic1/data/"
+            f"LDAD/hfmetar/netCDF/{source_file}"
+        )
+    else:
+        madis_side["source_url"] = (
+            "https://madis-data.ncep.noaa.gov/madisPublic1/data/LDAD/hfmetar/netCDF/"
+        )
+
+    # ── NWS side ────────────────────────────────────────────────────────────
+    nws_side = {
+        "temp_f": None, "obs_time_local": None, "age_s": None,
+        "station": None, "raw_text": None,
+        "source_url": None, "source_label": "NWS API",
+    }
+    if nws_metar:
+        nws_side["temp_f"] = nws_metar.temp_f
+        nws_side["obs_time_local"] = _local(nws_metar.observed_at)
+        nws_side["age_s"] = _age(nws_metar.observed_at)
+        nws_side["station"] = nws_metar.metar_station
+        nws_side["raw_text"] = getattr(nws_metar, "raw_text", None)
+        if nws_metar.metar_station:
+            nws_side["source_url"] = (
+                f"https://api.weather.gov/stations/{nws_metar.metar_station}"
+                "/observations/latest"
+            )
+
+    # Neither side has data — caller treats this like non-US (no panel).
+    if madis_side["age_s"] is None and nws_side["age_s"] is None:
+        return None
+
+    # Primary = fresher side (lowest age_s). Ties break to MADIS — it's the
+    # nominal primary source per the unified-architecture decision.
+    if madis_side["age_s"] is not None and nws_side["age_s"] is not None:
+        primary = "madis" if madis_side["age_s"] <= nws_side["age_s"] else "nws"
+        delta_s = abs(int(madis_side["age_s"]) - int(nws_side["age_s"]))
+    elif madis_side["age_s"] is not None:
+        primary = "madis"
+        delta_s = None
+    else:
+        primary = "nws"
+        delta_s = None
+
+    return {
+        "madis": madis_side,
+        "nws": nws_side,
+        "primary": primary,
+        "delta_s": delta_s,
+    }
+
+
 dashboard_router = APIRouter()
 
 
@@ -309,11 +451,21 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
         available_dates = (await sess.execute(date_query)).scalars().all()
 
         metar = await get_latest_metar(sess, city.id)
-        # MADIS benchmarking obs (US cities only)
-        madis_obs = None
+        # Dual-source Current Temp: latest-per-source MetarObs rows for US cities.
+        # MADIS writes MetarObs(source="madis") + MetarObsExtended; NWS writes
+        # MetarObs(source="aviation"). Both flow through get_latest_metar (fresher wins),
+        # but the Current Temp card also shows them side-by-side.
+        madis_obs = None  # legacy MadisObs row — still used for source_file URL
+        madis_metar = None  # MetarObs(source="madis")
+        nws_metar = None  # MetarObs(source="aviation")
         if city.is_us:
-            from backend.storage.repos import get_latest_madis_obs
+            from backend.storage.repos import (
+                get_latest_madis_obs,
+                get_latest_metar_by_source,
+            )
             madis_obs = await get_latest_madis_obs(sess, city.id)
+            madis_metar = await get_latest_metar_by_source(sess, city.id, "madis")
+            nws_metar = await get_latest_metar_by_source(sess, city.id, "aviation")
         # For the selected date, we also want the official high observed by METAR
         obs_high_f = await get_daily_high_metar(sess, city.id, target_date_et, city_tz=getattr(city, "tz", "America/New_York"))
         avg_peak_timing = await get_avg_peak_timing(sess, city.id, days_back=3, et_tz=et_tz)
@@ -425,47 +577,7 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
             dt = dt.replace(tzinfo=timezone.utc)
         return dt.astimezone(et_tz).strftime("%-I:%M %p ET")
 
-    def _format_madis_benchmark(madis_obs, metar, city) -> dict | None:
-        """Format NWS + MADIS obs for the benchmarking panel."""
-        city_tz_obj = ZoneInfo(getattr(city, "tz", "America/New_York"))
-
-        # MADIS side
-        madis_temp = madis_obs.temp_f if madis_obs else None
-        madis_age = None
-        madis_obs_local = None
-        if madis_obs and madis_obs.observed_at:
-            m_dt = madis_obs.observed_at
-            if m_dt.tzinfo is None:
-                m_dt = m_dt.replace(tzinfo=timezone.utc)
-            madis_age = _age(m_dt)
-            try:
-                madis_obs_local = m_dt.astimezone(city_tz_obj).strftime("%-I:%M %p %Z")
-            except Exception:
-                pass
-
-        # NWS side (api.weather.gov — the standard MetarObs with source='aviation')
-        nws_temp = metar.temp_f if (metar and target_date_et == real_today_et) else None
-        nws_age = None
-        nws_obs_local = None
-        nws_dt = metar.observed_at if (metar and target_date_et == real_today_et) else None
-        if nws_dt:
-            if nws_dt.tzinfo is None:
-                nws_dt = nws_dt.replace(tzinfo=timezone.utc)
-            nws_age = _age(nws_dt)
-            try:
-                nws_obs_local = nws_dt.astimezone(city_tz_obj).strftime("%-I:%M %p %Z")
-            except Exception:
-                pass
-
-        return {
-            "madis_temp_f": madis_temp,
-            "madis_obs_time_local": madis_obs_local,
-            "madis_age_s": madis_age,
-            "madis_source_file": madis_obs.source_file if madis_obs else None,
-            "nws_temp_f": nws_temp,
-            "nws_obs_time_local": nws_obs_local,
-            "nws_age_s": nws_age,
-        }
+    # `_format_current_temp_dual` lives at module scope (testable) — see above.
 
     wu_history_raw = json.loads(wu_history.raw_json) if (wu_history and wu_history.raw_json) else {}
     wu_hourly_raw = json.loads(wu_h.raw_json) if (wu_h and wu_h.raw_json) else {}
@@ -739,8 +851,12 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                     )()
                 ) if (metar and metar.observed_at and target_date_et == real_today_et) else None,
             },
-            # MADIS benchmarking — NWS API vs MADIS side-by-side for US cities
-            "madis_benchmark": _format_madis_benchmark(madis_obs, metar, city) if city.is_us else None,
+            # Dual-source Current Temp — MADIS + NWS API side-by-side (US cities only)
+            "current_temp_dual": _format_current_temp_dual(
+                madis_metar, nws_metar, madis_obs, city,
+                target_date_et=target_date_et,
+                real_today_et=real_today_et,
+            ) if city.is_us else None,
             "forecasts": {
                 "primary": {
                     "source": "nws" if city.is_us else "Open-Meteo",
