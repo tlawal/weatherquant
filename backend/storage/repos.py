@@ -32,6 +32,7 @@ from backend.storage.models import (
     ModelSnapshot,
     Order,
     Position,
+    RuntimeConfig,
     Signal,
     StationCalibration,
     StationProfile,
@@ -1363,3 +1364,30 @@ async def get_latest_madis_obs(
         .limit(1)
     )
     return result.scalar_one_or_none()
+
+
+# ─── Runtime Config ───────────────────────────────────────────────────────────
+
+async def get_runtime_config(session: AsyncSession) -> dict:
+    """Return the persisted runtime config overrides dict (may be empty)."""
+    result = await session.execute(select(RuntimeConfig).where(RuntimeConfig.id == 1))
+    row = result.scalar_one_or_none()
+    if row is None or not row.params_json:
+        return {}
+    try:
+        return json.loads(row.params_json)
+    except Exception:
+        return {}
+
+
+async def save_runtime_config(session: AsyncSession, params: dict, updated_by: str = "admin") -> None:
+    """Upsert the singleton runtime config row with the given params dict."""
+    result = await session.execute(select(RuntimeConfig).where(RuntimeConfig.id == 1))
+    row = result.scalar_one_or_none()
+    if row is None:
+        row = RuntimeConfig(id=1, params_json=json.dumps(params), updated_by=updated_by)
+        session.add(row)
+    else:
+        row.params_json = json.dumps(params)
+        row.updated_by = updated_by
+    await session.commit()

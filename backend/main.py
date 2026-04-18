@@ -33,6 +33,40 @@ def _log_config_warnings() -> None:
         log.warning("config: %s", w)
 
 
+async def _load_runtime_config() -> None:
+    """Load persisted runtime config overrides from DB into Config class vars."""
+    try:
+        from backend.storage.db import get_session
+        from backend.storage.repos import get_runtime_config
+        async with get_session() as sess:
+            params = await get_runtime_config(sess)
+        if not params:
+            return
+        _FLOAT_FIELDS = {
+            "min_true_edge": "MIN_TRUE_EDGE",
+            "max_daily_loss": "MAX_DAILY_LOSS",
+            "bankroll_cap": "BANKROLL_CAP",
+            "kelly_fraction": "KELLY_FRACTION",
+            "max_entry_price": "MAX_ENTRY_PRICE",
+            "max_spread": "MAX_SPREAD",
+            "quick_flip_target": "QUICK_FLIP_TARGET",
+            "urgent_exit_max_spread": "URGENT_EXIT_MAX_SPREAD",
+            "expiry_discount": "EXPIRY_DISCOUNT",
+        }
+        _INT_FIELDS = {
+            "consensus_debounce_runs": "CONSENSUS_DEBOUNCE_RUNS",
+        }
+        for key, attr in _FLOAT_FIELDS.items():
+            if key in params:
+                setattr(Config, attr, float(params[key]))
+        for key, attr in _INT_FIELDS.items():
+            if key in params:
+                setattr(Config, attr, int(params[key]))
+        log.info("startup: loaded runtime config overrides: %s", list(params.keys()))
+    except Exception as e:
+        log.warning("startup: could not load runtime config from DB (safe to ignore on first boot): %s", e)
+
+
 async def _run_startup_backfills() -> None:
     """Run idempotent startup backfills before normal background work begins."""
     from backend.ingestion.metar import backfill_recent_nws_extended
@@ -63,6 +97,7 @@ async def run_api(start_worker: bool = False) -> None:
         try:
             log.info("api: background init starting (db + CLOB)")
             await init_db()
+            await _load_runtime_config()
             await _run_startup_backfills()
             _ready["db"] = True
             log.info("api: db init complete")
@@ -140,6 +175,7 @@ async def run_worker() -> None:
     log.info("worker: starting up")
     _log_config_warnings()
     await init_db()
+    await _load_runtime_config()
     await _run_startup_backfills()
 
     clob = CLOBClient()

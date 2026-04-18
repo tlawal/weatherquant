@@ -627,6 +627,24 @@ class BacktestResolvedEvent(Base):
     closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
 
+class RuntimeConfig(Base):
+    """Singleton runtime config overrides — survives redeploy.
+
+    Stores the last admin-applied values for all tunable trading params.
+    Loaded on startup and used to override env-var defaults so changes made
+    via the /strategies UI persist across Railway restarts.
+    Always exactly 1 row (id=1).
+    """
+    __tablename__ = "runtime_config"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    params_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+    updated_by: Mapped[Optional[str]] = mapped_column(String(64))
+
+
 class StationCalibration(Base):
     """Per-station 30-day rolling forecast calibration metrics.
 

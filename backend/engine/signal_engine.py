@@ -258,10 +258,23 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
             _wu_obs_time = None
         if _wu_obs_time is None or _wu_obs_time.astimezone(_city_tz).strftime("%Y-%m-%d") == today_et:
             _wu_hist_high = wu_history_obs.high_f
-    _candidate_highs = [
-        v for v in (_wu_hist_high, resolution_high, daily_high)
-        if v is not None
-    ]
+
+    # Resolution-minute gate: when the station profile declares valid
+    # settlement minutes (e.g. KATL samples at :52), a raw METAR spike
+    # *between* those minutes cannot lock a bucket — settlement will
+    # resolve on the :52 reading, not the intra-minute peak. Exclude raw
+    # daily_high from the floor in that case; it remains visible in the
+    # debug block via raw_daily_high for diagnostics.
+    if valid_minutes:
+        _candidate_highs = [
+            v for v in (_wu_hist_high, resolution_high)
+            if v is not None
+        ]
+    else:
+        _candidate_highs = [
+            v for v in (_wu_hist_high, resolution_high, daily_high)
+            if v is not None
+        ]
     ground_truth_high = max(_candidate_highs) if _candidate_highs else None
 
     # Track which source supplied the winning value for audit/debug.
@@ -440,6 +453,8 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
     model.inputs["active_station_source"] = active_station_source
     model.inputs["ground_truth_high"] = ground_truth_high
     model.inputs["ground_truth_source"] = ground_truth_source
+    model.inputs["raw_daily_high"] = daily_high
+    model.inputs["observation_minutes"] = valid_minutes
 
     # Use a single session for all DB writes (model snapshot + per-bucket reads/inserts)
     signals: list[BucketSignal] = []

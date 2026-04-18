@@ -1988,6 +1988,28 @@ async def update_config(body: ConfigUpdate, actor: str = Depends(require_admin))
     async with get_session() as sess:
         await append_audit(sess, actor=actor, action="config_updated", payload=updates)
 
+    # Persist the full current config snapshot to DB so it survives redeploy.
+    if updates:
+        _all_params = {
+            "min_true_edge": Config.MIN_TRUE_EDGE,
+            "max_daily_loss": Config.MAX_DAILY_LOSS,
+            "bankroll_cap": Config.BANKROLL_CAP,
+            "kelly_fraction": Config.KELLY_FRACTION,
+            "max_entry_price": Config.MAX_ENTRY_PRICE,
+            "max_spread": Config.MAX_SPREAD,
+            "quick_flip_target": Config.QUICK_FLIP_TARGET,
+            "urgent_exit_max_spread": Config.URGENT_EXIT_MAX_SPREAD,
+            "consensus_debounce_runs": Config.CONSENSUS_DEBOUNCE_RUNS,
+            "expiry_discount": Config.EXPIRY_DISCOUNT,
+        }
+        try:
+            from backend.storage.repos import save_runtime_config
+            async with get_session() as sess:
+                await save_runtime_config(sess, _all_params, updated_by=actor)
+        except Exception as _e:
+            import logging as _logging
+            _logging.getLogger("api.config").warning("could not persist runtime config: %s", _e)
+
     return {"ok": True, "updated": updates}
 
 

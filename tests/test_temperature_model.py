@@ -618,3 +618,71 @@ def test_projected_high_not_capped_when_within_headroom(monkeypatch):
 
     assert model is not None
     assert model.inputs.get("projected_high_capped") is False
+
+
+def test_raw_metar_spike_between_resolution_minutes_does_not_lock(monkeypatch):
+    """Atlanta 15:30 regression: KATL settles at :52. Raw METAR caught a
+    84.2°F transient at 15:25/15:30; resolution_high (the :52-sampled max)
+    is only 82.5. signal_engine must pass observed_high=82.5 (settlement)
+    to compute_model, and with current_temp_f=84.1 the late-day lock must
+    NOT engage (no post-peak deficit against the settlement-relevant
+    high) — so PMF stays distributed between 82-83 and 84-85 rather than
+    locking 100% on either."""
+    class _AfternoonPeakDT(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            fixed = cls(2026, 4, 18, 15, 30, tzinfo=ZoneInfo("America/New_York"))
+            return fixed.astimezone(tz) if tz else fixed
+
+    monkeypatch.setattr(temperature_model, "datetime", _AfternoonPeakDT)
+
+    local_tz = ZoneInfo("America/New_York")
+    adaptive = AdaptiveResult(
+        kalman=KalmanState(
+            smoothed_temp=84.1,
+            temp_trend_per_min=0.01,  # still warming slightly
+            uncertainty=0.3,
+            n_observations=40,
+            process_noise_factor=1.0,
+        ),
+        regression_slope=0.01,
+        regression_r2=0.6,
+        regression_features_used=["time"],
+        station_predictions=[],
+        predicted_daily_high=84.5,
+        predicted_high_time=datetime(2026, 4, 18, 15, 45, tzinfo=local_tz),
+        sigma_adjustment=0.95,
+        peak_already_passed=False,
+        composite_peak_timing="3:45 PM",
+        peak_timing_source="wu_hourly",
+    )
+
+    # observed_high=82.5 (resolution-minute max, not raw 84.2 spike).
+    # current_temp_f=84.1 is ABOVE observed_high — no late-day-lock deficit
+    # and hour_local<18, so the PMF stays distributed.
+    model = compute_model(
+        nws_high=84.0,
+        wu_hourly_peak=83.0,
+        daily_high_metar=82.5,
+        current_temp_f=84.1,
+        calibration=None,
+        buckets=[(80.0, 81.0), (82.0, 83.0), (84.0, 85.0), (86.0, 87.0), (88.0, None)],
+        forecast_quality="ok",
+        unit="F",
+        city_tz="America/New_York",
+        observed_high=82.5,
+        ml_features=None,
+        adaptive=adaptive,
+        latest_weather=None,
+        hrrr_high=83.5,
+        nbm_high=83.8,
+        ecmwf_ifs_high=84.2,
+    )
+
+    assert model is not None
+    # No late-day lock (current > observed_high means "gate #3" current-below
+    # check at _late_day_lock_active L271 rejects lock)
+    assert model.lock_regime is False, "lock must not engage while current is above settlement high"
+    # Neither bucket should dominate at 100%
+    probs = model.probs
+    assert max(probs) < 0.95, f"no single bucket should lock; got {probs}"

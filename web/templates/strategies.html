@@ -501,7 +501,22 @@
       <span x-show="gateDirty" class="text-xs px-2 py-1 rounded" style="background:rgba(234,179,8,0.15);color:var(--yellow)">Unsaved</span>
     </div>
 
-    <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+      <!-- MAX_DAILY_LOSS -->
+      <div class="space-y-2">
+        <div class="flex items-center justify-between">
+          <label class="text-xs font-bold" style="color:var(--text-muted)">Daily Loss Limit</label>
+          <span class="mono text-sm font-bold" style="color:var(--yellow)" x-text="'$' + maxDailyLoss.toFixed(2)"></span>
+        </div>
+        <input type="range" min="1.00" max="20.00" step="0.50"
+               x-model.number="maxDailyLoss" @input="gateDirty = true"
+               class="w-full h-2 rounded-lg appearance-none cursor-pointer"
+               style="background:var(--bg-panel);accent-color:var(--yellow)" />
+        <p class="text-[10px]" style="color:var(--text-muted)">
+          Bot stops trading for the day once cumulative realized loss exceeds this. Does not block manual trades.
+        </p>
+      </div>
+
       <!-- MAX_ENTRY_PRICE -->
       <div class="space-y-2">
         <div class="flex items-center justify-between">
@@ -705,6 +720,7 @@ function strategiesPage() {
     maxEntryPrice: {{ config.max_entry_price }},
     maxSpread: {{ config.max_spread }},
     minTrueEdge: {{ config.min_true_edge }},
+    maxDailyLoss: {{ config.max_daily_loss }},
     gateDirty: false,
 
     // Exit engine
@@ -857,6 +873,7 @@ function strategiesPage() {
             max_entry_price: this.maxEntryPrice,
             max_spread: this.maxSpread,
             min_true_edge: this.minTrueEdge,
+            max_daily_loss: this.maxDailyLoss,
           }),
         });
         if (res.ok) { this.gateDirty = false; }

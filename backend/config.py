@@ -66,7 +66,7 @@ class Config:
     BANKROLL_CAP: float = _float("BANKROLL_CAP", 10.0)
     MAX_POSITION_PCT: float = _float("MAX_POSITION_PCT", 0.10)
     KELLY_FRACTION: float = _float("KELLY_FRACTION", 0.10)
-    MAX_DAILY_LOSS: float = _float("MAX_DAILY_LOSS", 3.0)  # positive number, max loss
+    MAX_DAILY_LOSS: float = _float("MAX_DAILY_LOSS", 5.0)  # positive number, max loss
     MIN_TRUE_EDGE: float = _float("MIN_TRUE_EDGE", 0.10)
     MIN_LIQUIDITY_SHARES: float = _float("MIN_LIQUIDITY_SHARES", 10.0)
     MAX_POSITIONS_PER_EVENT: int = _int("MAX_POSITIONS_PER_EVENT", 2)
