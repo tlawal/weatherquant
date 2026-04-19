@@ -337,8 +337,8 @@ def compute_station_predictions(
     observation_minutes: list[int],
     now_local: datetime,
     todays_obs: list[dict],
-    start_hour: int = 6,
-    end_hour: int = 20,       # up to 7:52 PM (exclusive of 20:xx)
+    start_hour: int = 0,
+    end_hour: int = 23,       # full day: midnight to 11 PM
     dt_key: str = "observed_at",
     temp_key: str = "temp_f",
     city_tz: str = "America/New_York",
@@ -730,10 +730,25 @@ def run_adaptive(
     )
 
     # 7. Predicted daily high from station predictions
+    #    Only consider future predictions (not past actuals, which might
+    #    include stale warm evening readings near midnight rollover).
+    #    Use the actual daily high from past observations as a floor.
     if predictions:
-        best_pred = max(predictions, key=lambda p: p.predicted_temp)
-        predicted_daily_high = best_pred.predicted_temp
-        predicted_high_time = best_pred.obs_time
+        future_preds = [p for p in predictions if not p.is_past and p.minutes_ahead > 0]
+        past_actuals = [p.actual_temp for p in predictions if p.is_past and p.actual_temp is not None]
+        actual_high_so_far = max(past_actuals) if past_actuals else kalman.smoothed_temp
+
+        if future_preds:
+            best_future = max(future_preds, key=lambda p: p.predicted_temp)
+            predicted_daily_high = max(actual_high_so_far, best_future.predicted_temp)
+            predicted_high_time = (
+                best_future.obs_time
+                if best_future.predicted_temp >= actual_high_so_far
+                else None
+            )
+        else:
+            predicted_daily_high = actual_high_so_far
+            predicted_high_time = None
     else:
         predicted_daily_high = kalman.smoothed_temp
         predicted_high_time = None
