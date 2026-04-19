@@ -153,6 +153,14 @@ async def init_db() -> None:
     await _run_ddl("ALTER TABLE positions ADD COLUMN current_exit_status VARCHAR(256)")
     await _run_ddl("ALTER TABLE positions ADD COLUMN entry_time TIMESTAMP WITH TIME ZONE")
     await _run_ddl("ALTER TABLE positions ADD COLUMN entry_price FLOAT")
+    
+    # positions - tiered exits
+    await _run_ddl("ALTER TABLE positions ADD COLUMN original_qty FLOAT NOT NULL DEFAULT 0.0")
+    await _run_ddl("ALTER TABLE positions ADD COLUMN tier_1_exited BOOLEAN NOT NULL DEFAULT false")
+    await _run_ddl("ALTER TABLE positions ADD COLUMN tier_2_exited BOOLEAN NOT NULL DEFAULT false")
+    await _run_ddl("ALTER TABLE positions ADD COLUMN moon_bag_qty FLOAT NOT NULL DEFAULT 0.0")
+    await _run_ddl("ALTER TABLE positions ADD COLUMN trailing_stop_price FLOAT")
+    await _run_ddl("ALTER TABLE positions ADD COLUMN max_bid_seen FLOAT")
 
     # signals — generation tag to filter to "latest snapshot only"
     await _run_ddl("ALTER TABLE signals ADD COLUMN model_snapshot_id INTEGER")

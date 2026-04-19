@@ -87,6 +87,11 @@ class Config:
     URGENT_ADJACENT_DEBOUNCE_MULTIPLIER: int = _int("URGENT_ADJACENT_DEBOUNCE_MULTIPLIER", 2)
     EXIT_MARKET_SELL_MAX_SPREAD: float = _float("EXIT_MARKET_SELL_MAX_SPREAD", 0.06)
 
+    # ── Portfolio Risk ───────────────────────────────────────────────────────
+    MAX_DRAWDOWN_PCT: float = _float("MAX_DRAWDOWN_PCT", 0.25)
+    MAX_CLUSTER_EXPOSURE_PCT: float = _float("MAX_CLUSTER_EXPOSURE_PCT", 0.60)
+    MAX_STRATEGY_LOSS: float = _float("MAX_STRATEGY_LOSS", 3.0)
+
     # ── Telegram Notifications ───────────────────────────────────────────────
     TELEGRAM_BOT_TOKEN: str = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     TELEGRAM_CHAT_ID: str = os.environ.get("TELEGRAM_CHAT_ID", "")

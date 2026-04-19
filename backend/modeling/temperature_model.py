@@ -49,6 +49,12 @@ from backend.modeling.residual_tracker import predict_remaining_rise, is_ml_mode
 log = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")
 
+# Hard divergence cap (°F): when Kalman disagrees with the NWP panel by more
+# than this threshold, its weight drops to zero unconditionally.  This prevents
+# the PnL-killing pattern where one filter pulls μ 6-8°F away from 5 physics
+# models that agree (Atlanta, LA/Seattle regression April 2026).
+KALMAN_HARD_DIVERGENCE_CAP_F = 6.0
+
 # ─── Time-of-day heuristics ───────────────────────────────────────────────────
 # These represent expected *remaining* rise in temperature from current reading.
 # Based on typical daily temperature curves for southeastern US cities.
@@ -118,7 +124,7 @@ def compute_kalman_weight(
     spread: float,
     n_obs: int,
     peak_already_passed: bool,
-    max_weight: float = 0.45,
+    max_weight: float = 0.30,
     half_window_hours: float = 2.0,
 ) -> float:
     """Ensemble weight for the Kalman nowcast slice of mu_forecast.
@@ -130,6 +136,10 @@ def compute_kalman_weight(
     own spread, scale down sharply — a lone filter beating five physics
     models is almost always the filter missing a regime change.
 
+    Hard cap: divergence > 6°F → weight = 0 unconditionally.
+    This prevents the Atlanta regression (NWP 88-90°F vs Kalman 81°F
+    → blended ~85.7°F) from creating false edges on wrong buckets.
+
     All temperature arguments are in the same unit (°F or °C). The helper
     only uses ratios, so it is unit-agnostic.
 
@@ -137,6 +147,9 @@ def compute_kalman_weight(
     diverged. Never exceeds `max_weight`.
     """
     if n_obs < 10 or peak_hour_local is None:
+        return 0.0
+    # Hard divergence cap: 6°F+ disagreement = filter is wrong, not the NWP panel
+    if kalman_divergence > KALMAN_HARD_DIVERGENCE_CAP_F:
         return 0.0
     window_factor = max(0.0, 1.0 - abs(hour_local_fractional - peak_hour_local) / half_window_hours)
     if window_factor <= 0.0:
@@ -617,7 +630,11 @@ def compute_model(
         adaptive_high = adaptive.predicted_daily_high
         if daily_high_metar is not None:
             adaptive_high = max(adaptive_high, daily_high_metar)
-        if kalman_nowcast_active and adaptive_high is not None:
+        # Hard divergence cap: same 6°F rule as compute_kalman_weight.
+        # If the adaptive high diverges > 6°F from mu_multi_model, skip
+        # the residual blend entirely — the filter is misleading.
+        adaptive_div = abs(adaptive_high - mu_multi_model) if adaptive_high is not None else 0.0
+        if kalman_nowcast_active and adaptive_high is not None and adaptive_div <= KALMAN_HARD_DIVERGENCE_CAP_F:
             n_obs = adaptive.kalman.n_observations if adaptive.kalman else 0
             adaptive_w = min(0.10, n_obs * 0.01)  # caps at 0.10 with 10+ obs
             if hour_local >= 19:

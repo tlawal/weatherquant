@@ -279,25 +279,51 @@ async def get_reliability_diagnostics(city_id: int) -> dict:
 
 
 def remap_probability(prob: float, bins: List[ReliabilityBin]) -> float:
-    """
-    Adjust a raw model probability based on historical reliability bins.
-    Uses simple linear interpolation between bin centers.
+    """Adjust a raw model probability using isotonic regression calibration.
+
+    Isotonic regression (Gneiting & Raftery 2007) learns a monotone
+    non-parametric mapping from predicted → observed probabilities.
+    It works well with small samples and guarantees reliability
+    (calibrated predictions are monotonically related to raw ones).
+
+    Falls back to identity (no correction) when < 15 total samples.
     """
     if not bins or all(b.count == 0 for b in bins):
         return prob
-        
-    bin_idx = min(int(prob * 10), 9)
-    target_bin = bins[bin_idx]
-    
-    if target_bin.count < 5: # Need a minimum forest of samples
+
+    # Build training data from reliability bins
+    xs: List[float] = []  # predicted probabilities (bin centers)
+    ys: List[float] = []  # observed probabilities
+    ws: List[float] = []  # sample weights
+    total_samples = 0
+
+    for b in bins:
+        if b.count >= 2:  # need at least 2 samples per bin to be meaningful
+            xs.append(b.expected_prob)
+            ys.append(b.observed_prob)
+            ws.append(float(b.count))
+            total_samples += b.count
+
+    if total_samples < 15 or len(xs) < 3:
+        return prob  # insufficient data — identity pass-through
+
+    try:
+        from sklearn.isotonic import IsotonicRegression
+        ir = IsotonicRegression(
+            y_min=0.0, y_max=1.0,
+            increasing=True,
+            out_of_bounds="clip",
+        )
+        ir.fit(xs, ys, sample_weight=ws)
+
+        calibrated = float(ir.predict([prob])[0])
+
+        # Dampen the correction — blend 70% calibrated + 30% raw
+        # to avoid overfitting on limited historical data
+        dampened = 0.70 * calibrated + 0.30 * prob
+        return max(0.0, min(1.0, dampened))
+    except Exception:
+        # sklearn not available or fit failed — fall back to identity
+        log.debug("isotonic calibration failed, using raw probability", exc_info=True)
         return prob
-        
-    # Simple multiplier: if observed is 0.7 and expected is 0.9, we multiply by 0.7/0.9
-    # This is a naive 'Platt-like' scaling.
-    correction = target_bin.observed_prob / target_bin.expected_prob if target_bin.expected_prob > 0 else 1.0
-    
-    # Dampen the correction to avoid wild swings from small samples
-    weight = min(target_bin.count / 20, 1.0)
-    final_prob = (1.0 - weight) * prob + weight * (prob * correction)
-    
-    return max(0.0, min(1.0, final_prob))
+

@@ -416,6 +416,15 @@ class Position(Base):
     entry_time: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     entry_price: Mapped[Optional[float]] = mapped_column(Float)
 
+    # ── Tiered exit management ────────────────────────────────────────────────
+    # Tracks progress through 50%/25%/25% partial exit + moon-bag strategy.
+    original_qty: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    tier_1_exited: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)  # 50% at +8¢
+    tier_2_exited: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)  # 25% at +15¢
+    moon_bag_qty: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)       # 25% held to resolution
+    trailing_stop_price: Mapped[Optional[float]] = mapped_column(Float)                   # ratcheting stop
+    max_bid_seen: Mapped[Optional[float]] = mapped_column(Float)                          # high-water mark
+
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
     )
@@ -440,6 +449,26 @@ class AuditLog(Base):
     payload_json: Mapped[Optional[str]] = mapped_column(Text)
     ok: Mapped[bool] = mapped_column(Boolean, default=True)
     error_msg: Mapped[Optional[str]] = mapped_column(Text)
+
+
+class ConsensusHistory(Base):
+    """Persistent consensus bucket history for exit engine debounce.
+
+    Survives worker restarts / Railway deploys. The exit engine loads
+    the most recent rows on first run and keeps the in-memory cache in
+    sync thereafter.
+    """
+    __tablename__ = "consensus_history"
+    __table_args__ = (
+        Index("ix_consensus_event_ts", "event_id", "recorded_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    event_id: Mapped[int] = mapped_column(Integer, ForeignKey("events.id"), nullable=False)
+    bucket_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
 
 
 class ArmingState(Base):

@@ -71,6 +71,20 @@ _CITY_ALIASES: dict[str, str] = {
     "los-angeles": "la",
     "washington-dc": "dc",
     "washington-d-c": "dc",
+    # Reverse aliases (Gamma sometimes uses abbreviations)
+    "atl": "atlanta",
+    "chi": "chicago",
+    "hou": "houston",
+    "dal": "dallas",
+    "den": "denver",
+    "sea": "seattle",
+    "mia": "miami",
+    "aus": "austin",
+    # Long-form Polymarket slugs
+    "los-angeles-ca": "la",
+    "san-francisco-ca": "sf",
+    "new-york-ny": "nyc",
+    "washington-d-c-": "dc",
 }
 
 # Bucket range parsers (reused from backend/ingestion/polymarket_gamma.py patterns)
@@ -273,6 +287,9 @@ async def _lookup_metar_actual(
     """Return the observed max/min temperature (°F) for a city on a given ET date.
 
     kind: 'high' → max(temp_f), 'low' → min(temp_f).
+
+    Uses timezone-aware date windows instead of fragile substr/cast string
+    matching, ensuring correct results across DB dialects and timezones.
     """
     city = (await sess.execute(
         select(City).where(City.city_slug == city_slug)
@@ -280,22 +297,38 @@ async def _lookup_metar_actual(
     if not city:
         return None
 
-    # Date filter: ET calendar day. We approximate using the stored observed_at
-    # in UTC; this is coarse but adequate for a day-bucket match.
+    # Build timezone-aware day window for the city
+    from zoneinfo import ZoneInfo
+    city_tz_str = getattr(city, 'tz', 'America/New_York') or 'America/New_York'
+    try:
+        tz = ZoneInfo(city_tz_str)
+    except Exception:
+        tz = ZoneInfo('America/New_York')
+
+    try:
+        start_dt = datetime.strptime(date_et, '%Y-%m-%d').replace(tzinfo=tz)
+    except ValueError:
+        return None
+    from datetime import timedelta
+    end_dt = start_dt + timedelta(days=1)
+
     agg = func.max(MetarObs.temp_f) if kind == "high" else func.min(MetarObs.temp_f)
     row = (await sess.execute(
         select(agg)
         .where(MetarObs.city_id == city.id)
-        .where(func.substr(func.cast(MetarObs.observed_at, String), 1, 10) == date_et)
+        .where(MetarObs.temp_f.isnot(None))
+        .where(MetarObs.observed_at >= start_dt)
+        .where(MetarObs.observed_at < end_dt)
     )).scalar_one_or_none()
 
     if row is None:
-        # Fall back: match by daily_high_f if we stored any row for that day
+        # Fall back: check daily_high_f column
         row = (await sess.execute(
             select(MetarObs.daily_high_f)
             .where(MetarObs.city_id == city.id)
-            .where(func.substr(func.cast(MetarObs.observed_at, String), 1, 10) == date_et)
             .where(MetarObs.daily_high_f.isnot(None))
+            .where(MetarObs.observed_at >= start_dt)
+            .where(MetarObs.observed_at < end_dt)
             .limit(1)
         )).scalar_one_or_none()
 
@@ -730,6 +763,21 @@ async def fetch_resolved_events() -> list[dict]:
 
 # ─── Trade simulation ────────────────────────────────────────────────────────
 
+def _estimate_slippage(shares: float, ask_depth: float, base_bps: float = 50.0) -> float:
+    """Linear market impact model for thin Polymarket orderbooks.
+
+    Returns fractional price impact (0.01 = 1% slippage).
+    For $2k-notional buckets, even a $1 order can move price 2-5%.
+
+    Model: slippage = (shares / depth) * base_bps / 10000
+    Capped at 5% to prevent extreme estimates on zero-depth books.
+    """
+    if ask_depth <= 0:
+        return 0.03  # 3% default for unknown depth
+    impact = (shares / ask_depth) * (base_bps / 10000.0)
+    return min(impact, 0.05)  # cap at 5%
+
+
 def simulate_entry(
     event_data: dict,
     bucket_idx: int,
@@ -769,6 +817,9 @@ def simulate_entry(
     if spread is not None and spread > params.max_spread:
         return None
 
+    # Apply slippage model: linear market impact for thin Polymarket books
+    slippage_pct = _estimate_slippage(1.0, ask_depth)  # estimate for 1 share first
+
     # Check position limits
     event_key = event_data["event_id"]
     if portfolio.positions_per_event[event_key] >= params.max_positions_per_event:
@@ -790,7 +841,12 @@ def simulate_entry(
     final_size = min(kelly_size, position_cap, effective_bankroll)
 
     shares = math.floor((final_size / entry_price) * 100) / 100
-    cost = round(shares * entry_price, 4)
+
+    # Refine slippage with actual share count
+    slippage_pct = _estimate_slippage(shares, ask_depth)
+    entry_price_slipped = entry_price * (1.0 + slippage_pct)
+
+    cost = round(shares * entry_price_slipped, 4)
     if cost < 0.50:  # minimum trade size
         return None
 
@@ -807,7 +863,7 @@ def simulate_entry(
         mkt_prob=round(mkt_prob, 4),
         true_edge=round(true_edge, 4),
         side="buy_yes",
-        entry_price=round(entry_price, 4),
+        entry_price=round(entry_price_slipped, 4),
         shares=shares,
         cost=cost,
     )

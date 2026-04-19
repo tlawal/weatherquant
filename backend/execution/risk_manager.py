@@ -20,6 +20,21 @@ from backend.strategy.kelly import calculate_kelly_fraction, calculate_expected_
 log = logging.getLogger(__name__)
 
 
+def estimate_slippage(shares: float, ask_depth: float, base_bps: float = 50.0) -> float:
+    """Linear market impact model for thin Polymarket orderbooks.
+
+    Returns fractional price impact (0.01 = 1% slippage).
+    For $2k-notional buckets, even a $1 order can move price 2-5%.
+
+    Model: slippage = (shares / depth) * base_bps / 10000
+    Capped at 5% to prevent extreme estimates on zero-depth books.
+    """
+    if ask_depth <= 0:
+        return 0.03  # 3% default for unknown depth
+    impact = (shares / ask_depth) * (base_bps / 10000.0)
+    return min(impact, 0.05)  # cap at 5%
+
+
 @dataclass
 class SizingResult:
     size: float
@@ -90,8 +105,12 @@ def compute_size(
     final_size = min(kelly_size, position_cap, liquidity_cap, bankroll_remaining)
 
     # Convert from $ to shares at limit_price
-    shares = math.floor((final_size / limit_price) * 100) / 100  # floor to 2dp
-    dollar_cost = round(shares * limit_price, 2)
+    shares = math.floor((final_size / limit_price) * 100) / 100
+
+    # Apply slippage estimate — deduct expected impact cost
+    slippage_pct = estimate_slippage(shares, ask_depth)
+    effective_price = limit_price * (1.0 + slippage_pct)
+    dollar_cost = round(shares * effective_price, 2)
 
     if dollar_cost < 1.00:
         return _rejected(
@@ -101,9 +120,9 @@ def compute_size(
 
     log.info(
         "sizing: kelly_f=%.4f kelly_size=$%.2f position_cap=$%.2f "
-        "liquidity_cap=$%.2f final_size=$%.2f (%.2f shares @ ${:.4f})",
+        "liquidity_cap=$%.2f slippage=%.2f%% final_size=$%.2f (%.2f shares @ ${:.4f})",
         kelly_f, kelly_size, position_cap, liquidity_cap,
-        dollar_cost, shares, limit_price,
+        slippage_pct * 100, dollar_cost, shares, limit_price,
     )
 
     return SizingResult(

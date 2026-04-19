@@ -147,20 +147,46 @@ async def run_all_gates(
             f"-${Config.MAX_DAILY_LOSS:.2f} limit"
         )
 
+    # ── Gate: Portfolio-level risk (drawdown, cluster, strategy) ──────────────
+    from backend.execution.portfolio_risk import check_portfolio_risk
+    portfolio_failures = await check_portfolio_risk(
+        city_slug=signal.city_slug,
+        bankroll=Config.BANKROLL_CAP,
+        strategy=strategy,
+    )
+    failures.extend(portfolio_failures)
+
     # ── Gate: Max open positions per event ───────────────────────────────────
+    from backend.storage.models import Bucket as BucketModel
     async with get_session() as sess:
         all_positions = await get_all_positions(sess)
 
-    event_positions = [
-        p for p in all_positions
-        # This check is simplified — in production we'd join through bucket→event
-        # For now we count globally across all events
-    ]
-    # Count positions linked to this specific event
-    if len(all_positions) >= Config.MAX_POSITIONS_PER_EVENT * 3:  # global safety
+    # Count positions for THIS specific event by joining through bucket→event
+    event_id = event.id if event else None
+    if event_id is not None:
+        event_bucket_ids = set()
+        async with get_session() as sess:
+            from sqlalchemy import select
+            rows = (await sess.execute(
+                select(BucketModel.id).where(BucketModel.event_id == event_id)
+            )).scalars().all()
+            event_bucket_ids = set(rows)
+        event_position_count = sum(
+            1 for p in all_positions
+            if p.net_qty > 0 and p.bucket_id in event_bucket_ids
+        )
+        if event_position_count >= Config.MAX_POSITIONS_PER_EVENT:
+            failures.append(
+                f"GATE_MAX_POSITIONS: event {event_id} has {event_position_count} "
+                f"positions >= max {Config.MAX_POSITIONS_PER_EVENT}"
+            )
+
+    # Global safety cap (across all events)
+    total_open = sum(1 for p in all_positions if p.net_qty > 0)
+    if total_open >= Config.MAX_POSITIONS_PER_EVENT * 6:
         failures.append(
-            f"GATE_MAX_POSITIONS: total open positions={len(all_positions)} "
-            f"excessive, review required"
+            f"GATE_MAX_POSITIONS_GLOBAL: total open positions={total_open} "
+            f"excessive (>= {Config.MAX_POSITIONS_PER_EVENT * 6}), review required"
         )
 
     # Fetch city object for timezone and date alignment gates
