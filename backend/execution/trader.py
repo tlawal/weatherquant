@@ -115,7 +115,7 @@ async def execute_signal(
             return result
 
     # ── Run all safety gates ──────────────────────────────────────────────────
-    gate_result = await run_all_gates(signal, event, city.id, strategy=strategy)
+    gate_result = await run_all_gates(signal, event, city.id, strategy=strategy, side=side)
 
     # For manual trades, filter out bot-only gates that don't apply to
     # human-initiated trades. Keep critical safety gates (daily loss, max positions).
