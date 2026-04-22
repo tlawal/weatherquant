@@ -945,6 +945,150 @@ async def sweep_all(actor: str = Depends(require_admin)):
     return {"ok": proc.returncode == 0, "logs": stdout.decode(), "error": stderr.decode()}
 
 
+async def _sync_api_positions_to_db(api_positions: list[dict], session):
+    """Sync Polymarket API positions to database for auto-redeem support.
+    
+    Creates Event, Bucket, and Position records for API positions not in DB.
+    Uses fuzzy city matching and Gamma API for bucket ordering.
+    """
+    import aiohttp
+    import re
+    from datetime import datetime
+    from backend.storage.models import City, Event, Bucket, Position
+    from backend.storage.repos import get_city_by_slug, upsert_event, upsert_bucket
+    
+    # Get all cities for fuzzy matching
+    from sqlalchemy import select
+    result = await session.execute(select(City))
+    all_cities = list(result.scalars().all())
+    
+    # City name normalization map
+    city_name_map = {}
+    for city in all_cities:
+        # Map display name and variants
+        name_lower = city.display_name.lower()
+        city_name_map[name_lower] = city
+        city_name_map[city.city_slug.lower()] = city
+        # Handle common variants
+        if "new york" in name_lower:
+            city_name_map["nyc"] = city
+            city_name_map["new york city"] = city
+    
+    # Track which condition_ids exist in DB
+    result = await session.execute(select(Bucket.condition_id))
+    existing_cids = {row[0] for row in result.all() if row[0]}
+    
+    for pos in api_positions:
+        cid = pos.get("conditionId", "")
+        if not cid or cid in existing_cids:
+            continue
+        
+        size = float(pos.get("size", 0))
+        if size <= 0:
+            continue
+        
+        # Parse title: "Will the highest temperature in Atlanta be between 78-79°F on April 21?"
+        title = pos.get("title", "")
+        
+        # Extract city name
+        city_match = re.search(r"temperature in ([A-Za-z\s]+) (?:be|was|is)", title, re.IGNORECASE)
+        if not city_match:
+            log.warning("sync_api_positions: Could not parse city from title: %s", title)
+            continue
+        
+        city_name = city_match.group(1).strip().lower()
+        
+        # Find matching city
+        city = None
+        for name, c in city_name_map.items():
+            if city_name in name or name in city_name:
+                city = c
+                break
+        
+        if not city:
+            log.warning("sync_api_positions: No matching city for '%s' in title: %s", city_name, title)
+            continue
+        
+        # Parse date from endDate (e.g., "2026-04-21")
+        date_et = pos.get("endDate", "")
+        if not date_et:
+            log.warning("sync_api_positions: No endDate for position: %s", title)
+            continue
+        
+        # Parse temperature range from title
+        temp_match = re.search(r"(\d+)-(\d+)[°\s]*F", title)
+        if temp_match:
+            low_f = float(temp_match.group(1))
+            high_f = float(temp_match.group(2))
+        else:
+            low_f = high_f = None
+        
+        # Fetch Gamma API to get bucket index
+        gamma_event_id = pos.get("eventId")
+        bucket_idx = 0  # Default
+        
+        if gamma_event_id:
+            try:
+                timeout = aiohttp.ClientTimeout(total=5)
+                async with aiohttp.ClientSession(timeout=timeout) as http:
+                    url = f"https://gamma-api.polymarket.com/events/{gamma_event_id}"
+                    async with http.get(url) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            if isinstance(data, list) and len(data) > 0:
+                                data = data[0]
+                            markets = data.get("markets", [])
+                            for i, mkt in enumerate(markets):
+                                if mkt.get("conditionId") == cid:
+                                    bucket_idx = i
+                                    break
+            except Exception as e:
+                log.warning("sync_api_positions: Failed to fetch Gamma API for event %s: %s", gamma_event_id, e)
+        
+        try:
+            # Create or update Event
+            event = await upsert_event(
+                session, city.id, date_et,
+                gamma_event_id=str(gamma_event_id) if gamma_event_id else None,
+                gamma_slug=pos.get("eventSlug"),
+                status="pending",
+            )
+            await session.refresh(event)
+            
+            # Create Bucket
+            bucket = await upsert_bucket(
+                session, event.id, bucket_idx,
+                label=f"{pos.get('outcome', 'YES')} — {title}",
+                condition_id=cid,
+                low_f=low_f,
+                high_f=high_f,
+            )
+            await session.refresh(bucket)
+            
+            # Create Position
+            avg_price = float(pos.get("avgPrice", 0))
+            cur_price = float(pos.get("curPrice", 0))
+            
+            position = Position(
+                bucket_id=bucket.id,
+                side="yes",
+                net_qty=size,
+                avg_cost=avg_price,
+                last_mkt_price=cur_price if cur_price > 0 else avg_price,
+                entry_type="MANUAL",
+                entry_time=datetime.now(timezone.utc),
+                entry_price=avg_price,
+            )
+            session.add(position)
+            await session.commit()
+            
+            log.info("sync_api_positions: Created DB records for %s (cid=%s, qty=%s)", title, cid[:20], size)
+            
+        except Exception as e:
+            log.warning("sync_api_positions: Failed to create records for %s: %s", title, e)
+            await session.rollback()
+
+
 @router.get("/api/redemptions")
 async def redemptions_list():
     """All events that have positions, with resolution and on-chain status."""
@@ -1038,6 +1182,10 @@ async def redemptions_list():
                             cid = pos.get("conditionId", "")
                             if cid:
                                 cid_to_api_price[cid] = float(pos.get("curPrice", 0))
+                
+                # Sync API positions to database for auto-redeem support
+                async with get_session() as sess:
+                    await _sync_api_positions_to_db(api_positions_list, sess)
         except Exception:
             pass
 
