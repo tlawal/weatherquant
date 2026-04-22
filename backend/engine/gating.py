@@ -212,21 +212,9 @@ async def run_all_gates(
                 f"already exceeds bucket ceiling {signal.high_f:.1f}"
             )
 
-    # ── Gate: Date alignment ──────────────────────────────────────────────────
-    # Verify event's date_et matches the city's active date (with 8 PM rollover).
-    # Prevents trading stale events when the date rolls over.
-    if city_obj:
-        from backend.tz_utils import city_local_now, city_local_tomorrow
-        _now_local = city_local_now(city_obj)
-        if _now_local.hour >= 20:
-            expected_date = city_local_tomorrow(city_obj)
-        else:
-            expected_date = city_local_date(city_obj)
-        if event and event.date_et != expected_date:
-            failures.append(
-                f"GATE_DATE_ALIGNMENT: event.date_et={event.date_et} != "
-                f"active_date={expected_date} (tz={getattr(city_obj, 'tz', 'unknown')})"
-            )
+    # Note: GATE_DATE_ALIGNMENT removed - with 3-day horizon and explicit date
+    # selection, users intentionally trade any available date. The gate was
+    # protecting against stale events from 8PM rollover, which no longer exists.
 
     if failures:
         log.warning(

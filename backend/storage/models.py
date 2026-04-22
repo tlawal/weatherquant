@@ -65,6 +65,9 @@ class City(Base):
     market_context_snapshots: Mapped[list["MarketContextSnapshot"]] = relationship(
         "MarketContextSnapshot", back_populates="city_ref", cascade="all, delete-orphan"
     )
+    source_lead_time_skills: Mapped[list["SourceLeadTimeSkill"]] = relationship(
+        "SourceLeadTimeSkill", back_populates="city_ref", cascade="all, delete-orphan"
+    )
 
 
 # ─── Events & Buckets ─────────────────────────────────────────────────────────
@@ -234,6 +237,9 @@ class ForecastObs(Base):
     source: Mapped[str] = mapped_column(String(16), nullable=False)
     date_et: Mapped[str] = mapped_column(String(10), nullable=False)  # YYYY-MM-DD
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    # Model initialization time (when the forecast model run started)
+    # Critical for lead-time skill analysis: lead_time = settlement_time - model_run_at
+    model_run_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     high_f: Mapped[Optional[float]] = mapped_column(Float)
     raw_payload_hash: Mapped[Optional[str]] = mapped_column(String(64))
     raw_json: Mapped[Optional[str]] = mapped_column(Text)
@@ -282,6 +288,38 @@ class ModelSnapshot(Base):
     forecast_quality: Mapped[str] = mapped_column(String(16), default="ok")
 
     event: Mapped[Event] = relationship("Event", back_populates="model_snapshots")
+
+
+class SourceLeadTimeSkill(Base):
+    """Per-source skill metrics conditional on lead time (hours before settlement).
+
+    Computed periodically by joining ForecastObs (with model_run_at) to Event
+    settlement highs. Enables dynamic ensemble weighting based on proven skill
+    at specific lead-time buckets.
+    """
+    __tablename__ = "source_lead_time_skills"
+    __table_args__ = (
+        UniqueConstraint("city_id", "source", "lead_time_bucket_hours", name="uq_source_skill_city_lead"),
+        Index("ix_source_skill_city_source", "city_id", "source"),
+        Index("ix_source_skill_lead", "lead_time_bucket_hours"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    city_id: Mapped[int] = mapped_column(Integer, ForeignKey("cities.id"), nullable=False)
+    # "nws" | "wu_hourly" | "wu_history" | "hrrr" | "nbm" | "ecmwf_ifs" | "open_meteo"
+    source: Mapped[str] = mapped_column(String(16), nullable=False)
+    # Lead time bucket in hours: 72, 48, 36, 24, 18, 12, 6, 3, 1, 0
+    lead_time_bucket_hours: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Mean Absolute Error (°F) for this source at this lead time
+    mae_f: Mapped[Optional[float]] = mapped_column(Float)
+    # Bias (mean forecast - observed), positive = overforecast
+    bias_f: Mapped[Optional[float]] = mapped_column(Float)
+    # Number of observations in this bucket
+    n_obs: Mapped[int] = mapped_column(Integer, default=0)
+    # When these stats were last computed
+    computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    city_ref: Mapped[City] = relationship("City", back_populates="source_lead_time_skills")
 
 
 class MarketContextSnapshot(Base):

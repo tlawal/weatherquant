@@ -15,9 +15,63 @@ import asyncio
 import hashlib
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
+
+
+def _compute_model_run_at(source_key: str, fetch_time: datetime) -> Optional[datetime]:
+    """Compute the most recent model initialization time for scheduled NWP models.
+
+    Uses known model schedules to infer which model run produced the forecast
+    we are fetching. Critical for lead-time skill analysis.
+
+    Schedules:
+      - hrrr:   hourly runs (every hour at :00)
+      - nbm:    01z, 07z, 13z, 19z  (4x/day)
+      - ecmwf_ifs: 00z, 12z  (2x/day, 6-8h dissemination)
+      - gfs:    00z, 06z, 12z, 18z  (4x/day)
+      - open_meteo: use fetch_time (no explicit model run time exposed)
+    """
+    if source_key == "open_meteo":
+        return None  # Open-Meteo general doesn't expose model init time
+
+    # All schedules are in UTC
+    utc = fetch_time.astimezone(timezone.utc)
+    hour = utc.hour
+    minute = utc.minute
+
+    if source_key == "hrrr":
+        # HRRR runs every hour; use the start of the current hour
+        return utc.replace(minute=0, second=0, microsecond=0)
+
+    elif source_key == "nbm":
+        # NBM runs at 01z, 07z, 13z, 19z
+        run_hours = [1, 7, 13, 19]
+        # Find most recent run hour
+        recent_run = max((h for h in run_hours if h <= hour), default=19)
+        return utc.replace(hour=recent_run, minute=0, second=0, microsecond=0)
+
+    elif source_key == "ecmwf_ifs":
+        # ECMWF IFS runs at 00z, 12z
+        run_hours = [0, 12]
+        recent_run = max((h for h in run_hours if h <= hour), default=12)
+        # If we're before the first run of the day, it's yesterday's 12z run
+        if hour < 0:  # Shouldn't happen with max() logic, but explicit
+            recent_run = 12
+            return (utc - timedelta(days=1)).replace(hour=recent_run, minute=0, second=0, microsecond=0)
+        return utc.replace(hour=recent_run, minute=0, second=0, microsecond=0)
+
+    elif source_key == "gfs":
+        # GFS runs at 00z, 06z, 12z, 18z
+        run_hours = [0, 6, 12, 18]
+        recent_run = max((h for h in run_hours if h <= hour), default=18)
+        if hour < 0:
+            recent_run = 18
+            return (utc - timedelta(days=1)).replace(hour=recent_run, minute=0, second=0, microsecond=0)
+        return utc.replace(hour=recent_run, minute=0, second=0, microsecond=0)
+
+    return None
 
 import aiohttp
 
@@ -78,6 +132,13 @@ async def fetch_nws_all() -> None:
                 log.error("nws: %s date=%s failed: %s", city.city_slug, active_date, e)
                 high_f = None
 
+            # NWS provides updateTime in response properties; extract for model_run_at
+            model_run_at = None
+            if high_f is not None:
+                # Default: NWS forecasts typically updated every hour, use current hour as proxy
+                now_utc = datetime.now(timezone.utc)
+                model_run_at = now_utc.replace(minute=0, second=0, microsecond=0)
+
             async with get_session() as sess:
                 raw = json.dumps({"source": "nws", "high_f": high_f})
                 await insert_forecast_obs(
@@ -85,6 +146,7 @@ async def fetch_nws_all() -> None:
                     city_id=city.id,
                     source="nws",
                     date_et=active_date,
+                    model_run_at=model_run_at,
                     high_f=high_f,
                     raw_payload_hash=hashlib.md5(raw.encode()).hexdigest(),
                     raw_json=raw,
@@ -119,6 +181,7 @@ async def fetch_open_meteo_all() -> None:
                     city_id=city.id,
                     source="open_meteo",
                     date_et=active_date,
+                    model_run_at=None,  # Open-Meteo general doesn't expose model init time
                     high_f=high_f,
                     raw_payload_hash=hashlib.md5(raw.encode()).hexdigest(),
                     raw_json=raw,
@@ -205,16 +268,23 @@ async def fetch_open_meteo_models_all() -> None:
                 except Exception as e:
                     log.error("om-%s: %s date=%s failed: %s", source_key, city.city_slug, active_date, e)
 
+                # Compute model initialization time for NWP sources
+                model_run_at = None
+                if high_f is not None:
+                    model_run_at = _compute_model_run_at(source_key, datetime.now(timezone.utc))
+
                 async with get_session() as sess:
                     raw = json.dumps({
                         "source": source_key, "model": om_model,
                         "high_f": high_f, "hourly": hourly_data,
+                        "model_run_at": model_run_at.isoformat() if model_run_at else None,
                     })
                     await insert_forecast_obs(
                         sess,
                         city_id=city.id,
                         source=source_key,
                         date_et=active_date,
+                        model_run_at=model_run_at,
                         high_f=high_f,
                         raw_payload_hash=hashlib.md5(raw.encode()).hexdigest(),
                         raw_json=raw,
@@ -494,6 +564,7 @@ async def _scrape_wu_city(city: City, date_et: str) -> None:
                 city_id=city.id,
                 source="wu_hourly",
                 date_et=date_et,
+                model_run_at=None,  # WU doesn't expose model initialization time
                 high_f=hourly_peak,
                 raw_payload_hash=hashlib.md5(raw.encode()).hexdigest(),
                 raw_json=raw,
@@ -510,6 +581,7 @@ async def _scrape_wu_city(city: City, date_et: str) -> None:
                     city_id=city.id,
                     source="wu_history",
                     date_et=date_et,
+                    model_run_at=None,  # WU history is actual observations, not model forecasts
                     high_f=history_high,
                     raw_payload_hash=hashlib.md5(raw.encode()).hexdigest(),
                     raw_json=raw,

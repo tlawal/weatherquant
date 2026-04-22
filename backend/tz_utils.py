@@ -35,13 +35,19 @@ def city_local_tomorrow(city) -> str:
     return (datetime.now(tz) + timedelta(days=1)).strftime("%Y-%m-%d")
 
 
-def active_dates_for_city(city) -> list[str]:
-    """Return [today, tomorrow] in the city's local timezone.
+def city_local_day_after_tomorrow(city) -> str:
+    """Return day-after-tomorrow's YYYY-MM-DD in the city's local timezone."""
+    tz = ZoneInfo(city.tz) if hasattr(city, "tz") and city.tz else ET
+    return (datetime.now(tz) + timedelta(days=2)).strftime("%Y-%m-%d")
 
-    Used by ingestion and modeling jobs so both dates are always populated.
-    Execution/trading paths use their own 8 PM rollover logic instead.
+
+def active_dates_for_city(city) -> list[str]:
+    """Return [today, tomorrow, day+2] in the city's local timezone.
+
+    Used by ingestion and modeling jobs so 3 days are always populated.
+    Users explicitly select dates via UI; 8 PM rollover logic removed.
     """
-    return [city_local_date(city), city_local_tomorrow(city)]
+    return [city_local_date(city), city_local_tomorrow(city), city_local_day_after_tomorrow(city)]
 
 
 def et_today() -> str:

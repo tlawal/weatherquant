@@ -1778,9 +1778,8 @@ async def get_orderbook(city_slug: str, bucket_idx: int, date_et: str | None = N
         if date_et:
             active_date = date_et
         else:
-            from backend.tz_utils import city_local_now, city_local_tomorrow
-            now_local = city_local_now(city)
-            active_date = city_local_tomorrow(city) if now_local.hour >= 20 else city_local_date(city)
+            # Default to today; date selection now handled via 3-day dropdown
+            active_date = city_local_date(city)
         event = await get_event(sess, city.id, active_date)
         if not event:
             raise HTTPException(status_code=404, detail=f"No event for this city on {active_date}")
@@ -1911,12 +1910,8 @@ async def manual_trade(
                 )
                 raise HTTPException(status_code=400, detail=f"Bucket id={body.bucket_id} does not belong to city {body.city_slug}")
         else:
-            # Legacy path: resolve by city_slug + bucket_idx + 8 PM rollover
-            now_local = city_local_now(city)
-            if now_local.hour >= 20:
-                active_date = city_local_tomorrow(city)
-            else:
-                active_date = city_local_date(city)
+            # Legacy path: resolve by city_slug + bucket_idx (default to today)
+            active_date = city_local_date(city)
 
             event = await get_event(sess, city.id, active_date)
             if not event:

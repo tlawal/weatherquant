@@ -36,12 +36,9 @@
       <span class="text-[10px] uppercase tracking-widest font-bold" style="color:var(--text-muted)">Event Date</span>
       <select onchange="window.location.href='/city/{{ city.city_slug }}?date=' + this.value"
               class="w-full text-xs mono px-2 py-1 rounded bg-transparent border border-white/10 hover:border-cyan-500/50 outline-none transition-colors cursor-pointer sm:w-auto">
-        {% for d in available_dates %}
-        <option value="{{ d }}" {% if d == today_et %}selected{% endif %} style="background:var(--bg-card)">{{ d }}</option>
-        {% endfor %}
-        {% if city_tomorrow and city_tomorrow not in available_dates %}
-        <option value="{{ city_tomorrow }}" style="background:var(--bg-card)">{{ city_tomorrow }} (Tomorrow)</option>
-        {% endif %}
+        <option value="{{ real_today_et }}" {% if real_today_et == today_et %}selected{% endif %} style="background:var(--bg-card)">{{ real_today_et }} (Today)</option>
+        <option value="{{ city_tomorrow }}" {% if city_tomorrow == today_et %}selected{% endif %} style="background:var(--bg-card)">{{ city_tomorrow }} (Tomorrow)</option>
+        <option value="{{ city_day_after_tomorrow }}" {% if city_day_after_tomorrow == today_et %}selected{% endif %} style="background:var(--bg-card)">{{ city_day_after_tomorrow }} (+2 Days)</option>
       </select>
       <span class="text-[9px] mono opacity-40">{{ city_tz }}</span>
     </div>
@@ -408,7 +405,7 @@
         <span>Distribution Model Mean</span>
       </div>
       <div class="space-y-1.5 opacity-90">
-        <p class="py-1 italic mb-2">Projected true daily high from a weighted ensemble of 4 forecast sources (NWS, WU Hourly, HRRR, NCEP NBM) blended with live METAR observations via time-of-day weighting. Uncertainty (sigma) adjusts dynamically for cloud cover, humidity, wind, pressure, and precipitation. A Kalman filter + regression adaptive engine refines the projection as observations accumulate.</p>
+        <p class="py-1 italic mb-2">Projected true daily high from a weighted ensemble of 5 forecast sources (NWS, WU Hourly, HRRR, NCEP NBM, ECMWF IFS) blended with live METAR observations via time-of-day weighting. Uncertainty (sigma) adjusts dynamically for cloud cover, humidity, wind, pressure, and precipitation. A Kalman filter + regression adaptive engine refines the projection as observations accumulate.</p>
         <div class="flex justify-between"><span style="color:var(--text-muted)">Sigma Spread</span><span class="mono">{% if model and model.sigma %}{{ "%.2f"|format(model.sigma) }}{% else %}—{% endif %}</span></div>
         <div class="flex justify-between"><span style="color:var(--text-muted)">Est. Peak Timing</span><span class="mono">{% if adaptive_info and adaptive_info.composite_peak_timing %}{{ adaptive_info.composite_peak_timing }}{% elif avg_peak_timing %}{{ avg_peak_timing }}{% else %}—{% endif %}</span></div>
         {% if adaptive_info and adaptive_info.peak_timing_source %}

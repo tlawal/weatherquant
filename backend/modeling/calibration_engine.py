@@ -327,3 +327,163 @@ def remap_probability(prob: float, bins: List[ReliabilityBin]) -> float:
         log.debug("isotonic calibration failed, using raw probability", exc_info=True)
         return prob
 
+
+# ─── Lead-Time Skill Analysis ─────────────────────────────────────────────────
+
+_LEAD_TIME_BUCKETS = [72, 48, 36, 24, 18, 12, 6, 3, 1, 0]
+
+
+def _bucket_lead_time(hours: float) -> int:
+    """Round lead time to the nearest bucket."""
+    for bucket in _LEAD_TIME_BUCKETS:
+        if hours >= bucket:
+            return bucket
+    return 0
+
+
+async def compute_source_lead_time_skills(
+    city_id: int,
+    days_back: int = 90,
+    min_obs_per_bucket: int = 5,
+) -> dict:
+    """Compute MAE and bias per forecast source at each lead-time bucket.
+
+    Joins ForecastObs (with model_run_at) to resolved Event settlement highs.
+    Lead time = hours between model_run_at and the end of the event day (23:59:59
+    local time, approximated as midnight ET + timezone offset).
+
+    Returns a dict keyed by (source, lead_time_bucket) with {mae, bias, n}.
+    """
+    from backend.storage.models import SourceLeadTimeSkill
+    from backend.storage.repos import get_daily_high_metar
+
+    today_et = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days_back)).strftime("%Y-%m-%d")
+
+    async with get_session() as sess:
+        # Get resolved events for this city in the lookback window
+        event_stmt = (
+            select(Event)
+            .where(
+                Event.city_id == city_id,
+                Event.date_et < today_et,
+                Event.date_et >= cutoff,
+                Event.winning_bucket_idx.isnot(None),
+            )
+        )
+        events = (await sess.execute(event_stmt)).scalars().all()
+
+        if not events:
+            log.info("lead_time_skill: no resolved events for city_id=%s in last %d days", city_id, days_back)
+            return {}
+
+        # Collect forecast obs for these events that have model_run_at
+        results: dict = {}
+        for event in events:
+            # Settlement high: try MetarObs first, then wu_history
+            obs_high = await get_daily_high_metar(sess, city_id, event.date_et)
+            if obs_high is None:
+                # Fallback to wu_history
+                wu_stmt = (
+                    select(ForecastObs)
+                    .where(
+                        ForecastObs.city_id == city_id,
+                        ForecastObs.source == "wu_history",
+                        ForecastObs.date_et == event.date_et,
+                        ForecastObs.high_f.isnot(None),
+                    )
+                    .order_by(desc(ForecastObs.fetched_at))
+                )
+                wu_rec = (await sess.execute(wu_stmt)).scalars().first()
+                obs_high = wu_rec.high_f if wu_rec else None
+
+            if obs_high is None:
+                continue
+
+            # Get all forecast obs with model_run_at for this event
+            fc_stmt = (
+                select(ForecastObs)
+                .where(
+                    ForecastObs.city_id == city_id,
+                    ForecastObs.date_et == event.date_et,
+                    ForecastObs.model_run_at.isnot(None),
+                    ForecastObs.high_f.isnot(None),
+                )
+            )
+            forecasts = (await sess.execute(fc_stmt)).scalars().all()
+
+            for fc in forecasts:
+                # Approximate event end time as midnight ET of date_et
+                event_end = datetime.strptime(event.date_et, "%Y-%m-%d").replace(
+                    hour=23, minute=59, second=59, tzinfo=ZoneInfo("America/New_York")
+                )
+                # Ensure model_run_at has timezone info
+                model_run = fc.model_run_at
+                if model_run.tzinfo is None:
+                    model_run = model_run.replace(tzinfo=timezone.utc)
+
+                lead_hours = (event_end - model_run).total_seconds() / 3600
+                if lead_hours < -1:  # Sanity check: model run shouldn't be after event end
+                    continue
+                lead_hours = max(0, lead_hours)
+
+                bucket = _bucket_lead_time(lead_hours)
+                key = (fc.source, bucket)
+
+                if key not in results:
+                    results[key] = {"errors": [], "n": 0}
+
+                error = fc.high_f - obs_high
+                results[key]["errors"].append(error)
+                results[key]["n"] += 1
+
+        # Compute MAE and bias per bucket
+        skills = {}
+        for (source, bucket), data in results.items():
+            if data["n"] < min_obs_per_bucket:
+                continue
+            errors = data["errors"]
+            mae = sum(abs(e) for e in errors) / len(errors)
+            bias = sum(errors) / len(errors)
+            skills[(source, bucket)] = {
+                "source": source,
+                "lead_time_bucket_hours": bucket,
+                "mae_f": round(mae, 2),
+                "bias_f": round(bias, 2),
+                "n_obs": data["n"],
+            }
+
+            # Upsert to database
+            existing = await sess.execute(
+                select(SourceLeadTimeSkill).where(
+                    SourceLeadTimeSkill.city_id == city_id,
+                    SourceLeadTimeSkill.source == source,
+                    SourceLeadTimeSkill.lead_time_bucket_hours == bucket,
+                )
+            )
+            existing = existing.scalar_one_or_none()
+
+            if existing:
+                existing.mae_f = round(mae, 2)
+                existing.bias_f = round(bias, 2)
+                existing.n_obs = data["n"]
+                existing.computed_at = datetime.now(timezone.utc)
+            else:
+                skill = SourceLeadTimeSkill(
+                    city_id=city_id,
+                    source=source,
+                    lead_time_bucket_hours=bucket,
+                    mae_f=round(mae, 2),
+                    bias_f=round(bias, 2),
+                    n_obs=data["n"],
+                )
+                sess.add(skill)
+
+        await sess.commit()
+
+        log.info(
+            "lead_time_skill: city_id=%s computed %d source/bucket combos from %d events",
+            city_id, len(skills), len(events),
+        )
+        return skills
+

@@ -17,7 +17,7 @@ from fastapi.templating import Jinja2Templates
 from backend.config import Config
 from backend.city_registry import get_city_priority, CITY_REGISTRY_BY_SLUG
 from backend.market_context.service import serialize_market_context_snapshot, _resolve_realized_high_with_source
-from backend.tz_utils import city_local_date, city_local_now, city_local_tomorrow, et_today
+from backend.tz_utils import city_local_date, city_local_now, city_local_tomorrow, city_local_day_after_tomorrow, et_today
 from backend.strategy.kelly import calculate_expected_value, calculate_kelly_fraction
 from backend.modeling.calibration_engine import get_reliability_metrics, get_reliability_diagnostics
 from collections import defaultdict
@@ -436,10 +436,8 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
     et_tz = ZoneInfo("America/New_York")
     real_today_et = city_local_date(city)
 
-    # Roll over to tomorrow's market if it's past 8 PM local time
+    # Default to today; users can select tomorrow via the date dropdown (3-day horizon)
     active_date_et = real_today_et
-    if now_local.hour >= 20:
-        active_date_et = city_local_tomorrow(city)
 
     target_date_et = date if date else active_date_et
 
@@ -804,7 +802,8 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
             "city": city,
             "today_et": target_date_et,
             "real_today_et": real_today_et,
-            "city_tomorrow": city_local_tomorrow(city) if city_local_now(city).hour >= 20 else None,
+            "city_tomorrow": city_local_tomorrow(city),
+            "city_day_after_tomorrow": city_local_day_after_tomorrow(city),
             "available_dates": available_dates,
             "obs_high_f": obs_high_f,
             "avg_peak_timing": avg_peak_timing,
