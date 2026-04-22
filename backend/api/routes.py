@@ -1254,11 +1254,18 @@ async def redemptions_list():
         auto_redeem_enabled = arming.auto_redeem_enabled if arming else False
         hb = await get_heartbeat(sess, "run_exit_engine")
 
+    log.info("redemptions_list: returning %d events, addr=%s, api_positions=%d", len(rows), addr, len(api_positions_list))
+
     return {
         "events": rows,
         "auto_redeem_enabled": auto_redeem_enabled,
         "exit_engine_last_run": hb.last_run_at.isoformat() if hb and hb.last_run_at else None,
         "positions_monitored": len([r for r in rows if r["status"] == "open" and any(b["net_qty"] > 0 for b in r["buckets"])]),
+        "_debug": {
+            "addr": addr,
+            "api_positions_count": len(api_positions_list),
+            "db_events_count": len(all_events),
+        }
     }
 
 

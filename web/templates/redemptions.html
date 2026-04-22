@@ -414,6 +414,8 @@ async function loadEvents() {
 
     if (!red.events || red.events.length === 0) {
       loading.classList.add('hidden');
+      const debugInfo = red._debug ? `Debug: addr=${red._debug.addr}, api_pos=${red._debug.api_positions_count}, db_events=${red._debug.db_events_count}` : 'No debug info';
+      document.getElementById('empty').innerHTML = `NO POSITIONS DETECTED.<br/><span class="text-xs text-gray-500">${debugInfo}</span>`;
       document.getElementById('empty').classList.remove('hidden');
       return;
     }
