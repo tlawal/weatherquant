@@ -1016,6 +1016,31 @@ async def redemptions_list():
                 except Exception:
                     determined_map[cid] = None
 
+    # ── Fetch live prices from Polymarket API (for when DB snapshots are stale) ──
+    cid_to_api_price = {}
+    api_positions_list = []  # Store full list for reuse in on-chain section
+    addr = Config.FUNDER_ADDRESS
+    if not addr and Config.POLYMARKET_PRIVATE_KEY:
+        try:
+            from eth_account import Account
+            addr = Account.from_key(Config.POLYMARKET_PRIVATE_KEY).address
+        except Exception:
+            pass
+    if addr and condition_ids:
+        try:
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(timeout=timeout) as http:
+                url = f"https://data-api.polymarket.com/positions?user={addr}"
+                async with http.get(url) as resp:
+                    if resp.status == 200:
+                        api_positions_list = await resp.json()
+                        for pos in api_positions_list:
+                            cid = pos.get("conditionId", "")
+                            if cid:
+                                cid_to_api_price[cid] = float(pos.get("curPrice", 0))
+        except Exception:
+            pass
+
     # ── Bulk-fetch market snapshots & station calibrations (avoid N+1) ──
     all_bucket_ids = [b.id for evt in events for b in evt.buckets if b.condition_id]
     async with get_session() as sess:
@@ -1055,8 +1080,11 @@ async def redemptions_list():
                             "expiry_time": "19:30 Local",
                         }
 
-                # Live market prices from latest CLOB snapshot
-                live_price = mkt_snap.yes_mid if mkt_snap else (pos.last_mkt_price if pos else 0)
+                # Live market prices: prefer Polymarket API for accuracy, fall back to DB snapshot
+                api_price = cid_to_api_price.get(bucket.condition_id, 0)
+                snap_price = mkt_snap.yes_mid if mkt_snap else 0
+                # Use API price if available (>0), otherwise use snapshot, then fallback to last known
+                live_price = api_price if api_price > 0 else (snap_price if snap_price > 0 else (pos.last_mkt_price if pos else 0))
                 live_bid = mkt_snap.yes_bid if mkt_snap else 0
                 live_spread = mkt_snap.spread if mkt_snap else 0
 
@@ -1135,26 +1163,12 @@ async def redemptions_list():
             if b["condition_id"]:
                 db_condition_ids.add(b["condition_id"])
 
-    addr = Config.FUNDER_ADDRESS
-    if not addr and Config.POLYMARKET_PRIVATE_KEY:
-        try:
-            from eth_account import Account
-            addr = Account.from_key(Config.POLYMARKET_PRIVATE_KEY).address
-        except Exception:
-            pass
-
-    if addr:
+    # Use API positions list already fetched above
+    if addr and api_positions_list:
         try:
             timeout = aiohttp.ClientTimeout(total=10)
             async with aiohttp.ClientSession(timeout=timeout) as http:
-                url = f"https://data-api.polymarket.com/positions?user={addr}"
-                async with http.get(url) as resp:
-                    if resp.status == 200:
-                        api_positions = await resp.json()
-                    else:
-                        api_positions = []
-
-                for pos in api_positions:
+                for pos in api_positions_list:
                     cid = pos.get("conditionId", "")
                     if not cid or cid in db_condition_ids:
                         continue
