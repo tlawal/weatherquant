@@ -1201,6 +1201,12 @@ async def redemptions_list():
                     else:
                         status = "open"
 
+                    # Use curPrice from API as live_price if available
+                    cur_price = float(pos.get("curPrice", 0))
+                    avg_price = float(pos.get("avgPrice", 0))
+                    # Fallback chain: curPrice from API > 1.0 (winner) > avg_price
+                    live_price = cur_price if cur_price > 0 else (1.0 if pos.get("curPrice", 0) == 1 else avg_price)
+
                     rows.append({
                         "event_id": None,
                         "source": "on_chain",
@@ -1218,7 +1224,8 @@ async def redemptions_list():
                             "label": f"{pos.get('outcome', 'YES')} — {pos.get('title', '')}",
                             "condition_id": cid,
                             "net_qty": size,
-                            "avg_cost": float(pos.get("avgPrice", 0)),
+                            "avg_cost": avg_price,
+                            "live_price": live_price,
                             "is_winner": pos.get("curPrice", 0) == 1,
                             "on_chain_determined": determined,
                         }],

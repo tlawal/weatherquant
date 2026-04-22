@@ -322,8 +322,8 @@ function renderTable() {
       tbody.innerHTML += `
         <tr class="hover:bg-[rgba(255,255,255,0.02)] transition-colors">
           <td class="py-2 px-2 lg:py-3 lg:px-4 align-top">
-            <div class="font-bold text-gray-200 text-[0.8rem] truncate max-w-[150px]"><a href="/city/${evt.city_slug}" class="hover:underline">${evt.city_name || 'On-Chain'}</a></div>
-            <div class="text-[0.65rem] text-cyan-600 font-semibold mt-0.5 truncate max-w-[150px]" title="${b.label}">${b.label}</div>
+            <div class="font-bold text-gray-200 text-[0.8rem] truncate max-w-[280px]" title="${evt.city_name || 'On-Chain'}"><a href="/city/${evt.city_slug}" class="hover:underline">${evt.city_name || 'On-Chain'}</a></div>
+            <div class="text-[0.65rem] text-cyan-600 font-semibold mt-0.5 truncate max-w-[280px]" title="${b.label}">${b.label}</div>
           </td>
           <td class="py-2 px-2 lg:py-3 lg:px-4 align-top">
             <div class="text-gray-300 text-[0.75rem] font-semibold">$${b.avg_cost.toFixed(3)} at ${eTime}</div>
