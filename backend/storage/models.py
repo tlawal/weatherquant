@@ -763,7 +763,9 @@ class StationCalibration(Base):
     mae_ecmwf_f: Mapped[Optional[float]] = mapped_column(Float)       # ECMWF IFS
     mae_gfs_hrrr_f: Mapped[Optional[float]] = mapped_column(Float)    # GFS+HRRR blend
     mae_nws_f: Mapped[Optional[float]] = mapped_column(Float)         # NWS WFO official
-    winner: Mapped[Optional[str]] = mapped_column(String(10))          # "ECMWF"|"GFS_HRRR"|"NWS"|"TIE"
+    mae_wu_hourly_f: Mapped[Optional[float]] = mapped_column(Float) # Weather Underground Hourly
+    mae_nbm_f: Mapped[Optional[float]] = mapped_column(Float)        # NCEP NBM
+    winner: Mapped[Optional[str]] = mapped_column(String(10))          # "ECMWF"|"GFS_HRRR"|"NWS"|"WU_HOURLY"|"NBM"|"TIE"
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
     )

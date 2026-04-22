@@ -255,12 +255,14 @@ async def compute_station_calibration(
     best_source = min(source_mae, key=source_mae.get, default=None) if source_mae else None
     best_source_mae = source_mae.get(best_source) if best_source else None
 
-    # Per-model MAE for 3-way comparison (ECMWF vs GFS+HRRR vs NWS)
+    # Per-model MAE for 5-way comparison (ECMWF vs GFS+HRRR vs NWS vs WU vs NBM)
     mae_ecmwf = source_mae.get("ecmwf_ifs")
     mae_gfs_hrrr = source_mae.get("hrrr")     # hrrr = GFS+HRRR blend via Open-Meteo
     mae_nws = source_mae.get("nws")            # NWS WFO human-adjusted forecast
+    mae_wu_hourly = source_mae.get("wu_hourly")  # Weather Underground Hourly
+    mae_nbm = source_mae.get("nbm")              # NCEP National Blend of Models
 
-    # Determine 3-way winner (lowest MAE; TIE if within 0.05°F)
+    # Determine 5-way winner (lowest MAE; TIE if within 0.05°F)
     candidates: dict[str, float] = {}
     if mae_ecmwf is not None:
         candidates["ECMWF"] = mae_ecmwf
@@ -268,6 +270,10 @@ async def compute_station_calibration(
         candidates["GFS_HRRR"] = mae_gfs_hrrr
     if mae_nws is not None:
         candidates["NWS"] = mae_nws
+    if mae_wu_hourly is not None:
+        candidates["WU_HOURLY"] = mae_wu_hourly
+    if mae_nbm is not None:
+        candidates["NBM"] = mae_nbm
 
     winner = None
     if candidates:
@@ -300,6 +306,8 @@ async def compute_station_calibration(
         "mae_ecmwf_f": mae_ecmwf,
         "mae_gfs_hrrr_f": mae_gfs_hrrr,
         "mae_nws_f": mae_nws,
+        "mae_wu_hourly_f": mae_wu_hourly,
+        "mae_nbm_f": mae_nbm,
         "winner": winner,
     }
 

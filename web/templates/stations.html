@@ -163,6 +163,8 @@
     <button class="model-btn" :class="activeModel === 'ecmwf' && 'active'" @click="setModel('ecmwf')">ECMWF IFS</button>
     <button class="model-btn" :class="activeModel === 'gfs_hrrr' && 'active'" @click="setModel('gfs_hrrr')">GFS+HRRR</button>
     <button class="model-btn" :class="activeModel === 'nws' && 'active'" @click="setModel('nws')">NWS</button>
+    <button class="model-btn" :class="activeModel === 'wu_hourly' && 'active'" @click="setModel('wu_hourly')">WU Hourly</button>
+    <button class="model-btn" :class="activeModel === 'nbm' && 'active'" @click="setModel('nbm')">NBM</button>
   </div>
 
   <!-- Leaflet Map -->
@@ -211,6 +213,10 @@
                 @click="toggleSort('mae_gfs_hrrr_f')">MAE GFS+HRRR</th>
             <th class="px-2 py-2 text-right sort-header" :class="sortCol === 'mae_nws_f' ? (sortDir === 'asc' ? 'sort-asc' : 'sort-desc') : ''"
                 @click="toggleSort('mae_nws_f')">MAE NWS</th>
+            <th class="px-2 py-2 text-right sort-header" :class="sortCol === 'mae_wu_hourly_f' ? (sortDir === 'asc' ? 'sort-asc' : 'sort-desc') : ''"
+                @click="toggleSort('mae_wu_hourly_f')">MAE WU Hourly</th>
+            <th class="px-2 py-2 text-right sort-header" :class="sortCol === 'mae_nbm_f' ? (sortDir === 'asc' ? 'sort-asc' : 'sort-desc') : ''"
+                @click="toggleSort('mae_nbm_f')">MAE NBM</th>
             <th class="px-2 py-2 text-center sort-header" :class="sortCol === 'winner' ? (sortDir === 'asc' ? 'sort-asc' : 'sort-desc') : ''"
                 @click="toggleSort('winner')">Winner</th>
             <th class="px-2 py-2 text-right sort-header" :class="sortCol === 'bias_f' ? (sortDir === 'asc' ? 'sort-asc' : 'sort-desc') : ''"
@@ -243,6 +249,12 @@
               <td class="px-2 py-2.5 text-right mono font-bold"
                   :style="maeColor(s.mae_nws_f)"
                   x-text="fmtMae(s.mae_nws_f)"></td>
+              <td class="px-2 py-2.5 text-right mono font-bold"
+                  :style="maeColor(s.mae_wu_hourly_f)"
+                  x-text="fmtMae(s.mae_wu_hourly_f)"></td>
+              <td class="px-2 py-2.5 text-right mono font-bold"
+                  :style="maeColor(s.mae_nbm_f)"
+                  x-text="fmtMae(s.mae_nbm_f)"></td>
               <td class="px-2 py-2.5 text-center">
                 <span class="text-[10px] font-bold px-2 py-0.5 rounded-full"
                       :class="winnerBadge(s.winner)"
@@ -271,7 +283,7 @@
           </template>
           <template x-if="filteredStations.length === 0">
             <tr>
-              <td colspan="12" class="px-4 py-8 text-center" style="color:var(--text-muted)">
+              <td colspan="14" class="px-4 py-8 text-center" style="color:var(--text-muted)">
                 <span x-show="stations.length === 0 && !loading">No calibration data yet. Press REFRESH CALIBRATION NOW to compute.</span>
                 <span x-show="stations.length > 0">No stations match filter.</span>
               </td>
@@ -342,6 +354,8 @@
         if (this.activeModel === 'ecmwf') return s.mae_ecmwf_f;
         if (this.activeModel === 'gfs_hrrr') return s.mae_gfs_hrrr_f;
         if (this.activeModel === 'nws') return s.mae_nws_f;
+        if (this.activeModel === 'wu_hourly') return s.mae_wu_hourly_f;
+        if (this.activeModel === 'nbm') return s.mae_nbm_f;
         return s.mae_f;
       },
 
@@ -361,6 +375,8 @@
         if (w === 'ECMWF') return 'badge-green';
         if (w === 'NWS') return 'badge-blue';
         if (w === 'GFS_HRRR') return 'badge-orange';
+        if (w === 'WU_HOURLY') return 'badge-purple';
+        if (w === 'NBM') return 'badge-teal';
         if (w === 'TIE') return 'badge-gray';
         return 'badge-gray';
       },
@@ -406,7 +422,7 @@
       async init() {
         this.fetchDiagnostics();
         await this.fetchData();
-        this.initMap();
+        this.$nextTick(() => { this.initMap(); });
       },
 
       async fetchData() {
@@ -559,6 +575,8 @@
               <div class="tt-label">ECMWF MAE: <span class="${fmtV(s.mae_ecmwf_f) !== '—' ? (s.mae_ecmwf_f <= 1.5 ? 'tt-green' : s.mae_ecmwf_f <= 3.0 ? 'tt-amber' : 'tt-red') : ''}">${fmtV(s.mae_ecmwf_f)}</span></div>
               <div class="tt-label">GFS+HRRR MAE: <span class="${fmtV(s.mae_gfs_hrrr_f) !== '—' ? (s.mae_gfs_hrrr_f <= 1.5 ? 'tt-green' : s.mae_gfs_hrrr_f <= 3.0 ? 'tt-amber' : 'tt-red') : ''}">${fmtV(s.mae_gfs_hrrr_f)}</span></div>
               <div class="tt-label">NWS MAE: <span class="${fmtV(s.mae_nws_f) !== '—' ? (s.mae_nws_f <= 1.5 ? 'tt-green' : s.mae_nws_f <= 3.0 ? 'tt-amber' : 'tt-red') : ''}">${fmtV(s.mae_nws_f)}</span></div>
+              <div class="tt-label">WU Hourly MAE: <span class="${fmtV(s.mae_wu_hourly_f) !== '—' ? (s.mae_wu_hourly_f <= 1.5 ? 'tt-green' : s.mae_wu_hourly_f <= 3.0 ? 'tt-amber' : 'tt-red') : ''}">${fmtV(s.mae_wu_hourly_f)}</span></div>
+              <div class="tt-label">NBM MAE: <span class="${fmtV(s.mae_nbm_f) !== '—' ? (s.mae_nbm_f <= 1.5 ? 'tt-green' : s.mae_nbm_f <= 3.0 ? 'tt-amber' : 'tt-red') : ''}">${fmtV(s.mae_nbm_f)}</span></div>
               <div class="tt-label">Blended MAE: <span class="${tradeClass}">${fmtV(s.mae_f)}</span></div>
               <div class="tt-label">Bias: ${s.bias_f > 0 ? '+' : ''}${s.bias_f.toFixed(2)}°F</div>
               <div class="tt-label">Winner: <strong>${s.winner || '—'}</strong></div>

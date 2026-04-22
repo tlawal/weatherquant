@@ -2063,6 +2063,8 @@ async def list_station_calibrations():
             "mae_ecmwf_f": c.mae_ecmwf_f,
             "mae_gfs_hrrr_f": c.mae_gfs_hrrr_f,
             "mae_nws_f": c.mae_nws_f,
+            "mae_wu_hourly_f": c.mae_wu_hourly_f,
+            "mae_nbm_f": c.mae_nbm_f,
             "winner": c.winner,
             "updated_at": c.updated_at.isoformat() if c.updated_at else None,
         }
@@ -2087,7 +2089,9 @@ async def station_calibrations_csv():
         "station_id", "city_slug", "city_name", "lat", "lon",
         "mae_f", "bias_f", "rmse_f", "n_samples",
         "pct_days_traded", "tradeability",
-        "best_source", "best_source_mae", "updated_at",
+        "best_source", "best_source_mae",
+        "mae_ecmwf_f", "mae_gfs_hrrr_f", "mae_nws_f", "mae_wu_hourly_f", "mae_nbm_f", "winner",
+        "updated_at",
     ])
     for c in cals:
         writer.writerow([
@@ -2096,6 +2100,7 @@ async def station_calibrations_csv():
             c.mae_f, c.bias_f, c.rmse_f, c.n_samples,
             c.pct_days_traded, c.tradeability,
             c.best_source, c.best_source_mae,
+            c.mae_ecmwf_f, c.mae_gfs_hrrr_f, c.mae_nws_f, c.mae_wu_hourly_f, c.mae_nbm_f, c.winner,
             c.updated_at.isoformat() if c.updated_at else "",
         ])
 
@@ -2303,6 +2308,8 @@ async def get_station_calibration_detail(station_id: str):
         "mae_ecmwf_f": c.mae_ecmwf_f,
         "mae_gfs_hrrr_f": c.mae_gfs_hrrr_f,
         "mae_nws_f": c.mae_nws_f,
+        "mae_wu_hourly_f": c.mae_wu_hourly_f,
+        "mae_nbm_f": c.mae_nbm_f,
         "winner": c.winner,
         "updated_at": c.updated_at.isoformat() if c.updated_at else None,
     }

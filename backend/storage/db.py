@@ -214,10 +214,12 @@ async def init_db() -> None:
     # station_calibrations — per-source MAE breakdown
     await _run_ddl("ALTER TABLE station_calibrations ADD COLUMN source_mae_json TEXT")
     await _run_ddl("ALTER TABLE station_calibrations ADD COLUMN rmse_f FLOAT DEFAULT 0.0")
-    # station_calibrations — per-model MAE comparison (ECMWF vs GFS+HRRR vs NWS)
+    # station_calibrations — per-model MAE comparison (ECMWF vs GFS+HRRR vs NWS vs WU vs NBM)
     await _run_ddl("ALTER TABLE station_calibrations ADD COLUMN mae_ecmwf_f FLOAT")
     await _run_ddl("ALTER TABLE station_calibrations ADD COLUMN mae_gfs_hrrr_f FLOAT")
     await _run_ddl("ALTER TABLE station_calibrations ADD COLUMN mae_nws_f FLOAT")
+    await _run_ddl("ALTER TABLE station_calibrations ADD COLUMN mae_wu_hourly_f FLOAT")
+    await _run_ddl("ALTER TABLE station_calibrations ADD COLUMN mae_nbm_f FLOAT")
     await _run_ddl("ALTER TABLE station_calibrations ADD COLUMN winner VARCHAR(10)")
 
     # Step 3: seed initial data
