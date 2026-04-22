@@ -493,7 +493,27 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
              primary_fc = await get_latest_forecast(sess, city.id, "nws", target_date_et)
         else:
              primary_fc = await get_latest_forecast(sess, city.id, "open_meteo", target_date_et)
-        
+
+        # Lead-time skills for Phase 4 verification panel
+        from backend.storage.models import SourceLeadTimeSkill
+        lt_rows = (
+            await sess.execute(
+                select(SourceLeadTimeSkill)
+                .where(SourceLeadTimeSkill.city_id == city.id)
+                .order_by(SourceLeadTimeSkill.source, SourceLeadTimeSkill.lead_time_bucket_hours)
+            )
+        ).scalars().all()
+        lead_time_skills = []
+        for r in lt_rows:
+            lead_time_skills.append({
+                "source": r.source,
+                "lead_time_bucket_hours": r.lead_time_bucket_hours,
+                "mae_f": r.mae_f,
+                "bias_f": r.bias_f,
+                "n_obs": r.n_obs,
+                "computed_at": r.computed_at.isoformat() if r.computed_at else None,
+            })
+
         event = await get_event(sess, city.id, target_date_et)
         market_context_snapshot = await get_market_context_snapshot(sess, city.id, target_date_et)
 
@@ -580,6 +600,38 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt.astimezone(et_tz).strftime("%-I:%M %p ET")
+
+    def _fmt_utc(dt) -> str | None:
+        if not dt:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).strftime("%H:%M UTC")
+
+    def _model_run_age(dt) -> str | None:
+        if not dt:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        delta = datetime.now(timezone.utc) - dt
+        minutes = int(delta.total_seconds() // 60)
+        if minutes < 60:
+            return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+        hours = minutes // 60
+        if hours < 24:
+            return f"{hours} hour{'s' if hours != 1 else ''} ago"
+        days = hours // 24
+        return f"{days} day{'s' if days != 1 else ''} ago"
+
+    def _lead_time_hours(model_run_at: datetime | None) -> int | None:
+        if not model_run_at:
+            return None
+        if model_run_at.tzinfo is None:
+            model_run_at = model_run_at.replace(tzinfo=timezone.utc)
+        event_end = datetime.strptime(target_date_et, "%Y-%m-%d").replace(
+            hour=23, minute=59, second=59, tzinfo=et_tz
+        )
+        return max(0, int((event_end - model_run_at).total_seconds() // 3600))
 
     # `_format_current_temp_dual` lives at module scope (testable) — see above.
 
@@ -868,6 +920,9 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                     "high_f": primary_fc.high_f if primary_fc else None,
                     "age_s": _age(primary_fc.fetched_at if primary_fc else None),
                     "collected_at": _fmt_time_et(primary_fc.fetched_at if primary_fc else None),
+                    "model_run_at": _fmt_utc(primary_fc.model_run_at if primary_fc else None),
+                    "lead_time_hours": _lead_time_hours(primary_fc.model_run_at if primary_fc else None),
+                    "model_run_age": _model_run_age(primary_fc.model_run_at if primary_fc else None),
                     "url": f"https://api.weather.gov/gridpoints/{city.nws_office}/{city.nws_grid_x},{city.nws_grid_y}/forecast" if city.is_us else f"https://api.open-meteo.com/v1/forecast?latitude={city.lat}&longitude={city.lon}&hourly=temperature_2m&forecast_days=1",
                     "skill": source_skill.get("nws"),
                 },
@@ -877,6 +932,9 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                     "url": f"https://www.wunderground.com/hourly/{city.metar_station}/date/{target_date_et}" if city.metar_station else None,
                     "peak_hour": wu_hourly_raw.get("peak_hour"),
                     "collected_at": _fmt_time_et(wu_h.fetched_at if wu_h else None),
+                    "model_run_at": _fmt_utc(wu_h.model_run_at if wu_h else None),
+                    "lead_time_hours": _lead_time_hours(wu_h.model_run_at if wu_h else None),
+                    "model_run_age": _model_run_age(wu_h.model_run_at if wu_h else None),
                     "skill": source_skill.get("wu_hourly"),
                 },
                 "wu_history": {
@@ -885,11 +943,17 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                     "url": f"https://www.wunderground.com/history/daily/{city.metar_station}/date/{target_date_et}" if city.metar_station else None,
                     "obs_time": wu_history_raw.get("obs_time"),
                     "collected_at": _fmt_time_et(wu_history.fetched_at if wu_history else None),
+                    "model_run_at": _fmt_utc(wu_history.model_run_at if wu_history else None),
+                    "lead_time_hours": _lead_time_hours(wu_history.model_run_at if wu_history else None),
+                    "model_run_age": _model_run_age(wu_history.model_run_at if wu_history else None),
                 },
                 "hrrr": {
                     "high_f": hrrr_fc.high_f if hrrr_fc else None,
                     "age_s": _age(hrrr_fc.fetched_at if hrrr_fc else None),
                     "collected_at": _fmt_time_et(hrrr_fc.fetched_at if hrrr_fc else None),
+                    "model_run_at": _fmt_utc(hrrr_fc.model_run_at if hrrr_fc else None),
+                    "lead_time_hours": _lead_time_hours(hrrr_fc.model_run_at if hrrr_fc else None),
+                    "model_run_age": _model_run_age(hrrr_fc.model_run_at if hrrr_fc else None),
                     "url": f"https://open-meteo.com/en/docs?latitude={city.lat}&longitude={city.lon}&hourly=temperature_2m&models=gfs_hrrr&temperature_unit=fahrenheit&forecast_days=1" if city.lat else None,
                     "skill": source_skill.get("hrrr"),
                 },
@@ -897,6 +961,9 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                     "high_f": nbm_fc.high_f if nbm_fc else None,
                     "age_s": _age(nbm_fc.fetched_at if nbm_fc else None),
                     "collected_at": _fmt_time_et(nbm_fc.fetched_at if nbm_fc else None),
+                    "model_run_at": _fmt_utc(nbm_fc.model_run_at if nbm_fc else None),
+                    "lead_time_hours": _lead_time_hours(nbm_fc.model_run_at if nbm_fc else None),
+                    "model_run_age": _model_run_age(nbm_fc.model_run_at if nbm_fc else None),
                     "url": f"https://open-meteo.com/en/docs?latitude={city.lat}&longitude={city.lon}&hourly=temperature_2m&models=ncep_nbm_conus&temperature_unit=fahrenheit&forecast_days=1" if city.lat else None,
                     "skill": source_skill.get("nbm"),
                 },
@@ -904,6 +971,9 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                     "high_f": ecmwf_ifs_fc.high_f if ecmwf_ifs_fc else None,
                     "age_s": _age(ecmwf_ifs_fc.fetched_at if ecmwf_ifs_fc else None),
                     "collected_at": _fmt_time_et(ecmwf_ifs_fc.fetched_at if ecmwf_ifs_fc else None),
+                    "model_run_at": _fmt_utc(ecmwf_ifs_fc.model_run_at if ecmwf_ifs_fc else None),
+                    "lead_time_hours": _lead_time_hours(ecmwf_ifs_fc.model_run_at if ecmwf_ifs_fc else None),
+                    "model_run_age": _model_run_age(ecmwf_ifs_fc.model_run_at if ecmwf_ifs_fc else None),
                     "url": (
                         f"https://api.open-meteo.com/v1/forecast?latitude={city.lat}"
                         f"&longitude={city.lon}&hourly=temperature_2m&models=ecmwf_ifs"
@@ -943,6 +1013,7 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
             "station_cal": station_cal,
             "market_context_snapshot": serialize_market_context_snapshot(market_context_snapshot),
             "market_context_llm_ready": Config.market_context_llm_ready(),
+            "lead_time_skills": lead_time_skills,
         },
     )
 
