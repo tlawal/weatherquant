@@ -88,6 +88,10 @@ from backend.storage.repos import (
     upsert_event,
     get_event,
 )
+from backend.ingestion.model_metadata import (
+    fetch_openmeteo_metadata,
+    parse_nws_update_time,
+)
 
 log = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")
@@ -127,20 +131,27 @@ async def fetch_nws_all() -> None:
 
         for active_date in active_dates_for_city(city):
             try:
-                high_f = await _fetch_nws_high(city, active_date)
+                high_f, nws_data = await _fetch_nws_high(city, active_date)
             except Exception as e:
                 log.error("nws: %s date=%s failed: %s", city.city_slug, active_date, e)
                 high_f = None
+                nws_data = None
 
-            # NWS provides updateTime in response properties; extract for model_run_at
+            # Use NWS updateTime as authoritative model_run_at; fallback to hour-start proxy
             model_run_at = None
             if high_f is not None:
-                # Default: NWS forecasts typically updated every hour, use current hour as proxy
-                now_utc = datetime.now(timezone.utc)
-                model_run_at = now_utc.replace(minute=0, second=0, microsecond=0)
+                model_run_at = parse_nws_update_time(nws_data) if nws_data else None
+                if model_run_at is None:
+                    now_utc = datetime.now(timezone.utc)
+                    model_run_at = now_utc.replace(minute=0, second=0, microsecond=0)
 
             async with get_session() as sess:
-                raw = json.dumps({"source": "nws", "high_f": high_f})
+                raw = json.dumps({
+                    "source": "nws",
+                    "high_f": high_f,
+                    "nws_update_time": (nws_data.get("properties") or {}).get("updateTime") if nws_data else None,
+                    "nws_generated_at": (nws_data.get("properties") or {}).get("generatedAt") if nws_data else None,
+                })
                 await insert_forecast_obs(
                     sess,
                     city_id=city.id,
@@ -268,16 +279,23 @@ async def fetch_open_meteo_models_all() -> None:
                 except Exception as e:
                     log.error("om-%s: %s date=%s failed: %s", source_key, city.city_slug, active_date, e)
 
-                # Compute model initialization time for NWP sources
+                # Authoritative model initialization time from Open-Meteo metadata
+                meta = await fetch_openmeteo_metadata(source_key)
                 model_run_at = None
                 if high_f is not None:
-                    model_run_at = _compute_model_run_at(source_key, datetime.now(timezone.utc))
+                    if meta and meta.get("last_run_initialisation_time"):
+                        model_run_at = datetime.fromtimestamp(
+                            meta["last_run_initialisation_time"], tz=timezone.utc
+                        )
+                    else:
+                        model_run_at = _compute_model_run_at(source_key, datetime.now(timezone.utc))
 
                 async with get_session() as sess:
                     raw = json.dumps({
                         "source": source_key, "model": om_model,
                         "high_f": high_f, "hourly": hourly_data,
                         "model_run_at": model_run_at.isoformat() if model_run_at else None,
+                        "openmeteo_metadata": meta,
                     })
                     await insert_forecast_obs(
                         sess,
@@ -346,10 +364,10 @@ async def _fetch_open_meteo_model_high(
     return high_f, hourly_data
 
 
-async def _fetch_nws_high(city: City, active_date_str: str) -> Optional[float]:
-    """Fetch NWS gridpoint forecast and return today's daytime high (°F)."""
+async def _fetch_nws_high(city: City, active_date_str: str) -> tuple[Optional[float], Optional[dict]]:
+    """Fetch NWS gridpoint forecast and return (today's daytime high °F, raw response dict)."""
     if not city.is_us or not city.nws_office:
-        return None
+        return None, None
     url = (
         f"{NWS_BASE}/gridpoints/{city.nws_office}"
         f"/{city.nws_grid_x},{city.nws_grid_y}/forecast"
@@ -369,7 +387,7 @@ async def _fetch_nws_high(city: City, active_date_str: str) -> Optional[float]:
                         continue
                     if resp.status != 200:
                         log.error("nws: HTTP %d for %s", resp.status, url)
-                        return None
+                        return None, None
                     data = await resp.json(content_type=None)
 
             periods = (data.get("properties") or {}).get("periods") or []
@@ -386,14 +404,14 @@ async def _fetch_nws_high(city: City, active_date_str: str) -> Optional[float]:
                     temp_f = float(temp)
                     if unit == "C":
                         temp_f = temp_f * 9 / 5 + 32
-                    return round(temp_f, 1)
+                    return round(temp_f, 1), data
 
             # Fallback — first daytime period
             for period in periods:
                 if period.get("isDaytime", True):
                     temp = period.get("temperature")
                     if temp is not None:
-                        return round(float(temp), 1)
+                        return round(float(temp), 1), data
 
         except asyncio.TimeoutError:
             log.warning("nws: timeout for %s (attempt %d/3)", city.city_slug, attempt + 1)
@@ -404,7 +422,7 @@ async def _fetch_nws_high(city: City, active_date_str: str) -> Optional[float]:
             if attempt < 2:
                 await asyncio.sleep(1)
 
-    return None
+    return None, None
 
 
 # ─── WU Scraping ─────────────────────────────────────────────────────────────

@@ -176,6 +176,7 @@
     <p class="text-xs" style="color:var(--text-muted)">
       Strategic entry times aligned with model update cycles. Markets lag model runs by 4-8 hours —
       the gap between model availability and human repricing is where alpha lives.
+      <span class="opacity-60">Temporal resolution = native model output interval before Open-Meteo interpolates to 1-hourly.</span>
     </p>
     <div class="overflow-x-auto">
       <table class="w-full text-sm">
@@ -183,76 +184,74 @@
           <tr style="border-bottom:1px solid var(--border)">
             <th class="text-left py-2 text-xs uppercase tracking-widest" style="color:var(--text-muted)">Model</th>
             <th class="text-left py-2 text-xs uppercase tracking-widest" style="color:var(--text-muted)">Frequency</th>
-            <th class="text-left py-2 text-xs uppercase tracking-widest" style="color:var(--text-muted)">Run Times (UTC)</th>
-            <th class="text-left py-2 text-xs uppercase tracking-widest" style="color:var(--text-muted)">Available (ET)</th>
+            <th class="text-left py-2 text-xs uppercase tracking-widest" style="color:var(--text-muted)">Last Model Run</th>
+            <th class="text-left py-2 text-xs uppercase tracking-widest" style="color:var(--text-muted)">Update Available</th>
+            <th class="text-left py-2 text-xs uppercase tracking-widest" style="color:var(--text-muted)">Temporal Resolution</th>
             <th class="text-left py-2 text-xs uppercase tracking-widest" style="color:var(--text-muted)">Resolution</th>
             <th class="text-left py-2 text-xs uppercase tracking-widest" style="color:var(--text-muted)">Alpha Window</th>
+            <th class="text-left py-2 text-xs uppercase tracking-widest" style="color:var(--text-muted)">API</th>
           </tr>
         </thead>
         <tbody>
-          <tr style="border-bottom:1px solid var(--border)" class="group relative">
+          {% for m in model_schedule_data %}
+          <tr style="border-bottom:1px solid var(--border)" class="group relative {% if m.stub %}opacity-50{% endif %}">
             <td class="py-2.5 font-bold" style="color:var(--cyan)">
-              ECMWF IFS
+              {{ m.name }}{% if m.stub %} <span class="text-[9px] opacity-50">*</span>{% endif %}
               <div class="hidden group-hover:block absolute left-0 top-full z-10 w-72 p-3 rounded-lg text-xs shadow-lg"
                    style="background:var(--bg-card);border:1px solid var(--border);color:var(--text-muted)">
-                Gold standard for 3-10 day forecasts. Least frequent = widest mispricing windows.
-                Full dissemination takes 6-8 hours; 00z available ~7 AM ET, 12z available ~7:30 PM ET. The 12z run triggers the largest overnight repricing.
+                {% if m.key == 'ecmwf_ifs' %}
+                  Gold standard for 3-10 day forecasts. Least frequent = widest mispricing windows.
+                  Full dissemination takes 6-8 hours; 00z available ~7 AM ET, 12z available ~7:30 PM ET.
+                {% elif m.key == 'hrrr' %}
+                  Highest resolution (3km), best for &lt;18h horizon. Hourly updates mean markets
+                  can't keep up. The 00z-06z runs update overnight forecasts that markets haven't priced.
+                {% elif m.key == 'hrrr_15min' %}
+                  Same HRRR model runs as CONUS, but outputs forecasts every 15 minutes instead of hourly.
+                  4× finer timesteps for capturing rapid temperature spikes and precise peak timing.
+                {% elif m.key == 'nbm' %}
+                  National Blend of Models — statistically post-processed ensemble. Best calibrated
+                  probability distribution. 2.5km resolution blends HRRR, GFS, NAM, ECMWF, and others.
+                {% elif m.key == 'gfs' %}
+                  First fresh global model of the day is the 06z run (~5:30 AM ET).
+                  Lower resolution but longer horizon. 4 runs/day means more entry opportunities.
+                {% else %}
+                  {{ m.name }} forecast model.
+                {% endif %}
               </div>
             </td>
-            <td class="py-2.5 mono">2x/day</td>
-            <td class="py-2.5 mono">00z, 12z</td>
-            <td class="py-2.5 mono" style="color:var(--green)">~7 AM, ~7:30 PM</td>
-            <td class="py-2.5 mono">9 km</td>
-            <td class="py-2.5 text-xs" style="color:var(--yellow)">6-8h lag</td>
-          </tr>
-          <tr style="border-bottom:1px solid var(--border)" class="group relative">
-            <td class="py-2.5 font-bold" style="color:var(--cyan)">
-              GFS
-              <div class="hidden group-hover:block absolute left-0 top-full z-10 w-72 p-3 rounded-lg text-xs shadow-lg"
-                   style="background:var(--bg-card);border:1px solid var(--border);color:var(--text-muted)">
-                First fresh global model of the day is the 06z run (~5:30 AM ET).
-                Lower resolution but longer horizon. 4 runs/day means more entry opportunities.
-              </div>
+            <td class="py-2.5 mono">{{ m.update_frequency }}</td>
+            <td class="py-2.5 mono">{{ m.last_model_run or '—' }}</td>
+            <td class="py-2.5 mono">
+              {% if m.update_available %}
+                <span class="{% if m.status == 'live' %}text-green-400{% elif m.status == 'delayed' %}text-yellow-400{% elif m.status == 'stale' %}text-red-400{% else %}text-gray-400{% endif %}">
+                  {{ m.update_available }}{% if m.update_age %} ({{ m.update_age }}){% endif %}
+                </span>
+              {% else %}
+                —
+              {% endif %}
             </td>
-            <td class="py-2.5 mono">4x/day</td>
-            <td class="py-2.5 mono">00, 06, 12, 18z</td>
-            <td class="py-2.5 mono" style="color:var(--green)">~3:30, 9:30 AM/PM</td>
-            <td class="py-2.5 mono">13 km</td>
-            <td class="py-2.5 text-xs" style="color:var(--yellow)">3-5h lag</td>
-          </tr>
-          <tr style="border-bottom:1px solid var(--border)" class="group relative">
-            <td class="py-2.5 font-bold" style="color:var(--cyan)">
-              HRRR
-              <div class="hidden group-hover:block absolute left-0 top-full z-10 w-72 p-3 rounded-lg text-xs shadow-lg"
-                   style="background:var(--bg-card);border:1px solid var(--border);color:var(--text-muted)">
-                Highest resolution (3km), best for &lt;18h horizon. Hourly updates mean markets
-                can't keep up. The 00z-06z runs update overnight forecasts that markets haven't priced.
-              </div>
+            <td class="py-2.5 mono">
+              {{ m.temporal_resolution }}
+              {% if m.temporal_resolution_sec == 900 %}<span class="text-[9px] opacity-50">(15min native)</span>{% endif %}
             </td>
-            <td class="py-2.5 mono">Hourly</td>
-            <td class="py-2.5 mono">00z - 23z</td>
-            <td class="py-2.5 mono" style="color:var(--green)">~45 min after run</td>
-            <td class="py-2.5 mono">3 km</td>
-            <td class="py-2.5 text-xs" style="color:var(--yellow)">1-2h lag</td>
-          </tr>
-          <tr class="group relative">
-            <td class="py-2.5 font-bold" style="color:var(--cyan)">
-              NBM
-              <div class="hidden group-hover:block absolute left-0 top-full z-10 w-72 p-3 rounded-lg text-xs shadow-lg"
-                   style="background:var(--bg-card);border:1px solid var(--border);color:var(--text-muted)">
-                National Blend of Models — statistically post-processed ensemble. Best calibrated
-                probability distribution. 2.5km resolution blends HRRR, GFS, NAM, ECMWF, and others.
-              </div>
+            <td class="py-2.5 mono">{{ m.resolution }}</td>
+            <td class="py-2.5 text-xs" style="color:var(--yellow)">{{ m.alpha }}</td>
+            <td class="py-2.5">
+              {% if m.api_link %}
+              <a href="{{ m.api_link }}" target="_blank" rel="noopener" class="text-[10px] hover:underline" style="color:var(--cyan)">meta.json ↗</a>
+              {% else %}
+              <span class="text-[10px] opacity-50">—</span>
+              {% endif %}
             </td>
-            <td class="py-2.5 mono">4x/day</td>
-            <td class="py-2.5 mono">01, 07, 13, 19z</td>
-            <td class="py-2.5 mono" style="color:var(--green)">~11 PM, 5 AM, 11 AM, 5 PM</td>
-            <td class="py-2.5 mono">2.5 km</td>
-            <td class="py-2.5 text-xs" style="color:var(--yellow)">2-3h lag</td>
           </tr>
+          {% endfor %}
         </tbody>
       </table>
     </div>
+    <p class="text-[10px] opacity-50" style="color:var(--text-muted)">
+      * Stubs = not yet ingested. Open-Meteo uses redundant servers with eventual consistency; wait ~10 min after availability_time.
+      Temporal resolution is the native model output interval before interpolation to 1-hourly.
+    </p>
   </section>
 
   <!-- ── SECTION 4: EARLY-EXIT RULES TABLE ───────────────────────────────────── -->

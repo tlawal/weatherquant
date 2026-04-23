@@ -20,6 +20,7 @@ from backend.market_context.service import serialize_market_context_snapshot, _r
 from backend.tz_utils import city_local_date, city_local_now, city_local_tomorrow, city_local_day_after_tomorrow, et_today
 from backend.strategy.kelly import calculate_expected_value, calculate_kelly_fraction
 from backend.modeling.calibration_engine import get_reliability_metrics, get_reliability_diagnostics
+from backend.ingestion.model_metadata import fetch_openmeteo_metadata, _OM_META_ENDPOINTS
 from collections import defaultdict
 
 log = logging.getLogger(__name__)
@@ -1198,6 +1199,83 @@ async def strategies_page(request: Request):
         "telegram_enabled": Config.TELEGRAM_ENABLED,
     }
 
+    # ── Build live model schedule data from Open-Meteo metadata ──────────────
+    _MODEL_REGISTRY = [
+        {"key": "ecmwf_ifs", "name": "ECMWF IFS", "resolution": "9 km", "alpha": "6–8h lag", "stub": False},
+        {"key": "hrrr", "name": "HRRR CONUS", "resolution": "3 km", "alpha": "1–2h lag", "stub": False},
+        {"key": "nbm", "name": "NCEP NBM", "resolution": "2.5 km", "alpha": "2–3h lag", "stub": False},
+        {"key": "hrrr_15min", "name": "HRRR CONUS 15min*", "resolution": "3 km", "alpha": "1–2h lag", "stub": True},
+        {"key": "gfs", "name": "GFS*", "resolution": "13 km", "alpha": "3–5h lag", "stub": True},
+    ]
+
+    now_utc = datetime.now(timezone.utc)
+
+    def _fmt_age(ts: int | None) -> str | None:
+        if not ts:
+            return None
+        delta = now_utc - datetime.fromtimestamp(ts, tz=timezone.utc)
+        minutes = int(delta.total_seconds() // 60)
+        if minutes < 60:
+            return f"{minutes}m ago"
+        hours = minutes // 60
+        if hours < 24:
+            return f"{hours}h ago"
+        return f"{hours // 24}d ago"
+
+    def _fmt_ts(ts: int | None) -> str | None:
+        if not ts:
+            return None
+        return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%H:%M UTC")
+
+    def _human_interval(sec: int | None) -> str:
+        if not sec:
+            return "unknown"
+        if sec == 3600:
+            return "1h"
+        if sec == 21600:
+            return "6h"
+        if sec < 3600:
+            return f"{sec // 60}m"
+        return f"{sec // 3600}h"
+
+    model_schedule_data = []
+    for m in _MODEL_REGISTRY:
+        meta = await fetch_openmeteo_metadata(m["key"]) if not m["stub"] else None
+        init_ts = meta.get("last_run_initialisation_time") if meta else None
+        avail_ts = meta.get("last_run_availability_time") if meta else None
+        temp_res = meta.get("temporal_resolution_seconds") if meta else None
+        upd_int = meta.get("update_interval_seconds") if meta else None
+
+        # Status based on staleness
+        status = "unknown"
+        if m["stub"]:
+            status = "stub"
+        elif avail_ts:
+            age_min = (now_utc - datetime.fromtimestamp(avail_ts, tz=timezone.utc)).total_seconds() / 60
+            if age_min < 20:
+                status = "live"
+            elif age_min < 60:
+                status = "delayed"
+            else:
+                status = "stale"
+
+        model_schedule_data.append({
+            "name": m["name"],
+            "key": m["key"],
+            "resolution": m["resolution"],
+            "alpha": m["alpha"],
+            "stub": m["stub"],
+            "last_model_run": _fmt_ts(init_ts),
+            "update_available": _fmt_ts(avail_ts),
+            "update_age": _fmt_age(avail_ts),
+            "temporal_resolution": _human_interval(temp_res),
+            "temporal_resolution_sec": temp_res,
+            "update_frequency": _human_interval(upd_int),
+            "update_frequency_sec": upd_int,
+            "api_link": _OM_META_ENDPOINTS.get(m["key"], ""),
+            "status": status,
+        })
+
     return templates.TemplateResponse(
         "strategies.html",
         {
@@ -1205,6 +1283,7 @@ async def strategies_page(request: Request):
             "arming_state": arming.state,
             "config": config_snapshot,
             "heatmap_data": heatmap_data,
+            "model_schedule_data": model_schedule_data,
         },
     )
 
