@@ -1229,10 +1229,11 @@ async def redemptions_list():
                         }
 
                 # Live market prices: prefer Polymarket API for accuracy, fall back to DB snapshot
-                api_price = cid_to_api_price.get(bucket.condition_id, 0)
-                snap_price = mkt_snap.yes_mid if mkt_snap else 0
+                api_price = float(cid_to_api_price.get(bucket.condition_id, 0) or 0)
+                snap_price = float(mkt_snap.yes_mid or 0) if mkt_snap else 0
+                last_mkt = float(pos.last_mkt_price or 0) if pos else 0
                 # Use API price if available (>0), otherwise use snapshot, then fallback to last known
-                live_price = api_price if api_price > 0 else (snap_price if snap_price > 0 else (pos.last_mkt_price if pos else 0))
+                live_price = api_price if api_price > 0 else (snap_price if snap_price > 0 else last_mkt)
                 live_bid = mkt_snap.yes_bid if mkt_snap else 0
                 live_spread = mkt_snap.spread if mkt_snap else 0
 
