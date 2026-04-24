@@ -924,7 +924,7 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                     "model_run_at": _fmt_utc(primary_fc.model_run_at if primary_fc else None),
                     "lead_time_hours": _lead_time_hours(primary_fc.model_run_at if primary_fc else None),
                     "model_run_age": _model_run_age(primary_fc.model_run_at if primary_fc else None),
-                    "url": f"https://api.weather.gov/gridpoints/{city.nws_office}/{city.nws_grid_x},{city.nws_grid_y}/forecast" if city.is_us else f"https://api.open-meteo.com/v1/forecast?latitude={city.lat}&longitude={city.lon}&hourly=temperature_2m&forecast_days=1",
+                    "url": f"https://api.weather.gov/gridpoints/{city.nws_office}/{city.nws_grid_x},{city.nws_grid_y}/forecast" if city.is_us else f"https://api.open-meteo.com/v1/forecast?latitude={city.lat}&longitude={city.lon}&hourly=temperature_2m&start_date={target_date_et}&end_date={target_date_et}",
                     "skill": source_skill.get("nws"),
                 },
                 "wu_hourly": {
@@ -955,7 +955,7 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                     "model_run_at": _fmt_utc(hrrr_fc.model_run_at if hrrr_fc else None),
                     "lead_time_hours": _lead_time_hours(hrrr_fc.model_run_at if hrrr_fc else None),
                     "model_run_age": _model_run_age(hrrr_fc.model_run_at if hrrr_fc else None),
-                    "url": f"https://open-meteo.com/en/docs?latitude={city.lat}&longitude={city.lon}&hourly=temperature_2m&models=gfs_hrrr&temperature_unit=fahrenheit&forecast_days=1" if city.lat else None,
+                    "url": f"https://open-meteo.com/en/docs?latitude={city.lat}&longitude={city.lon}&hourly=temperature_2m&models=gfs_hrrr&temperature_unit=fahrenheit&start_date={target_date_et}&end_date={target_date_et}" if city.lat else None,
                     "skill": source_skill.get("hrrr"),
                 },
                 "nbm": {
@@ -965,7 +965,7 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                     "model_run_at": _fmt_utc(nbm_fc.model_run_at if nbm_fc else None),
                     "lead_time_hours": _lead_time_hours(nbm_fc.model_run_at if nbm_fc else None),
                     "model_run_age": _model_run_age(nbm_fc.model_run_at if nbm_fc else None),
-                    "url": f"https://open-meteo.com/en/docs?latitude={city.lat}&longitude={city.lon}&hourly=temperature_2m&models=ncep_nbm_conus&temperature_unit=fahrenheit&forecast_days=1" if city.lat else None,
+                    "url": f"https://open-meteo.com/en/docs?latitude={city.lat}&longitude={city.lon}&hourly=temperature_2m&models=ncep_nbm_conus&temperature_unit=fahrenheit&start_date={target_date_et}&end_date={target_date_et}" if city.lat else None,
                     "skill": source_skill.get("nbm"),
                 },
                 "ecmwf_ifs": {
@@ -978,7 +978,7 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                     "url": (
                         f"https://api.open-meteo.com/v1/forecast?latitude={city.lat}"
                         f"&longitude={city.lon}&hourly=temperature_2m&models=ecmwf_ifs"
-                        f"&forecast_days=1&temperature_unit=fahrenheit"
+                        f"&start_date={target_date_et}&end_date={target_date_et}&temperature_unit=fahrenheit"
                     ) if city.lat is not None else None,
                     "skill": source_skill.get("ecmwf_ifs"),
                 },

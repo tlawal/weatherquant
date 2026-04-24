@@ -178,12 +178,21 @@ async def fetch_open_meteo_all() -> None:
         if city.is_us:
             continue
 
-        for active_date in active_dates_for_city(city):
-            try:
-                high_f = await _fetch_open_meteo_high(city, active_date)
-            except Exception as e:
-                log.error("open-meteo: %s date=%s failed: %s", city.city_slug, active_date, e)
-                high_f = None
+        active_dates = active_dates_for_city(city)
+        if not active_dates:
+            continue
+
+        start_date = active_dates[0]
+        end_date = active_dates[-1]
+
+        try:
+            highs_by_date = await _fetch_open_meteo_high(city, start_date, end_date)
+        except Exception as e:
+            log.error("open-meteo: %s failed: %s", city.city_slug, e)
+            highs_by_date = {}
+
+        for active_date in active_dates:
+            high_f = highs_by_date.get(active_date)
 
             async with get_session() as sess:
                 raw = json.dumps({"source": "open_meteo", "high_f": high_f})
@@ -204,18 +213,19 @@ async def fetch_open_meteo_all() -> None:
             await update_heartbeat(sess, "fetch_open_meteo", success=True)
 
 
-async def _fetch_open_meteo_high(city: City, date_et: str) -> Optional[float]:
-    """Fetch Open-Meteo hourly forecast and return the max temperature for *date_et*."""
+async def _fetch_open_meteo_high(city: City, start_date: str, end_date: str) -> dict[str, Optional[float]]:
+    """Fetch Open-Meteo hourly forecast and return a {date_et: max_temp} map."""
     if city.lat is None or city.lon is None:
         log.warning("open-meteo: missing coords for %s", city.city_slug)
-        return None
+        return {}
 
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
         "latitude": city.lat,
         "longitude": city.lon,
         "hourly": "temperature_2m",
-        "forecast_days": 2,
+        "start_date": start_date,
+        "end_date": end_date,
         "timezone": "auto",
     }
 
@@ -224,28 +234,36 @@ async def _fetch_open_meteo_high(city: City, date_et: str) -> Optional[float]:
             async with http.get(url, params=params) as resp:
                 if resp.status != 200:
                     log.error("open-meteo: HTTP %d for %s", resp.status, url)
-                    return None
+                    return {}
                 data = await resp.json()
 
         hourly = data.get("hourly", {})
         times = hourly.get("time", [])
         temps = hourly.get("temperature_2m", [])
         if not temps or not times:
-            return None
+            return {}
 
-        # Filter to hours matching the requested date
-        date_temps = [t for ts, t in zip(times, temps) if ts.startswith(date_et) and t is not None]
-        if not date_temps:
-            return None
+        # Group by local date (time strings are YYYY-MM-DDTHH:00 with timezone=auto)
+        date_temps: dict[str, list[float]] = {}
+        for ts, t in zip(times, temps):
+            if t is None:
+                continue
+            day = ts[:10]
+            date_temps.setdefault(day, []).append(t)
 
-        high_c = max(date_temps)
-        if city.unit == "F":
-            return round(high_c * 9 / 5 + 32, 1)
-        return round(high_c, 1)
+        highs: dict[str, Optional[float]] = {}
+        for day, day_temps in date_temps.items():
+            high_c = max(day_temps)
+            if city.unit == "F":
+                highs[day] = round(high_c * 9 / 5 + 32, 1)
+            else:
+                highs[day] = round(high_c, 1)
+
+        return highs
 
     except Exception as e:
-        log.exception("open-meteo: failed for %s date=%s", city.city_slug, date_et)
-        return None
+        log.exception("open-meteo: failed for %s %s-%s", city.city_slug, start_date, end_date)
+        return {}
 
 
 # ─── Open-Meteo Multi-Model (HRRR + GFS) ────────────────────────────────────
@@ -266,29 +284,39 @@ async def fetch_open_meteo_models_all() -> None:
         if city.lat is None or city.lon is None:
             continue
 
-        for active_date in active_dates_for_city(city):
-            for source_key, om_model in _OM_MODELS.items():
-                # Skip HRRR for non-US cities (HRRR is North America only)
-                if source_key == "hrrr" and not city.is_us:
-                    continue
+        active_dates = active_dates_for_city(city)
+        if not active_dates:
+            continue
 
-                high_f = None
-                hourly_data = None
-                try:
-                    high_f, hourly_data = await _fetch_open_meteo_model_high(city, active_date, om_model)
-                except Exception as e:
-                    log.error("om-%s: %s date=%s failed: %s", source_key, city.city_slug, active_date, e)
+        start_date = active_dates[0]
+        end_date = active_dates[-1]
 
-                # Authoritative model initialization time from Open-Meteo metadata
-                meta = await fetch_openmeteo_metadata(source_key)
-                model_run_at = None
-                if high_f is not None:
+        for source_key, om_model in _OM_MODELS.items():
+            # Skip HRRR for non-US cities (HRRR is North America only)
+            if source_key == "hrrr" and not city.is_us:
+                continue
+
+            try:
+                data_by_date = await _fetch_open_meteo_model_high(city, start_date, end_date, om_model)
+            except Exception as e:
+                log.error("om-%s: %s failed: %s", source_key, city.city_slug, e)
+                data_by_date = {}
+
+            # Authoritative model initialization time from Open-Meteo metadata
+            meta = await fetch_openmeteo_metadata(source_key)
+            model_run_at = None
+            if data_by_date:
+                any_high = next((h for h, _ in data_by_date.values() if h is not None), None)
+                if any_high is not None:
                     if meta and meta.get("last_run_initialisation_time"):
                         model_run_at = datetime.fromtimestamp(
                             meta["last_run_initialisation_time"], tz=timezone.utc
                         )
                     else:
                         model_run_at = _compute_model_run_at(source_key, datetime.now(timezone.utc))
+
+            for active_date in active_dates:
+                high_f, hourly_data = data_by_date.get(active_date, (None, None))
 
                 async with get_session() as sess:
                     raw = json.dumps({
@@ -316,12 +344,11 @@ async def fetch_open_meteo_models_all() -> None:
 
 
 async def _fetch_open_meteo_model_high(
-    city: City, date_et: str, om_model: str
-) -> tuple[Optional[float], Optional[dict]]:
-    """Fetch a specific Open-Meteo model and return (max_temp, hourly_data) for *date_et*.
+    city: City, start_date: str, end_date: str, om_model: str
+) -> dict[str, tuple[Optional[float], Optional[dict]]]:
+    """Fetch a specific Open-Meteo model and return {date_et: (high_f, hourly_data)}.
 
-    Returns a tuple of (high_f, hourly_dict) where hourly_dict contains
-    time/temp arrays for the target date (used for chart overlays).
+    hourly_data contains time/temp arrays for each date (used for chart overlays).
     """
     unit = getattr(city, "unit", "F") or "F"
     temp_unit = "fahrenheit" if unit == "F" else "celsius"
@@ -332,7 +359,8 @@ async def _fetch_open_meteo_model_high(
         "longitude": city.lon,
         "hourly": "temperature_2m",
         "temperature_unit": temp_unit,
-        "forecast_days": 2,
+        "start_date": start_date,
+        "end_date": end_date,
         "timezone": "auto",
         "models": om_model,
     }
@@ -342,7 +370,7 @@ async def _fetch_open_meteo_model_high(
             if resp.status != 200:
                 body = await resp.text()
                 log.error("om-%s: HTTP %d for %s — %s", om_model, resp.status, city.city_slug, body[:200])
-                return None, None
+                return {}
             data = await resp.json()
 
     hourly = data.get("hourly", {})
@@ -351,17 +379,23 @@ async def _fetch_open_meteo_model_high(
     temps = hourly.get(f"temperature_2m_{om_model}", hourly.get("temperature_2m", []))
     if not temps or not times:
         log.warning("om-%s: no hourly temps for %s (keys: %s)", om_model, city.city_slug, list(hourly.keys()))
-        return None, None
+        return {}
 
-    # Filter to target date and build hourly pairs
-    date_pairs = [(ts, t) for ts, t in zip(times, temps) if ts.startswith(date_et) and t is not None]
-    if not date_pairs:
-        log.warning("om-%s: no temps for date %s in %s", om_model, date_et, city.city_slug)
-        return None, None
+    # Group by local date and build hourly pairs
+    date_pairs: dict[str, list[tuple[str, float]]] = {}
+    for ts, t in zip(times, temps):
+        if t is None:
+            continue
+        day = ts[:10]
+        date_pairs.setdefault(day, []).append((ts, t))
 
-    high_f = round(max(t for _, t in date_pairs), 1)
-    hourly_data = {"times": [ts for ts, _ in date_pairs], "temps": [round(t, 1) for _, t in date_pairs]}
-    return high_f, hourly_data
+    out: dict[str, tuple[Optional[float], Optional[dict]]] = {}
+    for day, pairs in date_pairs.items():
+        high_f = round(max(t for _, t in pairs), 1)
+        hourly_data = {"times": [ts for ts, _ in pairs], "temps": [round(t, 1) for _, t in pairs]}
+        out[day] = (high_f, hourly_data)
+
+    return out
 
 
 async def _fetch_nws_high(city: City, active_date_str: str) -> tuple[Optional[float], Optional[dict]]:
