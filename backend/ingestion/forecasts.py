@@ -41,7 +41,7 @@ def _compute_model_run_at(source_key: str, fetch_time: datetime) -> Optional[dat
     hour = utc.hour
     minute = utc.minute
 
-    if source_key == "hrrr":
+    if source_key in ("hrrr", "hrrr_15min"):
         # HRRR runs every hour; use the start of the current hour
         return utc.replace(minute=0, second=0, microsecond=0)
 
@@ -270,6 +270,7 @@ async def _fetch_open_meteo_high(city: City, start_date: str, end_date: str) -> 
 
 _OM_MODELS = {
     "hrrr": "gfs_hrrr",          # GFS+HRRR blend, NA high-resolution
+    "hrrr_15min": "ncep_hrrr_conus_15min",  # HRRR CONUS 15-minute output
     "nbm": "ncep_nbm_conus",    # NCEP National Blend of Models, US CONUS
     "ecmwf_ifs": "ecmwf_ifs",   # ECMWF Integrated Forecast System, global 9–25 km
 }

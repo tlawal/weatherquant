@@ -203,7 +203,7 @@ async def compute_station_calibration(
         return None
 
     # Fetch per-source forecast highs (includes ecmwf_ifs for model comparison)
-    sources = ["nws", "wu_hourly", "hrrr", "nbm", "ecmwf_ifs"]
+    sources = ["nws", "wu_hourly", "hrrr", "hrrr_15min", "nbm", "ecmwf_ifs"]
     fc_highs = await _get_forecast_highs(city.id, dates, sources)
 
     # Fetch model mu (fused ensemble)

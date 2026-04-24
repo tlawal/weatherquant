@@ -480,6 +480,7 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
         wu_h = await get_latest_successful_forecast(sess, city.id, "wu_hourly", target_date_et)
         wu_history = await get_latest_successful_forecast(sess, city.id, "wu_history", target_date_et)
         hrrr_fc = await get_latest_successful_forecast(sess, city.id, "hrrr", target_date_et)
+        hrrr_15min_fc = await get_latest_successful_forecast(sess, city.id, "hrrr_15min", target_date_et)
         nbm_fc = await get_latest_successful_forecast(sess, city.id, "nbm", target_date_et)
         ecmwf_ifs_fc = await get_latest_successful_forecast(sess, city.id, "ecmwf_ifs", target_date_et)
         # Per-source skill (dynamic weight, MAE, bias, yesterday's error) for tooltips.
@@ -982,6 +983,20 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                     ) if city.lat is not None else None,
                     "skill": source_skill.get("ecmwf_ifs"),
                 },
+                "hrrr_15min": {
+                    "high_f": hrrr_15min_fc.high_f if hrrr_15min_fc else None,
+                    "age_s": _age(hrrr_15min_fc.fetched_at if hrrr_15min_fc else None),
+                    "collected_at": _fmt_time_et(hrrr_15min_fc.fetched_at if hrrr_15min_fc else None),
+                    "model_run_at": _fmt_utc(hrrr_15min_fc.model_run_at if hrrr_15min_fc else None),
+                    "lead_time_hours": _lead_time_hours(hrrr_15min_fc.model_run_at if hrrr_15min_fc else None),
+                    "model_run_age": _model_run_age(hrrr_15min_fc.model_run_at if hrrr_15min_fc else None),
+                    "url": (
+                        f"https://api.open-meteo.com/v1/forecast?latitude={city.lat}"
+                        f"&longitude={city.lon}&hourly=temperature_2m&models=ncep_hrrr_conus_15min"
+                        f"&start_date={target_date_et}&end_date={target_date_et}&temperature_unit=fahrenheit"
+                    ) if city.lat is not None else None,
+                    "skill": source_skill.get("hrrr_15min"),
+                },
             },
             "event": event,
             "model": {
@@ -1204,7 +1219,7 @@ async def strategies_page(request: Request):
         {"key": "ecmwf_ifs", "name": "ECMWF IFS", "resolution": "9 km", "alpha": "6–8h lag", "stub": False},
         {"key": "hrrr", "name": "HRRR CONUS", "resolution": "3 km", "alpha": "1–2h lag", "stub": False},
         {"key": "nbm", "name": "NCEP NBM", "resolution": "2.5 km", "alpha": "2–3h lag", "stub": False},
-        {"key": "hrrr_15min", "name": "HRRR CONUS 15min*", "resolution": "3 km", "alpha": "1–2h lag", "stub": True},
+        {"key": "hrrr_15min", "name": "HRRR CONUS 15min*", "resolution": "3 km", "alpha": "1–2h lag", "stub": False},
         {"key": "gfs", "name": "GFS*", "resolution": "13 km", "alpha": "3–5h lag", "stub": True},
     ]
 

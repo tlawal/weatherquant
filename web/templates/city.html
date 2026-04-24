@@ -613,6 +613,33 @@
       </div>
       {% endif %}
 
+      <!-- HRRR 15min (Open-Meteo / NCEP) — evaluation mode, not yet in ensemble -->
+      {% if forecasts.hrrr_15min and forecasts.hrrr_15min.high_f is not none %}
+      <div class="group relative flex justify-between items-center cursor-pointer hover:bg-white/5 p-1 -mx-1 rounded transition-colors" x-data="{ showMeta: false }">
+        <div class="flex items-center gap-1.5" @click="showMeta = !showMeta" @click.outside="showMeta = false">
+          <span style="color:var(--text-muted)">HRRR 15min*</span>
+          <button class="hover:text-cyan-400 opacity-30 group-hover:opacity-100 transition-all">ⓘ</button>
+        </div>
+        <span class="mono font-medium text-white">{{ "%.1f"|format(forecasts.hrrr_15min.high_f) }}°{{ city.unit|default('F') }}</span>
+        <div x-show="showMeta" x-cloak
+             x-transition:enter="transition ease-out duration-100" class="absolute left-0 right-0 top-6 w-auto p-3 rounded-xl shadow-2xl z-50 border font-medium normal-case flex flex-col items-start text-left sm:right-auto sm:w-64"
+             style="background:var(--bg-panel); border-color:var(--border);">
+             <div class="font-bold mb-1 pb-1 border-b w-full" style="color:var(--cyan); border-color:var(--border)">HRRR CONUS 15min*</div>
+             <p class="opacity-80 mb-2 mt-1 italic text-[9px]">Same HRRR model runs as the standard CONUS product, but output every 15 minutes instead of hourly. Four times finer timesteps for capturing rapid temperature spikes and precise peak timing. US CONUS only. Currently under evaluation and not yet included in the ensemble blend.</p>
+             {% if forecasts.hrrr_15min.collected_at %}
+             <p class="opacity-60 text-[9px] mb-2">Collected {{ forecasts.hrrr_15min.collected_at }}</p>
+             {% endif %}
+             {% if forecasts.hrrr_15min.model_run_at %}
+             <p class="opacity-60 text-[9px] mb-2">Model run: {{ forecasts.hrrr_15min.model_run_at }} ({{ forecasts.hrrr_15min.lead_time_hours }}h lead) — {{ forecasts.hrrr_15min.model_run_age }}</p>
+             {% endif %}
+             {% if forecasts.hrrr_15min.url %}
+             <a href="{{ forecasts.hrrr_15min.url }}" target="_blank" rel="noopener" class="text-[10px] flex items-center gap-1 hover:underline transition-colors" style="color:var(--cyan)">↗ View on Open-Meteo</a>
+             {% endif %}
+             {{ skill_block(forecasts.hrrr_15min.skill) }}
+        </div>
+      </div>
+      {% endif %}
+
     </div>
   </div>
 </div>
