@@ -1933,6 +1933,7 @@ async def manual_trade(
     true_edge = sig_row.true_edge if sig_row else 0.0
     is_sell = body.side.startswith("sell_")
 
+    yes_bid_val = mkt_snap.yes_bid if mkt_snap else None
     signal = BucketSignal(
         city_slug=body.city_slug,
         city_display=city.display_name,
@@ -1948,7 +1949,9 @@ async def manual_trade(
         raw_edge=model_prob - mkt_prob,
         exec_cost=sig_row.exec_cost if sig_row else 0.02,
         true_edge=true_edge,
-        yes_bid=mkt_snap.yes_bid if mkt_snap else None,
+        ev_per_share=model_prob - mkt_prob,
+        ev_at_bid=(model_prob - yes_bid_val) if yes_bid_val is not None else None,
+        yes_bid=yes_bid_val,
         yes_ask=mkt_snap.yes_ask if mkt_snap else None,
         yes_mid=mkt_prob,
         spread=mkt_snap.spread if mkt_snap else None,

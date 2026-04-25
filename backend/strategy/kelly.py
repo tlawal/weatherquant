@@ -57,14 +57,30 @@ def calculate_kelly_fraction(
 
 def calculate_expected_value(model_prob: float, yes_price: float) -> float:
     """
-    Calculate simple EV: (model_p * (1 - market_p)) - ((1 - model_p) * market_p)
-    where market_p is the yes_price.
+    EV per $1 wagered. Used by Kelly sizing.
+
+    If we bet $1 at price P, we win (1/P - 1) if right, lose 1 if wrong.
+    EV per $1 wagered = p*(1/P - 1) - (1-p)*1
     """
     if not (0 < yes_price < 1):
         return 0.0
-    
-    # EV = (WinProb * WinAmt) - (LossProb * LossAmt)
-    # If we bet $1 at price $P, we win $(1/P - 1) if right, lose $1 if wrong.
-    # EV per $1 wagered = (p * (1/P - 1)) - ((1-p) * 1)
+
     ev = (model_prob * ((1.0 / yes_price) - 1.0)) - (1.0 - model_prob)
     return round(ev, 4)
+
+
+def calculate_ev_per_share(model_prob: float, yes_price: float) -> float:
+    """
+    EV per YES share held at `yes_price`. Used by EDGE_DECAY exit gate.
+
+    A YES share pays $1 if the event resolves YES, $0 otherwise.
+    Per share: win (1 - price), lose (-price).
+    EV = p*(1 - price) - (1-p)*price  [algebraically equals p - price]
+
+    Distinct from calculate_expected_value, which returns per-$1-wagered.
+    """
+    if not (0.0 < yes_price < 1.0):
+        return 0.0
+
+    ev = model_prob * (1.0 - yes_price) - (1.0 - model_prob) * yes_price
+    return round(ev, 6)

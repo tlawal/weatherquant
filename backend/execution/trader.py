@@ -22,7 +22,6 @@ from datetime import date, datetime, timezone
 from typing import Optional
 
 from backend.config import Config
-from backend.tz_utils import city_local_date
 from backend.engine.gating import run_all_gates, GateResult
 from backend.engine.signal_engine import BucketSignal
 from backend.execution.arming import is_armed
@@ -32,7 +31,7 @@ from backend.storage.db import get_session
 from backend.storage.repos import (
     append_audit,
     get_all_positions,
-    get_event,
+    get_event_by_id,
     get_position,
     insert_fill,
     insert_order,
@@ -103,15 +102,10 @@ async def execute_signal(
             result["error"] = f"city not found: {signal.city_slug}"
             return result
 
-        from backend.tz_utils import city_local_now, city_local_tomorrow
-        now_local = city_local_now(city)
-        if now_local.hour >= 20:
-            active_date = city_local_tomorrow(city)
-        else:
-            active_date = city_local_date(city)
-        event = await get_event(sess, city.id, active_date)
-        if not event:
+        event = await get_event_by_id(sess, signal.event_id)
+        if not event or event.city_id != city.id:
             result["status"] = "no_event"
+            result["error"] = f"event {signal.event_id} not found for {signal.city_slug}"
             return result
 
     # ── Run all safety gates ──────────────────────────────────────────────────

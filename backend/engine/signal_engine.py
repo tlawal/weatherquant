@@ -24,6 +24,7 @@ from backend.modeling.temperature_model import compute_model, ModelResult
 from backend.modeling.calibration import get_calibration_async
 from backend.modeling.calibration_engine import get_reliability_metrics, remap_probability
 from backend.modeling.adaptive import run_adaptive
+from backend.strategy.kelly import calculate_ev_per_share
 from backend.storage.db import get_session
 from backend.storage.models import Bucket, Event, City
 from backend.storage.repos import (
@@ -66,6 +67,8 @@ class BucketSignal:
     raw_edge: float
     exec_cost: float
     true_edge: float
+    ev_per_share: float
+    ev_at_bid: Optional[float]
     yes_bid: Optional[float]
     yes_ask: Optional[float]
     yes_mid: Optional[float]
@@ -530,6 +533,8 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
                     raw_edge=0.0,
                     exec_cost=0.0,
                     true_edge=0.0,
+                    ev_per_share=0.0,
+                    ev_at_bid=None,
                     yes_bid=None,
                     yes_ask=None,
                     yes_mid=None,
@@ -562,6 +567,16 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
             raw_edge_buy = calibrated_prob - mkt_prob
             true_edge = raw_edge_buy - exec_cost
 
+            # Per-share EV (used by EDGE_DECAY exit gate).
+            # ev_per_share uses the mid (entry-side reference); ev_at_bid uses
+            # the bid (exit-side reference) since exits sell into the bid.
+            ev_per_share = calculate_ev_per_share(calibrated_prob, mkt_prob)
+            ev_at_bid = (
+                calculate_ev_per_share(calibrated_prob, mkt_snap.yes_bid)
+                if mkt_snap.yes_bid is not None
+                else None
+            )
+
             reason = {
                 **model.inputs,
                 "bucket_idx": i,
@@ -572,6 +587,8 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
                 "raw_edge": float(round(raw_edge_buy, 4)),
                 "exec_cost": float(round(exec_cost, 4)),
                 "true_edge": float(round(true_edge, 4)),
+                "ev_per_share": float(round(ev_per_share, 6)),
+                "ev_at_bid": (float(round(ev_at_bid, 6)) if ev_at_bid is not None else None),
                 "spread": spread,
                 "ask_depth": ask_depth,
                 "city_state": city_state,
@@ -614,6 +631,8 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
                 raw_edge=round(raw_edge_buy, 4),
                 exec_cost=round(exec_cost, 4),
                 true_edge=round(true_edge, 4),
+                ev_per_share=round(ev_per_share, 6),
+                ev_at_bid=(round(ev_at_bid, 6) if ev_at_bid is not None else None),
                 yes_bid=mkt_snap.yes_bid,
                 yes_ask=mkt_snap.yes_ask,
                 yes_mid=float(round(mkt_prob, 4)),
