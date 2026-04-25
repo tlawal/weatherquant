@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import statistics
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
@@ -115,6 +116,89 @@ def _expected_remaining_rise(hour_local: int) -> float:
 
 def _metar_weight(hour_local: int) -> float:
     return _interpolate_table(_METAR_WEIGHT_TABLE, hour_local)
+
+
+# ─── Phase B1+B2: lead-time skill & freshness factors ───────────────────────
+# Per-source freshness time constants (hours). exp(-age_h / TAU) decays the
+# weight for stale model runs. A WU hourly forecast lacks an authoritative
+# model_run_at, so its TAU is set high — caller passes 1.0 (no decay) instead.
+_FRESHNESS_TAU_HOURS = {
+    "hrrr": 6.0,
+    "ncep_hrrr_conus_15min": 6.0,
+    "nbm": 8.0,
+    "gfs": 12.0,
+    "ecmwf_ifs": 12.0,
+    "nws": 10.0,
+    "wu_hourly": 12.0,
+    "wu_history": 12.0,
+}
+# Hard cap on lead-skill weight swing — protects against thin-data buckets.
+_LEAD_SKILL_CLAMP = (0.7, 1.3)
+# Floor on freshness factor so a stale source still contributes something.
+_FRESHNESS_FLOOR = 0.5
+# Minimum n_obs in a SourceLeadTimeSkill bucket before we trust its MAE.
+_LEAD_SKILL_MIN_N_OBS = 30
+
+
+def _ensemble_sigma(
+    values_and_weights: list[tuple[float, float]],
+    fallback_sigma: float,
+    sigma_floor: float,
+) -> float:
+    """Phase B5 — weight-aware σ from ensemble disagreement.
+
+    For ≥3 forecasts with positive weight, σ = sqrt(weighted variance) about
+    the weighted mean. This generalizes the spread/2 heuristic and respects
+    per-source weights (so a 5°F outlier from a low-weight source widens σ
+    less than the same outlier from a high-weight source).
+    """
+    rows = [(v, w) for v, w in values_and_weights if w > 0]
+    if len(rows) < 3:
+        return fallback_sigma
+    total_w = sum(w for _, w in rows)
+    if total_w <= 0:
+        return fallback_sigma
+    mu = sum(v * w for v, w in rows) / total_w
+    var = sum(w * (v - mu) ** 2 for v, w in rows) / total_w
+    return max(sigma_floor, math.sqrt(max(var, 0.0)))
+
+
+def _freshness_factor(source: str, age_hours: float) -> float:
+    """exp decay capped at floor; older runs contribute less to the ensemble."""
+    if age_hours is None or age_hours < 0:
+        return 1.0
+    tau = _FRESHNESS_TAU_HOURS.get(source, 10.0)
+    return max(_FRESHNESS_FLOOR, math.exp(-age_hours / tau))
+
+
+def _lead_skill_factors(
+    mae_by_source: dict[str, Optional[float]],
+    n_obs_by_source: Optional[dict[str, int]] = None,
+) -> dict[str, float]:
+    """Per-source weight multiplier from lead-time MAE skill (clamped ±30%).
+
+    For each source with sufficient evidence (n_obs >= threshold and mae > 0),
+    multiplier = clamp(median_mae / mae, 0.7, 1.3). Sources with thin or
+    missing data get 1.0 (no adjustment) and are excluded from the median.
+    Need at least 2 sources with valid evidence to compute a meaningful median.
+    """
+    n_obs = n_obs_by_source or {}
+    valid = {
+        s: m for s, m in mae_by_source.items()
+        if m is not None and m > 0 and n_obs.get(s, 0) >= _LEAD_SKILL_MIN_N_OBS
+    }
+    if len(valid) < 2:
+        return {s: 1.0 for s in mae_by_source}
+    median_mae = statistics.median(valid.values())
+    out: dict[str, float] = {}
+    for s in mae_by_source:
+        m = mae_by_source.get(s)
+        if s in valid and median_mae > 0:
+            ratio = median_mae / m
+            out[s] = max(_LEAD_SKILL_CLAMP[0], min(_LEAD_SKILL_CLAMP[1], ratio))
+        else:
+            out[s] = 1.0
+    return out
 
 
 def _blend_kalman_sigma(
@@ -423,6 +507,10 @@ def compute_model(
     hrrr_high: Optional[float] = None,
     nbm_high: Optional[float] = None,
     ecmwf_ifs_high: Optional[float] = None,
+    model_run_at_by_source: Optional[dict[str, datetime]] = None,
+    lead_skill_mae_by_source: Optional[dict[str, Optional[float]]] = None,
+    lead_skill_n_obs_by_source: Optional[dict[str, int]] = None,
+    now_utc: Optional[datetime] = None,
 ) -> Optional[ModelResult]:
     """
     Fuse all forecast sources and compute temperature distribution + bucket probabilities.
@@ -488,6 +576,38 @@ def compute_model(
         log.warning("model: no forecast sources available — cannot compute model")
         return None
 
+    # ── Phase B1+B2: lead-skill + freshness adjustments ───────────────────
+    # Multiply each source's base weight by its lead-time skill factor (clamped
+    # ±30%) and by an exp-decay freshness factor on model_run_at age. Sources
+    # with no metadata get factor 1.0 (no adjustment).
+    lead_factors = _lead_skill_factors(
+        lead_skill_mae_by_source or {},
+        lead_skill_n_obs_by_source or {},
+    )
+    now_ts = now_utc or datetime.now(timezone.utc)
+    mra = model_run_at_by_source or {}
+    weight_factors: dict[str, dict] = {}
+    for src in list(calibrated.keys()):
+        mu_val, base_w = calibrated[src]
+        lf = lead_factors.get(src, 1.0)
+        mr = mra.get(src)
+        if mr is not None:
+            if mr.tzinfo is None:
+                mr = mr.replace(tzinfo=timezone.utc)
+            age_h = max(0.0, (now_ts - mr).total_seconds() / 3600.0)
+            ff = _freshness_factor(src, age_h)
+        else:
+            age_h = None
+            ff = 1.0
+        calibrated[src] = (mu_val, base_w * lf * ff)
+        weight_factors[src] = {
+            "base": round(base_w, 4),
+            "lead_factor": round(lf, 3),
+            "freshness_factor": round(ff, 3),
+            "age_hours": round(age_h, 2) if age_h is not None else None,
+            "effective": round(base_w * lf * ff, 4),
+        }
+
     # Multi-model weighted mean of available sources (re-normalize weights).
     total_weight = sum(w for _, w in calibrated.values())
     mu_multi_model = sum(v * w for v, w in calibrated.values()) / total_weight
@@ -550,17 +670,23 @@ def compute_model(
         "kalman_weight": round(kalman_w, 3),
         "peak_hour_local": round(peak_hour_local, 2) if peak_hour_local is not None else None,
         "mode": mode,
+        "weight_factors": weight_factors,
     }
 
     # Scale factor for Celsius
     unit_mult = 5.0 / 9.0 if unit == "C" else 1.0
     canonical_buckets = canonical_bucket_ranges(buckets)
 
-    # Uncertainty from disagreement
-    if len(vals) >= 2:
-        sigma_raw = max(1.0 * unit_mult, spread / 2.0)
-    else:
-        sigma_raw = 2.5 * unit_mult
+    # Uncertainty from disagreement (Phase B5).
+    # Prefer weighted-variance σ across ≥3 sources when available — that's
+    # the proper formalization of what spread/2 approximates and it respects
+    # the same per-source weights used in the mean. Fall back to spread/2 (or
+    # the no-evidence default) when we don't have enough sources.
+    sigma_floor = 1.0 * unit_mult
+    fallback = max(sigma_floor, spread / 2.0) if len(vals) >= 2 else 2.5 * unit_mult
+    sigma_raw = _ensemble_sigma(
+        list(calibrated.values()), fallback_sigma=fallback, sigma_floor=sigma_floor,
+    )
 
     # ── Weather-conditioned sigma adjustment ─────────────────────────────────
     # Adjust base sigma using current weather conditions (cloud cover,

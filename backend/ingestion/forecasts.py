@@ -283,8 +283,12 @@ _OM_MODELS = {
 }
 
 
-async def fetch_open_meteo_models_all() -> None:
-    """Fetch HRRR and GFS forecasts via Open-Meteo for all enabled cities."""
+async def fetch_open_meteo_models_all(source_filter: Optional[set[str]] = None) -> None:
+    """Fetch Open-Meteo NWP forecasts for all enabled cities.
+
+    source_filter: optional iterable of `_OM_MODELS` keys (e.g. {"hrrr", "hrrr_15min"})
+    to restrict the fetch. None = fetch all configured models.
+    """
     async with get_session() as sess:
         cities = await get_all_cities(sess, enabled_only=True)
 
@@ -300,6 +304,8 @@ async def fetch_open_meteo_models_all() -> None:
         end_date = active_dates[-1]
 
         for source_key, om_model in _OM_MODELS.items():
+            if source_filter is not None and source_key not in source_filter:
+                continue
             # Skip HRRR for non-US cities (HRRR is North America only)
             if source_key == "hrrr" and not city.is_us:
                 continue

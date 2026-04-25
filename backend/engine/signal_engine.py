@@ -28,6 +28,7 @@ from backend.strategy.kelly import calculate_ev_per_share
 from backend.storage.db import get_session
 from backend.storage.models import Bucket, Event, City
 from backend.storage.repos import (
+    bucket_lead_time,
     get_all_cities,
     get_buckets_for_event,
     get_calibration,
@@ -37,6 +38,7 @@ from backend.storage.repos import (
     get_latest_market_snapshot,
     get_latest_metar,
     get_latest_model_snapshot,
+    get_lead_skills_for_city,
     get_resolution_high_metar,
     get_station_profile,
     get_temp_slope,
@@ -200,6 +202,8 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         ecmwf_ifs_obs = await get_latest_forecast(sess, city.id, "ecmwf_ifs", today_et)
 
         cal = await get_calibration(sess, city.id)
+        # Phase B1: lead-time skill table for ensemble weight adjustment.
+        lead_skills_by_key = await get_lead_skills_for_city(sess, city.id)
         # NEW: Reliability metrics for probability remapping
         reliability_bins = await get_reliability_metrics(city.id)
 
@@ -434,6 +438,37 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
             "dewpoint_spread_f": _dp_spread,
         }
 
+    # ── Phase B1+B2: per-source freshness + lead-skill metadata ──────────
+    # Settlement = end of city local day (23:59:59 in city tz). Lead-time
+    # buckets in SourceLeadTimeSkill snap to {0, 1, 3, 6, 12, 18, 24, 36, 48, 72}h.
+    _settlement_local = datetime.strptime(today_et, "%Y-%m-%d").replace(
+        hour=23, minute=59, second=59, tzinfo=ZoneInfo(getattr(city, "tz", "America/New_York"))
+    )
+    _settlement_utc = _settlement_local.astimezone(timezone.utc)
+    _now_utc = datetime.now(timezone.utc)
+
+    _src_to_obs = {
+        "nws": nws_obs, "wu_hourly": wu_hourly_obs, "hrrr": hrrr_obs,
+        "nbm": nbm_obs, "ecmwf_ifs": ecmwf_ifs_obs,
+    }
+    model_run_at_by_source: dict[str, datetime] = {}
+    lead_skill_mae_by_source: dict[str, Optional[float]] = {}
+    lead_skill_n_obs_by_source: dict[str, int] = {}
+    for _src, _obs in _src_to_obs.items():
+        if _obs is None or _obs.high_f is None:
+            continue
+        _mr = getattr(_obs, "model_run_at", None)
+        if _mr is not None:
+            if _mr.tzinfo is None:
+                _mr = _mr.replace(tzinfo=timezone.utc)
+            model_run_at_by_source[_src] = _mr
+            _lead_h = max(0.0, (_settlement_utc - _mr).total_seconds() / 3600.0)
+            _bucket = bucket_lead_time(_lead_h)
+            _skill = lead_skills_by_key.get((_src, _bucket))
+            if _skill is not None:
+                lead_skill_mae_by_source[_src] = _skill.mae_f
+                lead_skill_n_obs_by_source[_src] = _skill.n_obs
+
     # Run temperature model
     model = compute_model(
         nws_high=nws_obs.high_f if nws_obs else None,
@@ -441,6 +476,10 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         hrrr_high=hrrr_obs.high_f if hrrr_obs else None,
         nbm_high=nbm_obs.high_f if nbm_obs else None,
         ecmwf_ifs_high=ecmwf_ifs_obs.high_f if ecmwf_ifs_obs else None,
+        model_run_at_by_source=model_run_at_by_source or None,
+        lead_skill_mae_by_source=lead_skill_mae_by_source or None,
+        lead_skill_n_obs_by_source=lead_skill_n_obs_by_source or None,
+        now_utc=_now_utc,
         daily_high_metar=ground_truth_high,
         current_temp_f=metar.temp_f if metar else None,
         calibration=cal_dict,

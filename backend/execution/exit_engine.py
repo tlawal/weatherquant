@@ -33,6 +33,55 @@ log = logging.getLogger(__name__)
 # Polymarket taker fee roughly 2%
 FEE_RATE = 0.02
 
+
+async def _emit_exit_event(
+    pos,
+    signal: BucketSignal,
+    cascade: dict,
+    *,
+    shares_exited: float,
+    execution_status: str,
+    error: Optional[str] = None,
+) -> None:
+    """Phase B4 — write a structured ExitEvent row for every cascade decision.
+
+    Captures the full pre-trade context (EV, edge, bid/ask, cascade dict) so
+    we can replay "what did exit_engine see" without parsing free-text logs.
+    """
+    import json as _json
+    from backend.storage.models import ExitEvent
+
+    payload = {
+        "cascade": cascade,
+        "execution_status": execution_status,
+        **({"error": error} if error else {}),
+        "city_slug": signal.city_slug,
+        "bucket_label": signal.label,
+    }
+    try:
+        async with get_session() as sess:
+            sess.add(
+                ExitEvent(
+                    position_id=getattr(pos, "id", 0) or 0,
+                    bucket_id=pos.bucket_id,
+                    trigger_level=cascade["level"],
+                    trigger_reason=cascade["reason"],
+                    ev_at_bid_pre=signal.ev_at_bid,
+                    ev_at_bid_post=None,
+                    true_edge_pre=getattr(signal, "true_edge", None),
+                    true_edge_post=None,
+                    market_bid=signal.yes_bid,
+                    market_ask=signal.yes_ask,
+                    shares_exited=float(shares_exited),
+                    shares_remaining=float(max(0.0, (pos.net_qty or 0.0) - shares_exited)),
+                    model_snapshot_id=None,
+                    reason_json=_json.dumps(payload, default=str),
+                )
+            )
+            await sess.commit()
+    except Exception:
+        log.exception("exit_engine: failed to emit ExitEvent for bucket %s", pos.bucket_id)
+
 # ── DB-backed consensus history (survives deploys) ──────────────────────────
 # In-memory cache is populated from DB on first call and kept in sync.
 _consensus_cache: dict[int, list[int]] = {}
@@ -467,6 +516,15 @@ async def run_exit_engine() -> None:
                 qty_override=exit_qty,
             )
             
+            exec_status = result.get("status", "unknown")
+            shares_actually_exited = float(exit_qty) if exec_status in ("filled", "timeout", "open") else 0.0
+            await _emit_exit_event(
+                pos, signal, cascade,
+                shares_exited=shares_actually_exited,
+                execution_status=exec_status,
+                error=None if exec_status in ("filled", "timeout", "open") else str(result.get("error", "")),
+            )
+
             # ── Handle result ──
             if result.get("status") in ("filled", "timeout", "open"):
                 # Apply post-exit tier state updates (tier flags, trailing stop, etc.)

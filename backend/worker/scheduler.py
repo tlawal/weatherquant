@@ -63,6 +63,24 @@ async def job_fetch_open_meteo_models():
     await fetch_open_meteo_models_all()
 
 
+async def job_fetch_om_hrrr_rapid():
+    """Phase B3 — adaptive HRRR cadence.
+
+    HRRR runs hourly with availability typically ~45 min past each top-of-hour.
+    Polling every 15 min on a fixed cadence wastes up to 14 min after each new
+    run lands. This job fires every 5 min but only does work inside the
+    expected availability window (40–65 min past the hour). Outside the window
+    it's a no-op so the baseline 900s job still covers the rest of the hour.
+    """
+    from datetime import datetime, timezone
+    from backend.ingestion.forecasts import fetch_open_meteo_models_all
+
+    minutes_past = datetime.now(timezone.utc).minute
+    if not (40 <= minutes_past <= 65):
+        return
+    await fetch_open_meteo_models_all(source_filter={"hrrr", "hrrr_15min"})
+
+
 async def job_fetch_gamma():
     from backend.ingestion.polymarket_gamma import fetch_gamma_all
     await fetch_gamma_all()
@@ -238,6 +256,7 @@ def create_scheduler() -> AsyncIOScheduler:
     add(job_fetch_nws,           seconds=900,  name="fetch_nws")   # 15 min
     add(job_fetch_open_meteo,    seconds=900,  name="fetch_open_meteo")
     add(job_fetch_open_meteo_models, seconds=900, name="fetch_om_models")  # 15 min
+    add(job_fetch_om_hrrr_rapid, seconds=300, name="fetch_om_hrrr_rapid")  # 5 min, gated 40–65 min past the hour
     add(job_fetch_wu,            seconds=300,  name="fetch_wu")    # 5 min
     add(job_fetch_gamma,         seconds=120,  name="fetch_gamma") # 2 min
     add(job_fetch_clob,          seconds=30,   name="fetch_clob")

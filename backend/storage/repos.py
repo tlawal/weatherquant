@@ -34,6 +34,7 @@ from backend.storage.models import (
     Position,
     RuntimeConfig,
     Signal,
+    SourceLeadTimeSkill,
     StationCalibration,
     StationProfile,
     WorkerHeartbeat,
@@ -692,6 +693,32 @@ async def get_recent_successful_forecasts(
         q = q.where(ForecastObs.date_et <= before_or_on_date_et)
     result = await session.execute(q.limit(limit))
     return list(result.scalars().all())
+
+
+# ─── Lead-time skill ──────────────────────────────────────────────────────────
+
+_LEAD_TIME_BUCKETS = (72, 48, 36, 24, 18, 12, 6, 3, 1, 0)
+
+
+def bucket_lead_time(hours: float) -> int:
+    """Snap a continuous lead time (hours) to the nearest tracked bucket."""
+    for b in _LEAD_TIME_BUCKETS:
+        if hours >= b:
+            return b
+    return 0
+
+
+async def get_lead_skills_for_city(
+    session: AsyncSession, city_id: int
+) -> dict[tuple[str, int], SourceLeadTimeSkill]:
+    """All SourceLeadTimeSkill rows for a city, keyed by (source, bucket_hours)."""
+    result = await session.execute(
+        select(SourceLeadTimeSkill).where(SourceLeadTimeSkill.city_id == city_id)
+    )
+    return {
+        (row.source, row.lead_time_bucket_hours): row
+        for row in result.scalars().all()
+    }
 
 
 # ─── Market Snapshots ─────────────────────────────────────────────────────────

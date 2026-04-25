@@ -1146,6 +1146,111 @@ async def redemptions_page(request: Request):
     return templates.TemplateResponse("redemptions.html", {"request": request})
 
 
+@dashboard_router.get("/api/positions/{position_id}/exit-events")
+async def position_exit_events(position_id: int):
+    """Phase B4 — structured exit-event journal for a position.
+
+    Returns every cascade decision the exit engine made on this position,
+    with the full pre-trade context. Drives the position-journal UI.
+    """
+    import json as _json
+    from sqlalchemy import select
+    from backend.storage.db import get_session
+    from backend.storage.models import ExitEvent
+
+    async with get_session() as sess:
+        result = await sess.execute(
+            select(ExitEvent)
+            .where(ExitEvent.position_id == position_id)
+            .order_by(ExitEvent.ts.asc())
+        )
+        rows = list(result.scalars().all())
+
+    events = []
+    for r in rows:
+        try:
+            reason = _json.loads(r.reason_json) if r.reason_json else None
+        except Exception:
+            reason = None
+        events.append({
+            "id": r.id,
+            "ts": r.ts.isoformat() if r.ts else None,
+            "trigger_level": r.trigger_level,
+            "trigger_reason": r.trigger_reason,
+            "ev_at_bid_pre": r.ev_at_bid_pre,
+            "ev_at_bid_post": r.ev_at_bid_post,
+            "true_edge_pre": r.true_edge_pre,
+            "true_edge_post": r.true_edge_post,
+            "market_bid": r.market_bid,
+            "market_ask": r.market_ask,
+            "shares_exited": r.shares_exited,
+            "shares_remaining": r.shares_remaining,
+            "model_snapshot_id": r.model_snapshot_id,
+            "reason": reason,
+        })
+    return {"position_id": position_id, "events": events}
+
+
+@dashboard_router.get("/positions/{position_id}/journal", response_class=HTMLResponse)
+async def position_journal_page(request: Request, position_id: int):
+    """Read-only journal view of all exit events for a position."""
+    import json as _json
+    from sqlalchemy import select
+    from backend.storage.db import get_session
+    from backend.storage.models import ExitEvent, Position
+
+    async with get_session() as sess:
+        pos = (await sess.execute(
+            select(Position).where(Position.id == position_id)
+        )).scalar_one_or_none()
+        events = list((await sess.execute(
+            select(ExitEvent)
+            .where(ExitEvent.position_id == position_id)
+            .order_by(ExitEvent.ts.asc())
+        )).scalars().all())
+
+    rows_html = []
+    for e in events:
+        try:
+            reason = _json.loads(e.reason_json) if e.reason_json else {}
+        except Exception:
+            reason = {}
+        rows_html.append(
+            f"<tr>"
+            f"<td>{e.ts.isoformat(timespec='seconds') if e.ts else ''}</td>"
+            f"<td><b>{e.trigger_level}</b></td>"
+            f"<td>{e.trigger_reason}</td>"
+            f"<td>{f'{e.ev_at_bid_pre:.4f}' if e.ev_at_bid_pre is not None else '—'}</td>"
+            f"<td>{f'{e.market_bid:.3f}' if e.market_bid is not None else '—'}</td>"
+            f"<td>{f'{e.market_ask:.3f}' if e.market_ask is not None else '—'}</td>"
+            f"<td>{e.shares_exited:.1f}</td>"
+            f"<td>{e.shares_remaining:.1f}</td>"
+            f"<td><code style='font-size:11px'>{reason.get('execution_status','—')}</code></td>"
+            f"</tr>"
+        )
+    pos_label = (
+        f"Position {pos.id} · bucket {pos.bucket_id} · entry ${pos.avg_cost:.3f}"
+        if pos else f"Position {position_id} (not found)"
+    )
+    body = (
+        "<style>body{font-family:system-ui;padding:18px;max-width:1100px;margin:auto}"
+        "table{border-collapse:collapse;width:100%;font-size:13px}"
+        "th,td{border:1px solid #ddd;padding:6px 8px;text-align:left}"
+        "th{background:#f4f4f4}h1{font-size:18px;margin-bottom:4px}"
+        "p{color:#666;margin-top:0;margin-bottom:14px}</style>"
+        f"<h1>Exit Journal — {pos_label}</h1>"
+        f"<p>{len(events)} exit decision(s) recorded.</p>"
+        "<table><thead><tr>"
+        "<th>Timestamp (UTC)</th><th>Level</th><th>Reason</th>"
+        "<th>EV@bid</th><th>Bid</th><th>Ask</th>"
+        "<th>Exited</th><th>Remaining</th><th>Status</th>"
+        "</tr></thead><tbody>"
+        + "".join(rows_html)
+        + "</tbody></table>"
+    )
+    return HTMLResponse(body)
+
+
 @dashboard_router.get("/strategies", response_class=HTMLResponse)
 async def strategies_page(request: Request):
     """Strategy configuration, Kelly sizing, model schedules, and probability heatmap."""

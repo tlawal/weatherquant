@@ -530,6 +530,41 @@ class EVHistory(Base):
     )
 
 
+class ExitEvent(Base):
+    """Structured per-exit journal — replaces overwriting `Position.current_exit_status`.
+
+    Phase B4 — one row per exit decision (any cascade level fired). Lets us
+    attribute realized PnL across tier-1/tier-2/URGENT/EDGE_DECAY/EXPIRY and
+    rebuild "what did the exit engine see at that moment" without parsing
+    free-text logs.
+    """
+    __tablename__ = "exit_events"
+    __table_args__ = (
+        Index("ix_exit_event_position_ts", "position_id", "ts"),
+        Index("ix_exit_event_bucket_ts", "bucket_id", "ts"),
+        Index("ix_exit_event_trigger", "trigger_level"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    position_id: Mapped[int] = mapped_column(Integer, ForeignKey("positions.id"), nullable=False)
+    bucket_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    # EMERGENCY | URGENT | EDGE_DECAY | PROFIT | EXPIRY
+    trigger_level: Mapped[str] = mapped_column(String(16), nullable=False)
+    # busted_high | consensus_shifted | ev_decayed | tier_1_50pct | tier_2_75pct | trailing_stop | expiry | ...
+    trigger_reason: Mapped[str] = mapped_column(String(64), nullable=False)
+    ev_at_bid_pre: Mapped[Optional[float]] = mapped_column(Float)
+    ev_at_bid_post: Mapped[Optional[float]] = mapped_column(Float)
+    true_edge_pre: Mapped[Optional[float]] = mapped_column(Float)
+    true_edge_post: Mapped[Optional[float]] = mapped_column(Float)
+    market_bid: Mapped[Optional[float]] = mapped_column(Float)
+    market_ask: Mapped[Optional[float]] = mapped_column(Float)
+    shares_exited: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    shares_remaining: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    model_snapshot_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("model_snapshots.id"))
+    reason_json: Mapped[Optional[str]] = mapped_column(Text)
+
+
 class ArmingState(Base):
     """Singleton arming state machine. Always exactly 1 row (id=1)."""
     __tablename__ = "arming_state"
