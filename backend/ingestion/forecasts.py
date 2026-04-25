@@ -163,7 +163,14 @@ async def fetch_nws_all() -> None:
                     raw_json=raw,
                     parse_error=None if high_f is not None else "parse_failed",
                 )
-            log.info("nws: %s date=%s high_f=%s", city.city_slug, active_date, high_f)
+            # Phase A5 — log ingestion latency: how stale is this forecast cycle?
+            age_s = None
+            if model_run_at is not None and high_f is not None:
+                age_s = int((datetime.now(timezone.utc) - model_run_at).total_seconds())
+            log.info(
+                "ingest: src=nws city=%s date=%s high_f=%s model_run_age_s=%s",
+                city.city_slug, active_date, high_f, age_s,
+            )
 
         async with get_session() as sess:
             await update_heartbeat(sess, "fetch_nws", success=True)
@@ -338,7 +345,14 @@ async def fetch_open_meteo_models_all() -> None:
                         parse_error=None if high_f is not None else "parse_failed",
                     )
                 if high_f is not None:
-                    log.info("om-%s: %s date=%s high_f=%s", source_key, city.city_slug, active_date, high_f)
+                    # Phase A5 — log ingestion latency per Open-Meteo model run
+                    age_s = None
+                    if model_run_at is not None:
+                        age_s = int((datetime.now(timezone.utc) - model_run_at).total_seconds())
+                    log.info(
+                        "ingest: src=%s city=%s date=%s high_f=%s model_run_age_s=%s",
+                        source_key, city.city_slug, active_date, high_f, age_s,
+                    )
 
     async with get_session() as sess:
         await update_heartbeat(sess, "fetch_om_models", success=True)

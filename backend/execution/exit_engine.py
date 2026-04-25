@@ -254,7 +254,7 @@ async def _run_exit_cascade_for_position(
                 "qty_override": sell_qty,
             }
 
-    # ── 2. URGENT ── (debounced + spread-guarded + confidence-gated)
+    # ── 2. URGENT ── (debounced + spread-guarded + confidence-gated + EV-corroborated)
     # Model consensus shifted to different bucket, we are holding a non-consensus bucket.
     if consensus_bucket_id and pos.bucket_id != consensus_bucket_id and consensus_sig:
         spread = signal.spread or 0.0
@@ -262,7 +262,19 @@ async def _run_exit_cascade_for_position(
         held_prob = signal.model_prob
         cons_prob = consensus_sig.model_prob
 
-        if age_s < Config.URGENT_MIN_POSITION_AGE_SECONDS:
+        # EV corroboration: if the held bucket is still meaningfully +EV at the bid,
+        # a consensus-shift alone is not enough to URGENT-exit. EDGE_DECAY (above)
+        # already handles the case where EV has actually decayed; URGENT now only
+        # fires on a structural shift that's NOT contradicted by EV.
+        ev_at_bid = signal.ev_at_bid
+
+        if ev_at_bid is not None and ev_at_bid > Config.EDGE_DECAY_THRESHOLD:
+            log.info(
+                "exit: URGENT suppressed %s — consensus shifted but held bucket still +EV "
+                "(ev_at_bid=%.4f > %.4f, consensus→bucket_id=%s)",
+                signal.city_slug, ev_at_bid, Config.EDGE_DECAY_THRESHOLD, consensus_bucket_id,
+            )
+        elif age_s < Config.URGENT_MIN_POSITION_AGE_SECONDS:
             log.info("exit: URGENT suppressed %s — position age %ds < %ds", signal.city_slug, int(age_s), Config.URGENT_MIN_POSITION_AGE_SECONDS)
         elif held_prob >= Config.URGENT_MIN_EXIT_MODEL_PROB and held_prob >= cons_prob * 0.40:
             log.info("exit: URGENT suppressed %s — probability gate (held=%.2f, cons=%.2f)", signal.city_slug, held_prob, cons_prob)

@@ -117,6 +117,33 @@ def _metar_weight(hour_local: int) -> float:
     return _interpolate_table(_METAR_WEIGHT_TABLE, hour_local)
 
 
+def _blend_kalman_sigma(
+    sigma_final: float,
+    w_metar: float,
+    kalman_uncertainty: float,
+    peak_hour_local: Optional[float],
+    hour_local_fractional: float,
+    unit_mult: float = 1.0,
+) -> float:
+    """Mix the Kalman posterior σ into σ_final at the METAR weight.
+
+    Kalman σ is the filter's posterior std (sqrt(P[0,0])) in the city's unit.
+    Add a drift term proportional to hours-to-peak — early in the day there's
+    more time for the trajectory to deviate from the smoothed estimate. Both
+    components combine in quadrature; the result blends in at w_metar weight
+    because Kalman is METAR-derived evidence.
+    """
+    if peak_hour_local is not None:
+        hours_to_peak = max(0.5, peak_hour_local - hour_local_fractional)
+    else:
+        hours_to_peak = 2.0
+    drift_sigma = 0.3 * hours_to_peak * unit_mult  # ~0.3°F/hr of trajectory drift
+    kalman_sigma = math.sqrt(kalman_uncertainty ** 2 + drift_sigma ** 2)
+    return math.sqrt(
+        (1.0 - w_metar) * sigma_final ** 2 + w_metar * kalman_sigma ** 2
+    )
+
+
 def compute_kalman_weight(
     hour_local_fractional: float,
     peak_hour_local: Optional[float],
@@ -711,6 +738,24 @@ def compute_model(
     # Apply adaptive sigma adjustment (tightens when trend data is rich)
     if adaptive is not None:
         sigma_final *= adaptive.sigma_adjustment
+
+    # ── Kalman posterior uncertainty blend (Phase A4) ─────────────────────────
+    # Once the Kalman filter has enough observations (n_obs >= 10), its
+    # posterior std deviation P[0,0]^0.5 is meaningful. Blend it in via
+    # _blend_kalman_sigma — kept as a separate helper so the math is testable.
+    if (
+        adaptive is not None
+        and adaptive.kalman is not None
+        and adaptive.kalman.n_observations >= 10
+    ):
+        sigma_final = _blend_kalman_sigma(
+            sigma_final=sigma_final,
+            w_metar=w_metar,
+            kalman_uncertainty=adaptive.kalman.uncertainty,
+            peak_hour_local=peak_hour_local,
+            hour_local_fractional=hour_local_fractional,
+            unit_mult=unit_mult,
+        )
 
     sigma_final = max(1.0 * unit_mult, sigma_final)
 
