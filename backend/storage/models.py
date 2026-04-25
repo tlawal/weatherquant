@@ -509,6 +509,27 @@ class ConsensusHistory(Base):
     )
 
 
+class EVHistory(Base):
+    """Per-bucket EV-at-bid history for the EDGE_DECAY exit gate (Phase A2).
+
+    One row per exit-engine cycle per held bucket. Survives Railway redeploys
+    so the debounce window does not reset on every container restart.
+    """
+    __tablename__ = "ev_history"
+    __table_args__ = (
+        Index("ix_ev_bucket_ts", "bucket_id", "recorded_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    bucket_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    ev_at_bid: Mapped[float] = mapped_column(Float, nullable=False)
+    yes_bid: Mapped[Optional[float]] = mapped_column(Float)
+    model_prob: Mapped[Optional[float]] = mapped_column(Float)
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+
+
 class ArmingState(Base):
     """Singleton arming state machine. Always exactly 1 row (id=1)."""
     __tablename__ = "arming_state"

@@ -86,6 +86,13 @@ class Config:
     URGENT_MIN_BID_DEPTH: float = _float("URGENT_MIN_BID_DEPTH", 5.0)
     URGENT_ADJACENT_DEBOUNCE_MULTIPLIER: int = _int("URGENT_ADJACENT_DEBOUNCE_MULTIPLIER", 2)
     EXIT_MARKET_SELL_MAX_SPREAD: float = _float("EXIT_MARKET_SELL_MAX_SPREAD", 0.06)
+    # EDGE_DECAY exit (Phase A2 — EV-based exit gate, fires before URGENT).
+    # Exit when ev_at_bid stays at or below threshold for N consecutive runs.
+    EDGE_DECAY_THRESHOLD: float = _float("EDGE_DECAY_THRESHOLD", -0.005)
+    EDGE_DECAY_DEBOUNCE_RUNS: int = _int("EDGE_DECAY_DEBOUNCE_RUNS", 3)
+    EDGE_DECAY_MIN_POSITION_AGE_SECONDS: int = _int("EDGE_DECAY_MIN_POSITION_AGE_SECONDS", 1800)
+    EDGE_DECAY_MIN_BID: float = _float("EDGE_DECAY_MIN_BID", 0.03)
+    EDGE_DECAY_HISTORY_KEEP: int = _int("EDGE_DECAY_HISTORY_KEEP", 10)
 
     # ── Portfolio Risk ───────────────────────────────────────────────────────
     MAX_DRAWDOWN_PCT: float = _float("MAX_DRAWDOWN_PCT", 0.25)

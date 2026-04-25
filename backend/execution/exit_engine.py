@@ -2,8 +2,11 @@
 Exit Engine — manages risk and takes profit for open positions.
 
 Interval: 300 seconds (5 min)
-4-level cascade:
+5-level cascade:
     1. EMERGENCY: METAR obs contradicts bucket by >= 3°F (Market sell)
+    1b. EDGE_DECAY: ev_at_bid <= EDGE_DECAY_THRESHOLD for EDGE_DECAY_DEBOUNCE_RUNS
+        consecutive runs (Limit sell at bid). Fires before URGENT so EV-based
+        exits take priority over structural-shift exits.
     2. URGENT: Model consensus shifted to different bucket (Limit sell bid - 1c)
        — debounced: requires CONSENSUS_DEBOUNCE_RUNS consecutive shifts
        — spread-guarded: suppressed when spread > URGENT_EXIT_MAX_SPREAD
@@ -34,6 +37,11 @@ FEE_RATE = 0.02
 # In-memory cache is populated from DB on first call and kept in sync.
 _consensus_cache: dict[int, list[int]] = {}
 _consensus_cache_loaded = False
+
+# ── DB-backed EV history (Phase A2 — EDGE_DECAY exit gate) ───────────────────
+# Per-bucket recent ev_at_bid values. Same survives-deploys pattern as consensus.
+_ev_cache: dict[int, list[float]] = {}
+_ev_cache_loaded = False
 
 
 async def _load_consensus_cache() -> None:
@@ -83,6 +91,73 @@ async def _record_consensus(event_id: int, bucket_id: int) -> None:
                 .where(ConsensusHistory.id.in_(stale_ids))
             )
         await sess.commit()
+
+
+async def _load_ev_cache() -> None:
+    """Warm the in-memory EV-history cache from the DB on first call."""
+    global _ev_cache, _ev_cache_loaded
+    if _ev_cache_loaded:
+        return
+    from backend.storage.models import EVHistory
+    async with get_session() as sess:
+        rows = (await sess.execute(
+            select(EVHistory)
+            .order_by(EVHistory.recorded_at.asc())
+            .limit(1000)  # cap memory; per-bucket trim happens on write
+        )).scalars().all()
+    cache: dict[int, list[float]] = {}
+    for r in rows:
+        cache.setdefault(r.bucket_id, []).append(r.ev_at_bid)
+    # Trim each bucket's history to the last EDGE_DECAY_HISTORY_KEEP entries.
+    keep = Config.EDGE_DECAY_HISTORY_KEEP
+    for bid, lst in cache.items():
+        if len(lst) > keep:
+            cache[bid] = lst[-keep:]
+    _ev_cache = cache
+    _ev_cache_loaded = True
+    log.info("ev_cache: loaded %d buckets, %d total rows from DB",
+             len(cache), sum(len(v) for v in cache.values()))
+
+
+async def _record_ev(bucket_id: int, ev_at_bid: float, yes_bid: float | None,
+                     model_prob: float | None) -> None:
+    """Append an EV observation for a bucket to DB + in-memory cache."""
+    from backend.storage.models import EVHistory
+    hist = _ev_cache.setdefault(bucket_id, [])
+    hist.append(ev_at_bid)
+    keep = Config.EDGE_DECAY_HISTORY_KEEP
+    if len(hist) > keep:
+        del hist[:-keep]
+    async with get_session() as sess:
+        sess.add(EVHistory(
+            bucket_id=bucket_id,
+            ev_at_bid=ev_at_bid,
+            yes_bid=yes_bid,
+            model_prob=model_prob,
+            recorded_at=datetime.now(timezone.utc),
+        ))
+        # Prune old rows for this bucket (keep last N)
+        all_rows = (await sess.execute(
+            select(EVHistory.id)
+            .where(EVHistory.bucket_id == bucket_id)
+            .order_by(desc(EVHistory.recorded_at))
+        )).scalars().all()
+        if len(all_rows) > keep:
+            stale_ids = all_rows[keep:]
+            await sess.execute(
+                delete(EVHistory).where(EVHistory.id.in_(stale_ids))
+            )
+        await sess.commit()
+
+
+def _edge_decay_triggered(bucket_id: int) -> bool:
+    """True if the last EDGE_DECAY_DEBOUNCE_RUNS recorded EVs are all <= threshold."""
+    hist = _ev_cache.get(bucket_id, [])
+    n = Config.EDGE_DECAY_DEBOUNCE_RUNS
+    if len(hist) < n:
+        return False
+    recent = hist[-n:]
+    return all(e <= Config.EDGE_DECAY_THRESHOLD for e in recent)
 
 
 def _stable_consensus(event_id: int, held_bucket_id: int, multiplier: int = 1) -> int | None:
@@ -141,11 +216,47 @@ async def _run_exit_cascade_for_position(
         if obs_high < signal.low_f - 3.0 and now_local.hour >= 18:
             log.warning("exit: EMERGENCY %s - deep miss (obs=%.1f < bucket=%.1f)", signal.city_slug, obs_high, signal.low_f)
             return {"level": "EMERGENCY", "price": bid, "reason": "deep_miss"}
-            
+
+    # Position age (used by EDGE_DECAY and URGENT gates).
+    age_s = (
+        (now_local.astimezone(timezone.utc) - pos.entry_time.astimezone(timezone.utc)).total_seconds()
+        if pos.entry_time else float('inf')
+    )
+
+    # ── 1b. EDGE_DECAY ── (EV-based, fires before URGENT)
+    # Exit when ev_at_bid has stayed at or below threshold for N consecutive runs.
+    # Held bucket is no longer +EV; sell the non-moon-bag portion at the bid.
+    if (
+        signal.ev_at_bid is not None
+        and _edge_decay_triggered(pos.bucket_id)
+        and age_s >= Config.EDGE_DECAY_MIN_POSITION_AGE_SECONDS
+        and bid >= Config.EDGE_DECAY_MIN_BID
+    ):
+        sell_qty = pos.net_qty - (pos.moon_bag_qty or 0.0)
+        if sell_qty <= 0:
+            log.info(
+                "exit: EDGE_DECAY suppressed %s — only moon-bag remaining (%.1f shares)",
+                signal.city_slug, pos.net_qty,
+            )
+        else:
+            recent = _ev_cache.get(pos.bucket_id, [])[-Config.EDGE_DECAY_DEBOUNCE_RUNS:]
+            log.info(
+                "exit: EDGE_DECAY %s — ev_at_bid persisted <= %.4f for %d runs (recent=%s, age_s=%d). "
+                "Selling %.1f shares at bid=%.3f.",
+                signal.city_slug, Config.EDGE_DECAY_THRESHOLD,
+                Config.EDGE_DECAY_DEBOUNCE_RUNS,
+                [round(e, 4) for e in recent], int(age_s), sell_qty, bid,
+            )
+            return {
+                "level": "EDGE_DECAY",
+                "price": bid,
+                "reason": "ev_decayed",
+                "qty_override": sell_qty,
+            }
+
     # ── 2. URGENT ── (debounced + spread-guarded + confidence-gated)
     # Model consensus shifted to different bucket, we are holding a non-consensus bucket.
     if consensus_bucket_id and pos.bucket_id != consensus_bucket_id and consensus_sig:
-        age_s = (now_local.astimezone(timezone.utc) - pos.entry_time.astimezone(timezone.utc)).total_seconds() if pos.entry_time else float('inf')
         spread = signal.spread or 0.0
         bid_depth = signal.yes_bid_depth or 0.0
         held_prob = signal.model_prob
@@ -267,8 +378,9 @@ async def run_exit_engine() -> None:
     signals = await run_signal_engine()
     sig_map = {s.bucket_id: s for s in signals}
     
-    # Warm consensus cache from DB on first run (survives deploys)
+    # Warm consensus + EV caches from DB on first run (survives deploys)
     await _load_consensus_cache()
+    await _load_ev_cache()
 
     # Find consensus bucket for each event (highest model prob)
     event_consensus = {}
@@ -279,6 +391,19 @@ async def run_exit_engine() -> None:
     # Persist consensus to DB + update in-memory cache
     for event_id, sig in event_consensus.items():
         await _record_consensus(event_id, sig.bucket_id)
+
+    # Persist per-position EV-at-bid history (drives the EDGE_DECAY gate).
+    # Skip positions with no signal or no bid-side EV (no market data).
+    for pos in active_positions:
+        signal = sig_map.get(pos.bucket_id)
+        if signal is None or signal.ev_at_bid is None:
+            continue
+        await _record_ev(
+            bucket_id=pos.bucket_id,
+            ev_at_bid=signal.ev_at_bid,
+            yes_bid=signal.yes_bid,
+            model_prob=signal.model_prob,
+        )
 
     exits_triggered = 0
 
