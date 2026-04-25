@@ -280,7 +280,14 @@ _OM_MODELS = {
     "hrrr_15min": "ncep_hrrr_conus_15min",  # HRRR CONUS 15-minute output
     "nbm": "ncep_nbm_conus",    # NCEP National Blend of Models, US CONUS
     "ecmwf_ifs": "ecmwf_ifs",   # ECMWF Integrated Forecast System, global 9–25 km
+    # Phase C4 — ECMWF AIFS (AI Integrated Forecasting System), 0.25° single-level.
+    # Released real-time via the open ECMWF catalog, no embargo. Marked as
+    # experimental in the UI until the 30-day MAE comparison vs ecmwf_ifs lands.
+    "ecmwf_aifs": "ecmwf_aifs025_single",
 }
+
+# Sources marked experimental in the UI (asterisk badge on city pages).
+EXPERIMENTAL_FORECAST_SOURCES: frozenset[str] = frozenset({"ecmwf_aifs"})
 
 
 async def fetch_open_meteo_models_all(source_filter: Optional[set[str]] = None) -> None:

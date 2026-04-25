@@ -179,12 +179,20 @@ async def execute_signal(
             (p.net_qty * p.avg_cost) for p in all_positions if p.net_qty > 0
         )
 
+        # Phase C3 — scale Kelly down in volatile regimes. Defaults to 1.0
+        # (no scaling) when the signal carries no regime telemetry.
+        from backend.modeling.regime import regime_kelly_multiplier
+        _rmult = (
+            regime_kelly_multiplier(signal.regime_score)
+            if signal.regime_score is not None else 1.0
+        )
         sizing = compute_size(
             model_prob=signal.model_prob,
             limit_price=limit_price,
             bankroll=bankroll,
             open_exposure=open_exposure,
             ask_depth=signal.yes_ask_depth,
+            regime_multiplier=_rmult,
         )
 
         if sizing.rejected:

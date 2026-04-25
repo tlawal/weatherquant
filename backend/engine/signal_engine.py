@@ -24,6 +24,7 @@ from backend.modeling.temperature_model import compute_model, ModelResult
 from backend.modeling.calibration import get_calibration_async
 from backend.modeling.calibration_engine import get_reliability_metrics, remap_probability
 from backend.modeling.adaptive import run_adaptive
+from backend.modeling.regime import detect_regime, regime_kelly_multiplier
 from backend.strategy.kelly import calculate_ev_per_share
 from backend.storage.db import get_session
 from backend.storage.models import Bucket, Event, City
@@ -39,6 +40,7 @@ from backend.storage.repos import (
     get_latest_metar,
     get_latest_model_snapshot,
     get_lead_skills_for_city,
+    get_recent_model_snapshots,
     get_resolution_high_metar,
     get_station_profile,
     get_temp_slope,
@@ -88,6 +90,10 @@ class BucketSignal:
     resolution_mismatch: Optional[float] = None
     observed_bucket_idx: Optional[int] = None
     observed_bucket_upper_f: Optional[float] = None
+    # Phase C3 — regime telemetry (attached per-city; same value for every
+    # bucket in the city). None = regime detector did not run this cycle.
+    regime_score: Optional[float] = None
+    regime_label: Optional[str] = None
 
 
 def classify_city_state(prob_new_high: float) -> str:
@@ -200,6 +206,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         hrrr_obs = await get_latest_forecast(sess, city.id, "hrrr", today_et)
         nbm_obs = await get_latest_forecast(sess, city.id, "nbm", today_et)
         ecmwf_ifs_obs = await get_latest_forecast(sess, city.id, "ecmwf_ifs", today_et)
+        ecmwf_aifs_obs = await get_latest_forecast(sess, city.id, "ecmwf_aifs", today_et)
 
         cal = await get_calibration(sess, city.id)
         # Phase B1: lead-time skill table for ensemble weight adjustment.
@@ -450,6 +457,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
     _src_to_obs = {
         "nws": nws_obs, "wu_hourly": wu_hourly_obs, "hrrr": hrrr_obs,
         "nbm": nbm_obs, "ecmwf_ifs": ecmwf_ifs_obs,
+        "ecmwf_aifs": ecmwf_aifs_obs,
     }
     model_run_at_by_source: dict[str, datetime] = {}
     lead_skill_mae_by_source: dict[str, Optional[float]] = {}
@@ -476,6 +484,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         hrrr_high=hrrr_obs.high_f if hrrr_obs else None,
         nbm_high=nbm_obs.high_f if nbm_obs else None,
         ecmwf_ifs_high=ecmwf_ifs_obs.high_f if ecmwf_ifs_obs else None,
+        ecmwf_aifs_high=ecmwf_aifs_obs.high_f if ecmwf_aifs_obs else None,
         model_run_at_by_source=model_run_at_by_source or None,
         lead_skill_mae_by_source=lead_skill_mae_by_source or None,
         lead_skill_n_obs_by_source=lead_skill_n_obs_by_source or None,
@@ -530,6 +539,36 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
             forecast_quality=model.forecast_quality,
         )
         snapshot_id = snapshot.id if snapshot is not None else None
+
+        # Phase C3 — regime detection. Pull last few historical spreads for
+        # spread-growth signal. Same value stamped on every BucketSignal in
+        # this city this cycle.
+        try:
+            _recent_snaps = await get_recent_model_snapshots(sess, event.id, limit=4)
+            _historical_spreads: list[float] = []
+            # Skip the snapshot we just inserted (newest); take up to 3 prior.
+            for _s in _recent_snaps:
+                if snapshot_id is not None and _s.id == snapshot_id:
+                    continue
+                try:
+                    _inputs = json.loads(_s.inputs_json) if _s.inputs_json else {}
+                    _sp = _inputs.get("spread")
+                    if _sp is not None:
+                        _historical_spreads.append(float(_sp))
+                except Exception:
+                    pass
+                if len(_historical_spreads) >= 3:
+                    break
+            _current_spread = float(model.inputs.get("spread")) if model.inputs.get("spread") is not None else None
+            _regime = detect_regime(
+                current_spread_f=_current_spread,
+                historical_spreads_f=_historical_spreads or None,
+                pressure_tendency_inhg=(_latest_wx or {}).get("pressure_tendency"),
+                has_precip=bool((_latest_wx or {}).get("has_precip")),
+            )
+        except Exception:
+            log.exception("signal: %s — regime detection failed; defaulting to neutral", city.city_slug)
+            _regime = None
 
         if city_state == "resolved":
             log.info(
@@ -589,6 +628,8 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
                     resolution_mismatch=resolution_mismatch,
                     observed_bucket_idx=model.observed_bucket_idx,
                     observed_bucket_upper_f=model.observed_bucket_upper_f,
+                    regime_score=(_regime.score if _regime else None),
+                    regime_label=(_regime.label.value if _regime else None),
                 )
                 signals.append(sig)
                 continue
@@ -688,6 +729,8 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
                 resolution_mismatch=resolution_mismatch,
                 observed_bucket_idx=model.observed_bucket_idx,
                 observed_bucket_upper_f=model.observed_bucket_upper_f,
+                regime_score=(_regime.score if _regime else None),
+                regime_label=(_regime.label.value if _regime else None),
             )
             signals.append(sig)
 

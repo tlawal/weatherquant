@@ -53,6 +53,7 @@ def compute_size(
     bankroll: float,
     open_exposure: float,
     ask_depth: float,
+    regime_multiplier: float = 1.0,
 ) -> SizingResult:
     """
     Compute position size using half-Kelly with hard caps.
@@ -81,10 +82,14 @@ def compute_size(
         return _rejected(f"bankroll_exhausted: remaining=${bankroll_remaining:.2f}", 0, 0, 0, bankroll_remaining)
 
     # ── Kelly fraction ────────────────────────────────────────────────────────
+    # Phase C3 — regime_multiplier scales the base Kelly down in volatile
+    # regimes (front passing, ensemble disagreement growing, active wx).
+    # Clamped to [0.5, 1.0] in regime_kelly_multiplier; defensive clamp here too.
+    rm = max(0.5, min(1.0, regime_multiplier))
     kelly_f = calculate_kelly_fraction(
         model_prob=model_prob,
         yes_price=limit_price,
-        fractional_kelly=Config.KELLY_FRACTION,
+        fractional_kelly=Config.KELLY_FRACTION * rm,
         max_position_size=Config.MAX_POSITION_PCT,
     )
 

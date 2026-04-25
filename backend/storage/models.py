@@ -565,6 +565,39 @@ class ExitEvent(Base):
     reason_json: Mapped[Optional[str]] = mapped_column(Text)
 
 
+class HerbieForecastTiming(Base):
+    """Phase C4 — Herbie side-channel harness, observability only.
+
+    One row per (city, source, model_run, lead) triple Herbie successfully
+    decoded. Joined offline against ForecastObs (the production Open-Meteo
+    path) to produce the per-source latency + accuracy comparison rendered at
+    /herbie-timing. Settlement MAE columns are back-filled by a nightly cron
+    once the day's METAR-confirmed high is final.
+    """
+    __tablename__ = "herbie_forecast_timing"
+    __table_args__ = (
+        Index("ix_herbie_timing_source_run", "source", "model_run_at"),
+        Index("ix_herbie_timing_city", "city_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    city_id: Mapped[int] = mapped_column(Integer, ForeignKey("cities.id"), nullable=False)
+    # herbie_hrrr | herbie_nbm | herbie_ifs | herbie_aifs
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    model_run_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    lead_hours: Mapped[float] = mapped_column(Float, nullable=False)
+    herbie_fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    herbie_available_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    open_meteo_fetched_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    latency_delta_seconds: Mapped[Optional[float]] = mapped_column(Float)
+    high_f_herbie: Mapped[Optional[float]] = mapped_column(Float)
+    high_f_open_meteo: Mapped[Optional[float]] = mapped_column(Float)
+    abs_diff_f: Mapped[Optional[float]] = mapped_column(Float)
+    settlement_high_f: Mapped[Optional[float]] = mapped_column(Float)
+    herbie_mae_at_resolution: Mapped[Optional[float]] = mapped_column(Float)
+    open_meteo_mae_at_resolution: Mapped[Optional[float]] = mapped_column(Float)
+
+
 class ArmingState(Base):
     """Singleton arming state machine. Always exactly 1 row (id=1)."""
     __tablename__ = "arming_state"

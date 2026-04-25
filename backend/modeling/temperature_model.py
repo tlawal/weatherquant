@@ -507,6 +507,7 @@ def compute_model(
     hrrr_high: Optional[float] = None,
     nbm_high: Optional[float] = None,
     ecmwf_ifs_high: Optional[float] = None,
+    ecmwf_aifs_high: Optional[float] = None,
     model_run_at_by_source: Optional[dict[str, datetime]] = None,
     lead_skill_mae_by_source: Optional[dict[str, Optional[float]]] = None,
     lead_skill_n_obs_by_source: Optional[dict[str, int]] = None,
@@ -570,6 +571,11 @@ def compute_model(
         calibrated["ecmwf_ifs"] = (
             _debias("ecmwf_ifs", ecmwf_ifs_high),
             _weight("ecmwf_ifs", 0.5),
+        )
+    if ecmwf_aifs_high is not None:
+        calibrated["ecmwf_aifs"] = (
+            _debias("ecmwf_aifs", ecmwf_aifs_high),
+            _weight("ecmwf_aifs", 0.4),
         )
 
     if not calibrated:
@@ -940,6 +946,7 @@ def compute_model(
         "hrrr_high": hrrr_high,
         "nbm_high": nbm_high,
         "ecmwf_ifs_high": ecmwf_ifs_high,
+        "ecmwf_aifs_high": ecmwf_aifs_high,
         "daily_high_metar": daily_high_metar,
         "current_temp_f": current_temp_f,
         "mu_forecast": float(mu_forecast),

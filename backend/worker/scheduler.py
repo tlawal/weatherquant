@@ -81,6 +81,26 @@ async def job_fetch_om_hrrr_rapid():
     await fetch_open_meteo_models_all(source_filter={"hrrr", "hrrr_15min"})
 
 
+async def job_fetch_herbie_hrrr():
+    from backend.ingestion.herbie_side_channel import fetch_herbie_hrrr
+    await fetch_herbie_hrrr()
+
+
+async def job_fetch_herbie_nbm():
+    from backend.ingestion.herbie_side_channel import fetch_herbie_nbm
+    await fetch_herbie_nbm()
+
+
+async def job_fetch_herbie_ifs():
+    from backend.ingestion.herbie_side_channel import fetch_herbie_ifs
+    await fetch_herbie_ifs()
+
+
+async def job_fetch_herbie_aifs():
+    from backend.ingestion.herbie_side_channel import fetch_herbie_aifs
+    await fetch_herbie_aifs()
+
+
 async def job_fetch_gamma():
     from backend.ingestion.polymarket_gamma import fetch_gamma_all
     await fetch_gamma_all()
@@ -257,6 +277,11 @@ def create_scheduler() -> AsyncIOScheduler:
     add(job_fetch_open_meteo,    seconds=900,  name="fetch_open_meteo")
     add(job_fetch_open_meteo_models, seconds=900, name="fetch_om_models")  # 15 min
     add(job_fetch_om_hrrr_rapid, seconds=300, name="fetch_om_hrrr_rapid")  # 5 min, gated 40–65 min past the hour
+    # Phase C4 — Herbie side-channel harness (no-op if herbie-data not installed).
+    add(job_fetch_herbie_hrrr,   seconds=900,  name="fetch_herbie_hrrr")   # 15 min — hourly model
+    add(job_fetch_herbie_nbm,    seconds=1800, name="fetch_herbie_nbm")    # 30 min
+    add(job_fetch_herbie_ifs,    seconds=7200, name="fetch_herbie_ifs")    # 2 h — 4 runs/day
+    add(job_fetch_herbie_aifs,   seconds=7200, name="fetch_herbie_aifs")   # 2 h — 4 runs/day
     add(job_fetch_wu,            seconds=300,  name="fetch_wu")    # 5 min
     add(job_fetch_gamma,         seconds=120,  name="fetch_gamma") # 2 min
     add(job_fetch_clob,          seconds=30,   name="fetch_clob")

@@ -483,6 +483,7 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
         hrrr_15min_fc = await get_latest_successful_forecast(sess, city.id, "hrrr_15min", target_date_et)
         nbm_fc = await get_latest_successful_forecast(sess, city.id, "nbm", target_date_et)
         ecmwf_ifs_fc = await get_latest_successful_forecast(sess, city.id, "ecmwf_ifs", target_date_et)
+        ecmwf_aifs_fc = await get_latest_successful_forecast(sess, city.id, "ecmwf_aifs", target_date_et)
         # Per-source skill (dynamic weight, MAE, bias, yesterday's error) for tooltips.
         try:
             from backend.modeling.station_weights import load_source_skill_summary
@@ -983,6 +984,21 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                     ) if city.lat is not None else None,
                     "skill": source_skill.get("ecmwf_ifs"),
                 },
+                "ecmwf_aifs": {
+                    "high_f": ecmwf_aifs_fc.high_f if ecmwf_aifs_fc else None,
+                    "age_s": _age(ecmwf_aifs_fc.fetched_at if ecmwf_aifs_fc else None),
+                    "collected_at": _fmt_time_et(ecmwf_aifs_fc.fetched_at if ecmwf_aifs_fc else None),
+                    "model_run_at": _fmt_utc(ecmwf_aifs_fc.model_run_at if ecmwf_aifs_fc else None),
+                    "lead_time_hours": _lead_time_hours(ecmwf_aifs_fc.model_run_at if ecmwf_aifs_fc else None),
+                    "model_run_age": _model_run_age(ecmwf_aifs_fc.model_run_at if ecmwf_aifs_fc else None),
+                    "url": (
+                        f"https://api.open-meteo.com/v1/forecast?latitude={city.lat}"
+                        f"&longitude={city.lon}&hourly=temperature_2m&models=ecmwf_aifs025_single"
+                        f"&start_date={target_date_et}&end_date={target_date_et}&temperature_unit=fahrenheit"
+                    ) if city.lat is not None else None,
+                    "skill": source_skill.get("ecmwf_aifs"),
+                    "experimental": True,
+                },
                 "hrrr_15min": {
                     "high_f": hrrr_15min_fc.high_f if hrrr_15min_fc else None,
                     "age_s": _age(hrrr_15min_fc.fetched_at if hrrr_15min_fc else None),
@@ -1244,6 +1260,82 @@ async def position_journal_page(request: Request, position_id: int):
         "<th>Timestamp (UTC)</th><th>Level</th><th>Reason</th>"
         "<th>EV@bid</th><th>Bid</th><th>Ask</th>"
         "<th>Exited</th><th>Remaining</th><th>Status</th>"
+        "</tr></thead><tbody>"
+        + "".join(rows_html)
+        + "</tbody></table>"
+    )
+    return HTMLResponse(body)
+
+
+@dashboard_router.get("/herbie-timing", response_class=HTMLResponse)
+async def herbie_timing_page(request: Request):
+    """Phase C4 — read-only per-source latency + accuracy comparison vs Open-Meteo.
+
+    Side-channel evidence for the day-90 promote/kill decision (plan §C4).
+    Empty state is expected until herbie-data is installed and 24h+ has elapsed.
+    """
+    from datetime import datetime, timedelta, timezone
+    from sqlalchemy import select, func
+    from backend.storage.db import get_session
+    from backend.storage.models import HerbieForecastTiming
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+
+    async with get_session() as sess:
+        rows = (
+            await sess.execute(
+                select(
+                    HerbieForecastTiming.source,
+                    func.count(HerbieForecastTiming.id).label("n"),
+                    func.avg(HerbieForecastTiming.latency_delta_seconds).label("mean_latency_s"),
+                    func.avg(HerbieForecastTiming.abs_diff_f).label("mean_abs_diff_f"),
+                    func.avg(HerbieForecastTiming.herbie_mae_at_resolution).label("herbie_mae"),
+                    func.avg(HerbieForecastTiming.open_meteo_mae_at_resolution).label("om_mae"),
+                )
+                .where(HerbieForecastTiming.herbie_fetched_at >= cutoff)
+                .group_by(HerbieForecastTiming.source)
+                .order_by(HerbieForecastTiming.source.asc())
+            )
+        ).all()
+
+    def _fmt(v, fmt="{:.2f}"):
+        return fmt.format(v) if v is not None else "—"
+
+    rows_html = []
+    for r in rows:
+        latency_min = (r.mean_latency_s / 60.0) if r.mean_latency_s is not None else None
+        rows_html.append(
+            f"<tr>"
+            f"<td><b>{r.source}</b></td>"
+            f"<td>{r.n}</td>"
+            f"<td>{_fmt(latency_min)} min</td>"
+            f"<td>{_fmt(r.mean_abs_diff_f)} °F</td>"
+            f"<td>{_fmt(r.herbie_mae)} °F</td>"
+            f"<td>{_fmt(r.om_mae)} °F</td>"
+            f"</tr>"
+        )
+
+    if not rows_html:
+        rows_html = [
+            "<tr><td colspan='6' style='text-align:center;color:#888;padding:24px'>"
+            "No Herbie samples yet. The harness no-ops until <code>herbie-data</code> "
+            "is installed and the first run lands.</td></tr>"
+        ]
+
+    body = (
+        "<style>body{font-family:system-ui;padding:18px;max-width:1100px;margin:auto}"
+        "table{border-collapse:collapse;width:100%;font-size:13px}"
+        "th,td{border:1px solid #ddd;padding:6px 8px;text-align:left}"
+        "th{background:#f4f4f4}h1{font-size:18px;margin-bottom:4px}"
+        "p{color:#666;margin-top:0;margin-bottom:14px}"
+        "code{background:#f4f4f4;padding:1px 4px;border-radius:3px}</style>"
+        "<h1>Herbie side-channel — 30-day comparison</h1>"
+        "<p>Latency and accuracy of direct Herbie fetches vs the production Open-Meteo path. "
+        "Promote/kill rules per source documented in plan §C4. "
+        "Positive latency = Herbie slower than Open-Meteo.</p>"
+        "<table><thead><tr>"
+        "<th>Source</th><th>n</th><th>Mean latency Δ</th>"
+        "<th>Mean |Δhigh_f|</th><th>Herbie MAE</th><th>Open-Meteo MAE</th>"
         "</tr></thead><tbody>"
         + "".join(rows_html)
         + "</tbody></table>"
