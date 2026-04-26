@@ -26,6 +26,7 @@ _OM_TIMEOUT = aiohttp.ClientTimeout(total=10)
 # Mapping from WeatherQuant source_key -> Open-Meteo metadata endpoint slug
 _OM_META_ENDPOINTS = {
     "ecmwf_ifs":  "https://api.open-meteo.com/data/ecmwf_ifs025/static/meta.json",
+    "ecmwf_aifs": "https://api.open-meteo.com/data/ecmwf_aifs025_single/static/meta.json",
     "nbm":        "https://api.open-meteo.com/data/ncep_nbm_conus/static/meta.json",
     "hrrr":       "https://api.open-meteo.com/data/ncep_hrrr_conus/static/meta.json",
     "hrrr_15min": "https://api.open-meteo.com/data/ncep_hrrr_conus_15min/static/meta.json",

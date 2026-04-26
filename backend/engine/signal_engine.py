@@ -197,8 +197,19 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         active_station_id, active_station_source = resolve_active_station(city, event)
 
         buckets = await get_buckets_for_event(sess, event.id)
-        metar = await get_latest_metar(sess, city.id)
-        daily_high = await get_daily_high_metar(sess, city.id, today_et, city_tz=getattr(city, "tz", "America/New_York"))
+        # Live METAR + daily-high are valid only for the city's current local date.
+        # For tomorrow / day-after events the late-day-lock predicate must not
+        # see today's observed high — otherwise it collapses the next-day
+        # distribution onto today's bucket (see plan §Fix 1).
+        is_today = (today_et == city_local_date(city))
+        metar = await get_latest_metar(sess, city.id) if is_today else None
+        daily_high = (
+            await get_daily_high_metar(
+                sess, city.id, today_et,
+                city_tz=getattr(city, "tz", "America/New_York"),
+            )
+            if is_today else None
+        )
 
         nws_obs = await get_latest_forecast(sess, city.id, "nws", today_et)
         wu_hourly_obs = await get_latest_forecast(sess, city.id, "wu_hourly", today_et)

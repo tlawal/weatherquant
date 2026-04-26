@@ -664,6 +664,7 @@ async def get_positions():
         live_pnl = p.net_qty * (live_price - p.avg_cost) if p.net_qty > 0 else 0.0
         live_total_pnl += live_pnl
         result.append({
+            "id": p.id,
             "bucket_id": p.bucket_id,
             "label": b.label if b else None,
             "side": p.side,
@@ -1250,6 +1251,7 @@ async def redemptions_list():
                 buckets_info.append({
                     "bucket_idx": bucket.bucket_idx,
                     "bucket_id": bucket.id,
+                    "position_id": pos.id if pos else None,
                     "label": bucket.label,
                     "condition_id": bucket.condition_id,
                     "net_qty": pos.net_qty if pos else 0,

@@ -1,8 +1,11 @@
 FROM python:3.12-slim
 
-# Install system deps (lxml for BeautifulSoup WU scraping)
+# Install system deps:
+#   lxml (BeautifulSoup WU scraping) — libxml2-dev libxslt-dev
+#   netCDF4 (Open-Meteo decoding) — libhdf5-dev libnetcdf-dev
+#   cfgrib / herbie GRIB2 decoding — libeccodes-dev
 RUN apt-get update && apt-get install -y \
-    libxml2-dev libxslt-dev gcc libhdf5-dev libnetcdf-dev \
+    libxml2-dev libxslt-dev gcc libhdf5-dev libnetcdf-dev libeccodes-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

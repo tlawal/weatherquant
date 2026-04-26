@@ -359,6 +359,7 @@ function renderTable() {
           </td>
           <td class="py-2 px-2 lg:py-3 lg:px-4 align-top text-right w-24 border-l border-[rgba(255,255,255,0.05)]">
             <div class="mt-0.5">${actionBtn}</div>
+            ${b.position_id ? `<a href="/positions/${b.position_id}/journal" class="text-[0.55rem] text-cyan-400 hover:underline mt-1 inline-block" title="Per-exit journal">📓 Journal</a>` : ''}
           </td>
         </tr>
       `;

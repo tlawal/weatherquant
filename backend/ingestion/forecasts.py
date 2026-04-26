@@ -62,6 +62,12 @@ def _compute_model_run_at(source_key: str, fetch_time: datetime) -> Optional[dat
             return (utc - timedelta(days=1)).replace(hour=recent_run, minute=0, second=0, microsecond=0)
         return utc.replace(hour=recent_run, minute=0, second=0, microsecond=0)
 
+    elif source_key == "ecmwf_aifs":
+        # ECMWF AIFS (AI model) runs at 00z, 06z, 12z, 18z — same cadence as GFS
+        run_hours = [0, 6, 12, 18]
+        recent_run = max((h for h in run_hours if h <= hour), default=18)
+        return utc.replace(hour=recent_run, minute=0, second=0, microsecond=0)
+
     elif source_key == "gfs":
         # GFS runs at 00z, 06z, 12z, 18z
         run_hours = [0, 6, 12, 18]

@@ -604,12 +604,22 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
             dt = dt.replace(tzinfo=timezone.utc)
         return dt.astimezone(et_tz).strftime("%-I:%M %p ET")
 
+    # City local-tz info for the dual-format clock display below.
+    _city_tz_name = getattr(city, "tz", None) or "America/New_York"
+    _city_tz = ZoneInfo(_city_tz_name)
+    _city_tz_label = "ET" if _city_tz_name == "America/New_York" else (
+        datetime.now(_city_tz).strftime("%Z") or _city_tz_name.split("/")[-1]
+    )
+
     def _fmt_utc(dt) -> str | None:
+        """Format UTC time alongside the city's local time, e.g. '12:00 UTC (08:00 ET)'."""
         if not dt:
             return None
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc).strftime("%H:%M UTC")
+        utc_str = dt.astimezone(timezone.utc).strftime("%H:%M")
+        local_str = dt.astimezone(_city_tz).strftime("%H:%M")
+        return f"{utc_str} UTC ({local_str} {_city_tz_label})"
 
     def _model_run_age(dt) -> str | None:
         if not dt:
@@ -1318,8 +1328,9 @@ async def herbie_timing_page(request: Request):
     if not rows_html:
         rows_html = [
             "<tr><td colspan='6' style='text-align:center;color:#888;padding:24px'>"
-            "No Herbie samples yet. The harness no-ops until <code>herbie-data</code> "
-            "is installed and the first run lands.</td></tr>"
+            "No Herbie samples yet. Side-channel harness is enabled but has not yet "
+            "captured a model run. First HRRR sample expected within 60 min; first "
+            "IFS / AIFS within 6h of next 00 / 06 / 12 / 18z run.</td></tr>"
         ]
 
     body = (
