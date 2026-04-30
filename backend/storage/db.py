@@ -28,6 +28,8 @@ _session_factory: async_sessionmaker[AsyncSession] | None = None
 
 
 def _build_engine() -> AsyncEngine:
+    import os
+
     url = Config.DATABASE_URL
     if url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql+asyncpg://", 1)
@@ -35,6 +37,41 @@ def _build_engine() -> AsyncEngine:
         url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
 
     is_sqlite = "sqlite" in url.lower()
+
+    # Fail-fast guard: in production (Railway), refuse to silently fall back
+    # to the /tmp SQLite default — that's ephemeral, gets wiped every
+    # redeploy, and silently serves 500s on an empty DB. SQLite-on-a-volume
+    # is fine; what we reject is the *implicit fallback*, identified by
+    # DATABASE_URL not being set in the environment at all. Override with
+    # ALLOW_SQLITE_IN_PROD=1 if you really mean to run on /tmp.
+    in_prod = bool(
+        os.environ.get("RAILWAY_ENVIRONMENT")
+        or os.environ.get("RAILWAY_PROJECT_ID")
+        or os.environ.get("RENDER")
+    )
+    db_url_explicit = bool(os.environ.get("DATABASE_URL"))
+    allow_sqlite_override = os.environ.get("ALLOW_SQLITE_IN_PROD") == "1"
+    if (
+        is_sqlite
+        and in_prod
+        and not db_url_explicit
+        and not allow_sqlite_override
+    ):
+        log.error(
+            "db: refusing to start on /tmp SQLite fallback in production "
+            "(RAILWAY_ENVIRONMENT=%r). DATABASE_URL is missing or empty. "
+            "Set DATABASE_URL on the Railway service — either to the "
+            "Postgres add-on's URL or, if running on a volume, to "
+            "sqlite+aiosqlite:////<volume-mount-path>/weatherquant.db. "
+            "Set ALLOW_SQLITE_IN_PROD=1 to override and use ephemeral /tmp.",
+            os.environ.get("RAILWAY_ENVIRONMENT"),
+        )
+        raise RuntimeError(
+            "DATABASE_URL is missing — refusing to fall back to /tmp SQLite "
+            "in production. Set DATABASE_URL on the Railway service either "
+            "to the Postgres URL or to a SQLite file path inside your "
+            "mounted volume (e.g. sqlite+aiosqlite:////data/weatherquant.db)."
+        )
 
     kwargs: dict = {
         "echo": False,
