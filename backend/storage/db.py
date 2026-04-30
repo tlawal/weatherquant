@@ -88,21 +88,28 @@ def _build_engine() -> AsyncEngine:
             }
         )
     else:
-        # SQLite — async connections live in daemon threads (one per
-        # connection). Use NullPool (the default for async SQLite) so
-        # connections aren't pooled across requests; combined with the
-        # single-session-per-request pattern in web/routes.py, this keeps
-        # thread accumulation bounded.
+        # SQLite — bounded async pool. NullPool was leaking aiosqlite daemon
+        # threads under high APScheduler concurrency on Railway: every job
+        # opened a fresh connection, and aiosqlite's per-connection daemon
+        # thread occasionally outlived `session.close()`, accumulating until
+        # the GC ran (visible as SAWarnings about non-checked-in connections).
+        # AsyncAdaptedQueuePool reuses 5 connections across all jobs; SQLite
+        # WAL handles concurrent readers, busy_timeout queues writers.
         #
         # Critically: do NOT enable pool_pre_ping for SQLite — it doubles
         # the connect rate by opening a probe connection each checkout,
-        # which on aiosqlite spawns and tears down a daemon thread. That
-        # was the source of the runaway thread leak observed on Railway.
-        from sqlalchemy.pool import NullPool
-        kwargs["poolclass"] = NullPool
+        # which on aiosqlite spawns and tears down a daemon thread. The
+        # bounded pool already provides the recycle behavior pre-ping is
+        # meant to give us, without the connect-storm.
+        from sqlalchemy.pool import AsyncAdaptedQueuePool
+        kwargs["poolclass"] = AsyncAdaptedQueuePool
+        kwargs["pool_size"] = 5             # at most 5 aiosqlite daemon threads
+        kwargs["max_overflow"] = 0          # hard cap — never spawn more
+        kwargs["pool_timeout"] = 30         # waiters block this long for a slot
+        kwargs["pool_recycle"] = 3600       # rotate hourly, defensive
         kwargs["connect_args"] = {
             "check_same_thread": False,
-            "timeout": 30,  # seconds to wait for lock (default is 5)
+            "timeout": 30,  # busy-timeout for the SQLite file lock
         }
 
     log.info("db: connecting url_prefix=%s", url[:40])
