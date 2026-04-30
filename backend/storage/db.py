@@ -73,15 +73,14 @@ def _build_engine() -> AsyncEngine:
             "mounted volume (e.g. sqlite+aiosqlite:////data/weatherquant.db)."
         )
 
-    kwargs: dict = {
-        "echo": False,
-        "pool_pre_ping": True,
-    }
+    kwargs: dict = {"echo": False}
 
     if not is_sqlite:
-        # PostgreSQL — connection pooling
+        # PostgreSQL — connection pooling with periodic recycle and pre-ping
+        # to survive idle disconnects in shared/managed Postgres environments.
         kwargs.update(
             {
+                "pool_pre_ping": True,
                 "pool_size": 10,
                 "max_overflow": 5,
                 "pool_timeout": 30,
@@ -89,9 +88,16 @@ def _build_engine() -> AsyncEngine:
             }
         )
     else:
-        # SQLite — use NullPool to avoid connection sharing issues,
-        # and set a generous busy timeout so concurrent writers wait
-        # instead of immediately raising "database is locked".
+        # SQLite — async connections live in daemon threads (one per
+        # connection). Use NullPool (the default for async SQLite) so
+        # connections aren't pooled across requests; combined with the
+        # single-session-per-request pattern in web/routes.py, this keeps
+        # thread accumulation bounded.
+        #
+        # Critically: do NOT enable pool_pre_ping for SQLite — it doubles
+        # the connect rate by opening a probe connection each checkout,
+        # which on aiosqlite spawns and tears down a daemon thread. That
+        # was the source of the runaway thread leak observed on Railway.
         from sqlalchemy.pool import NullPool
         kwargs["poolclass"] = NullPool
         kwargs["connect_args"] = {

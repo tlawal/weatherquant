@@ -260,6 +260,13 @@ async def dashboard(request: Request):
 
     today_et = et_today()
 
+    # Single outer session for the whole request — one connection check-out
+    # rather than one per signal × N signals. The previous N-session pattern
+    # was leaking aiosqlite daemon threads under SQLite + NullPool: each
+    # `async with get_session()` opens a fresh connection (NullPool has no
+    # pooling), and under concurrent cron load some of those connections
+    # would orphan their daemon threads, eventually exhausting OS thread
+    # limits and 500ing the dashboard with `dialect.connect()` failures.
     async with get_session() as sess:
         cities = await get_all_cities(sess, enabled_only=True)
         arming = await get_arming_state(sess)
@@ -270,13 +277,11 @@ async def dashboard(request: Request):
         # alongside the freshly-written ones for the same bucket.
         raw_signals = await get_signals_for_latest_snapshot(sess, limit=200)
 
-    log.info("dashboard: data fetched: cities=%d, arming=%s, pnl=%.2f", len(cities), arming.state, daily_pnl)
+        log.info("dashboard: data fetched: cities=%d, arming=%s, pnl=%.2f", len(cities), arming.state, daily_pnl)
 
-    # Build signal rows for the table
-    signal_rows = []
-    for sig in raw_signals:
-        async with get_session() as sess:
-            from sqlalchemy import select
+        # Build signal rows for the table — reuses the outer session.
+        signal_rows = []
+        for sig in raw_signals:
             bucket_row = await sess.get(Bucket, sig.bucket_id)
             if not bucket_row:
                 continue
@@ -285,66 +290,65 @@ async def dashboard(request: Request):
                 continue
             city_row = await sess.get(City, event_row.city_id)
 
-        reason = json.loads(sig.reason_json) if sig.reason_json else {}
-        gate_failures = json.loads(sig.gate_failures_json) if sig.gate_failures_json else []
-        if reason.get("city_state") == "resolved":
-            continue
+            reason = json.loads(sig.reason_json) if sig.reason_json else {}
+            gate_failures = json.loads(sig.gate_failures_json) if sig.gate_failures_json else []
+            if reason.get("city_state") == "resolved":
+                continue
 
-        slug = city_row.city_slug if city_row else ""
-        signal_rows.append({
-            "city_slug": slug,
-            "city_display": city_row.display_name if city_row else "",
-            "unit": city_row.unit if city_row else "F",
-            "bucket_idx": bucket_row.bucket_idx if bucket_row else 0,
-            "label": bucket_row.label or f"Bucket {bucket_row.bucket_idx}",
-            "low_f": bucket_row.low_f,
-            "high_f": bucket_row.high_f,
-            "model_prob": sig.model_prob,
-            "mkt_prob": sig.mkt_prob,
-            "true_edge": sig.true_edge,
-            "exec_cost": sig.exec_cost,
-            "spread": reason.get("spread"),
-            "ask_depth": reason.get("ask_depth"),
-            "actionable": sig.true_edge >= 0.10 and not gate_failures,
-            "gate_failures": gate_failures,
-            "prob_new_high": reason.get("prob_hotter_bucket", reason.get("prob_new_high", 1.0)),
-            "prob_hotter_bucket": reason.get("prob_hotter_bucket", reason.get("prob_new_high", 1.0)),
-            "prob_new_high_raw": reason.get("prob_new_high_raw"),
-            "lock_regime": reason.get("lock_regime", False),
-            "observed_bucket_idx": reason.get("observed_bucket_idx"),
-            "observed_bucket_upper_f": reason.get("observed_bucket_upper_f"),
-            "city_state": reason.get("city_state", "early"),
-            "resolution_high": reason.get("resolution_high"),
-            "raw_high": reason.get("raw_high"),
-            "observation_minutes": reason.get("observation_minutes"),
-            "resolution_mismatch": reason.get("resolution_mismatch"),
-            "_reason": reason,
-        })
+            slug = city_row.city_slug if city_row else ""
+            signal_rows.append({
+                "city_slug": slug,
+                "city_display": city_row.display_name if city_row else "",
+                "unit": city_row.unit if city_row else "F",
+                "bucket_idx": bucket_row.bucket_idx if bucket_row else 0,
+                "label": bucket_row.label or f"Bucket {bucket_row.bucket_idx}",
+                "low_f": bucket_row.low_f,
+                "high_f": bucket_row.high_f,
+                "model_prob": sig.model_prob,
+                "mkt_prob": sig.mkt_prob,
+                "true_edge": sig.true_edge,
+                "exec_cost": sig.exec_cost,
+                "spread": reason.get("spread"),
+                "ask_depth": reason.get("ask_depth"),
+                "actionable": sig.true_edge >= 0.10 and not gate_failures,
+                "gate_failures": gate_failures,
+                "prob_new_high": reason.get("prob_hotter_bucket", reason.get("prob_new_high", 1.0)),
+                "prob_hotter_bucket": reason.get("prob_hotter_bucket", reason.get("prob_new_high", 1.0)),
+                "prob_new_high_raw": reason.get("prob_new_high_raw"),
+                "lock_regime": reason.get("lock_regime", False),
+                "observed_bucket_idx": reason.get("observed_bucket_idx"),
+                "observed_bucket_upper_f": reason.get("observed_bucket_upper_f"),
+                "city_state": reason.get("city_state", "early"),
+                "resolution_high": reason.get("resolution_high"),
+                "raw_high": reason.get("raw_high"),
+                "observation_minutes": reason.get("observation_minutes"),
+                "resolution_mismatch": reason.get("resolution_mismatch"),
+                "_reason": reason,
+            })
 
-    # Deduplicate — keep latest signal per (city, bucket_idx)
-    seen = {}
-    deduped = []
-    for row in signal_rows:
-        key = (row["city_slug"], row["bucket_idx"])
-        if key not in seen:
-            seen[key] = True
-            deduped.append(row)
+        # Deduplicate — keep latest signal per (city, bucket_idx)
+        seen = {}
+        deduped = []
+        for row in signal_rows:
+            key = (row["city_slug"], row["bucket_idx"])
+            if key not in seen:
+                seen[key] = True
+                deduped.append(row)
 
-    # Group by city for the redesigned signals table
-    city_groups = _build_city_groups(deduped)
+        # Group by city for the redesigned signals table
+        city_groups = _build_city_groups(deduped)
 
-    total_exposure = sum((p.net_qty * p.avg_cost) for p in positions if p.net_qty > 0)
+        total_exposure = sum((p.net_qty * p.avg_cost) for p in positions if p.net_qty > 0)
 
-    # Unredeemed winning positions — only events where the user actually holds
-    # a winning position (positive net_qty on the winning bucket).
-    async with get_session() as sess:
+        # Unredeemed winning positions — only events where the user actually holds
+        # a winning position (positive net_qty on the winning bucket). Reuses the
+        # same outer session.
         unredeemed_events = await get_unredeemed_resolved_events(sess, require_position=True)
 
-    unredeemed_wins = []
-    for evt in unredeemed_events:
-        if evt.winning_bucket_idx is None:
-            continue
-        async with get_session() as sess:
+        unredeemed_wins = []
+        for evt in unredeemed_events:
+            if evt.winning_bucket_idx is None:
+                continue
             city = await sess.get(City, evt.city_id)
             total_payout = 0.0
             winning_label = None
@@ -356,22 +360,20 @@ async def dashboard(request: Request):
                 if pos and pos.net_qty > 0:
                     total_payout += pos.net_qty * 1.0
                 break
-        if total_payout > 0:
-            unredeemed_wins.append({
-                "event_id": evt.id,
-                "city_name": city.display_name if city else "?",
-                "date_et": evt.date_et,
-                "winning_label": winning_label or "N/A",
-                "total_payout": round(total_payout, 2),
-            })
+            if total_payout > 0:
+                unredeemed_wins.append({
+                    "event_id": evt.id,
+                    "city_name": city.display_name if city else "?",
+                    "date_et": evt.date_et,
+                    "winning_label": winning_label or "N/A",
+                    "total_payout": round(total_payout, 2),
+                })
 
-    # Recently redeemed events (last 7 days) for history/retry
-    async with get_session() as sess:
+        # Recently redeemed events (last 7 days) for history/retry — same session.
         redeemed_events = await get_recently_redeemed_events(sess, days=7)
 
-    recent_redeems = []
-    for evt in redeemed_events:
-        async with get_session() as sess:
+        recent_redeems = []
+        for evt in redeemed_events:
             city = await sess.get(City, evt.city_id)
             winning_label = None
             for bucket in evt.buckets:
@@ -379,13 +381,13 @@ async def dashboard(request: Request):
                         and bucket.bucket_idx == evt.winning_bucket_idx):
                     winning_label = bucket.label
                     break
-        recent_redeems.append({
-            "event_id": evt.id,
-            "city_name": city.display_name if city else "?",
-            "date_et": evt.date_et,
-            "winning_label": winning_label or "N/A",
-            "redeemed_at": evt.redeemed_at.strftime("%b %d %H:%M") if evt.redeemed_at else "",
-        })
+            recent_redeems.append({
+                "event_id": evt.id,
+                "city_name": city.display_name if city else "?",
+                "date_et": evt.date_et,
+                "winning_label": winning_label or "N/A",
+                "redeemed_at": evt.redeemed_at.strftime("%b %d %H:%M") if evt.redeemed_at else "",
+            })
 
     return templates.TemplateResponse(
         "dashboard.html",
@@ -1128,13 +1130,17 @@ async def htmx_signals_table(request: Request):
     from backend.storage.models import Bucket, Event, City
 
     today_et = et_today()
+    # Single session for the whole HTMX poll — was opening N+1 sessions
+    # (1 outer + 1 per signal) which leaked aiosqlite daemon threads under
+    # SQLite + NullPool. The HTMX poller hits this endpoint every few
+    # seconds, so the cumulative leak rate was the main driver of the
+    # `dialect.connect()` exhaustion 500s.
     async with get_session() as sess:
         raw_signals = await get_signals_for_latest_snapshot(sess, limit=200)
 
-    rows = []
-    seen = {}
-    for sig in raw_signals:
-        async with get_session() as sess:
+        rows = []
+        seen = {}
+        for sig in raw_signals:
             b = await sess.get(Bucket, sig.bucket_id)
             if not b:
                 continue
@@ -1143,45 +1149,45 @@ async def htmx_signals_table(request: Request):
                 continue
             c = await sess.get(City, ev.city_id)
 
-        key = (c.city_slug if c else "", b.bucket_idx)
-        if key in seen:
-            continue
-        seen[key] = True
+            key = (c.city_slug if c else "", b.bucket_idx)
+            if key in seen:
+                continue
+            seen[key] = True
 
-        reason = json.loads(sig.reason_json) if sig.reason_json else {}
-        gate_failures = json.loads(sig.gate_failures_json) if sig.gate_failures_json else []
-        if reason.get("city_state") == "resolved":
-            continue
+            reason = json.loads(sig.reason_json) if sig.reason_json else {}
+            gate_failures = json.loads(sig.gate_failures_json) if sig.gate_failures_json else []
+            if reason.get("city_state") == "resolved":
+                continue
 
-        slug = c.city_slug if c else ""
-        rows.append({
-            "city_slug": slug,
-            "city_display": c.display_name if c else "",
-            "unit": c.unit if c else "F",
-            "bucket_idx": b.bucket_idx,
-            "label": b.label or f"Bucket {b.bucket_idx}",
-            "low_f": b.low_f,
-            "high_f": b.high_f,
-            "model_prob": sig.model_prob,
-            "mkt_prob": sig.mkt_prob,
-            "true_edge": sig.true_edge,
-            "spread": reason.get("spread"),
-            "ask_depth": reason.get("ask_depth"),
-            "actionable": sig.true_edge >= 0.10 and not gate_failures,
-            "gate_failures": gate_failures,
-            "prob_new_high": reason.get("prob_hotter_bucket", reason.get("prob_new_high", 1.0)),
-            "prob_hotter_bucket": reason.get("prob_hotter_bucket", reason.get("prob_new_high", 1.0)),
-            "prob_new_high_raw": reason.get("prob_new_high_raw"),
-            "lock_regime": reason.get("lock_regime", False),
-            "observed_bucket_idx": reason.get("observed_bucket_idx"),
-            "observed_bucket_upper_f": reason.get("observed_bucket_upper_f"),
-            "city_state": reason.get("city_state", "early"),
-            "resolution_high": reason.get("resolution_high"),
-            "raw_high": reason.get("raw_high"),
-            "observation_minutes": reason.get("observation_minutes"),
-            "resolution_mismatch": reason.get("resolution_mismatch"),
-            "_reason": reason,
-        })
+            slug = c.city_slug if c else ""
+            rows.append({
+                "city_slug": slug,
+                "city_display": c.display_name if c else "",
+                "unit": c.unit if c else "F",
+                "bucket_idx": b.bucket_idx,
+                "label": b.label or f"Bucket {b.bucket_idx}",
+                "low_f": b.low_f,
+                "high_f": b.high_f,
+                "model_prob": sig.model_prob,
+                "mkt_prob": sig.mkt_prob,
+                "true_edge": sig.true_edge,
+                "spread": reason.get("spread"),
+                "ask_depth": reason.get("ask_depth"),
+                "actionable": sig.true_edge >= 0.10 and not gate_failures,
+                "gate_failures": gate_failures,
+                "prob_new_high": reason.get("prob_hotter_bucket", reason.get("prob_new_high", 1.0)),
+                "prob_hotter_bucket": reason.get("prob_hotter_bucket", reason.get("prob_new_high", 1.0)),
+                "prob_new_high_raw": reason.get("prob_new_high_raw"),
+                "lock_regime": reason.get("lock_regime", False),
+                "observed_bucket_idx": reason.get("observed_bucket_idx"),
+                "observed_bucket_upper_f": reason.get("observed_bucket_upper_f"),
+                "city_state": reason.get("city_state", "early"),
+                "resolution_high": reason.get("resolution_high"),
+                "raw_high": reason.get("raw_high"),
+                "observation_minutes": reason.get("observation_minutes"),
+                "resolution_mismatch": reason.get("resolution_mismatch"),
+                "_reason": reason,
+            })
 
     city_groups = _build_city_groups(rows)
     return templates.TemplateResponse("partials/signals_table.html", {"request": request, "city_groups": city_groups})
