@@ -64,7 +64,7 @@ class CLOBClient:
         pk = Config.POLYMARKET_PRIVATE_KEY
         if pk and len(pk) > 20:
             try:
-                from py_clob_client.client import ClobClient
+                from py_clob_client_v2.client import ClobClient
                 self._client = ClobClient(
                     host=Config.POLYMARKET_HOST,
                     key=pk,
@@ -145,7 +145,7 @@ class CLOBClient:
             return None
 
         try:
-            from py_clob_client.clob_types import OrderArgs
+            from py_clob_client_v2.clob_types import OrderArgs
             loop = asyncio.get_event_loop()
             args = OrderArgs(
                 token_id=token_id,
@@ -181,7 +181,7 @@ class CLOBClient:
             return None
 
         try:
-            from py_clob_client.clob_types import MarketOrderArgs, OrderType
+            from py_clob_client_v2.clob_types import MarketOrderArgs, OrderType
             loop = asyncio.get_event_loop()
             args = MarketOrderArgs(
                 token_id=token_id,
@@ -214,7 +214,7 @@ class CLOBClient:
         if not self.can_trade:
             return False
         try:
-            from py_clob_client.clob_types import OpenOrderParams
+            from py_clob_client_v2.clob_types import OpenOrderParams
             loop = asyncio.get_event_loop()
             await asyncio.wait_for(
                 loop.run_in_executor(
@@ -233,7 +233,7 @@ class CLOBClient:
         if not self.can_trade:
             return []
         try:
-            from py_clob_client.clob_types import OpenOrderParams
+            from py_clob_client_v2.clob_types import OpenOrderParams
             loop = asyncio.get_event_loop()
             params = OpenOrderParams(market=market)
             return await asyncio.wait_for(
@@ -251,7 +251,7 @@ class CLOBClient:
         if not self.can_trade:
             return None
         try:
-            from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+            from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
             loop = asyncio.get_event_loop()
             params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
             result = await asyncio.wait_for(
@@ -274,8 +274,8 @@ class CLOBClient:
         if not self.can_trade:
             return
 
-        from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
-        from py_clob_client.config import get_contract_config
+        from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
+        from py_clob_client_v2.config import get_contract_config
 
         loop = asyncio.get_event_loop()
         params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
@@ -303,13 +303,10 @@ class CLOBClient:
 
         try:
             chain_id = Config.CHAIN_ID
-            cfg = get_contract_config(chain_id, neg_risk=False)
-            cfg_neg = get_contract_config(chain_id, neg_risk=True)
+            cfg = get_contract_config(chain_id)
             usdc_addr = cfg.collateral
-            # Polymarket requires USDC approval for 3 contracts:
-            # CTF Exchange, Neg Risk Exchange, and Neg Risk Adapter
             NEG_RISK_ADAPTER = {137: "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"}
-            spenders = [cfg.exchange, cfg_neg.exchange]
+            spenders = [cfg.exchange_v2, cfg.neg_risk_exchange_v2]
             if chain_id in NEG_RISK_ADAPTER:
                 spenders.append(NEG_RISK_ADAPTER[chain_id])
 
@@ -385,17 +382,14 @@ class CLOBClient:
         if not self.can_trade:
             return
 
-        from py_clob_client.config import get_contract_config
+        from py_clob_client_v2.config import get_contract_config
 
         chain_id = Config.CHAIN_ID
-        cfg = get_contract_config(chain_id, neg_risk=False)
+        cfg = get_contract_config(chain_id)
         conditional_token = cfg.conditional_tokens
 
-        # Check if already approved by trying a small call — for now just send approvals
-        # (setApprovalForAll is idempotent, safe to re-send)
-        spenders = [cfg.exchange]
-        cfg_neg = get_contract_config(chain_id, neg_risk=True)
-        spenders.append(cfg_neg.exchange)
+        # setApprovalForAll is idempotent, safe to re-send
+        spenders = [cfg.exchange_v2, cfg.neg_risk_exchange_v2]
         NEG_RISK_ADAPTER = {137: "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"}
         if chain_id in NEG_RISK_ADAPTER:
             spenders.append(NEG_RISK_ADAPTER[chain_id])

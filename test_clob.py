@@ -8,7 +8,7 @@ load_dotenv()
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from backend.ingestion.polymarket_clob import get_clob
-from py_clob_client.clob_types import OpenOrderParams
+from py_clob_client_v2.clob_types import OpenOrderParams
 
 async def main():
     c = get_clob()

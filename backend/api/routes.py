@@ -2113,7 +2113,7 @@ async def get_active_orders(city_slug: str, date_et: str | None = None, actor: s
         return []
 
     # NegRisk multi-outcome markets have a distinct condition_id per bucket.
-    # py_clob_client's OpenOrderParams filters to a single market, so fan out
+    # py_clob_client_v2's OpenOrderParams filters to a single market, so fan out
     # and merge the results.
     results = await asyncio.gather(
         *[clob.get_open_orders(market=cid) for cid in condition_ids],

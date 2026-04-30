@@ -34,9 +34,12 @@ The system uses SQLite (`state.db`) and local logs. On Railway, you **must** mou
 - Ensure `DATABASE_URL` in `.env` points to `/app/data/state.db`.
 
 ### 2. Environment Variables
-- `POLY_API_KEY`: Polymarket API key.
-- `POLY_SECRET`: Polymarket secret.
-- `POLY_PASSPHRASE`: Polymarket passphrase.
+- `POLYMARKET_PRIVATE_KEY`: ECDSA private key (`0x…`) for the trading EOA. Used to sign EIP-712 orders and to mint API credentials at boot via `py-clob-client-v2`.
+- `FUNDER_ADDRESS`: Wallet that holds collateral (pUSD) and conditional tokens; used as the order funder.
+- `PROXY_ADDRESS`: Optional. Preferred over `FUNDER_ADDRESS` for on-chain token-balance queries.
+- `POLYMARKET_HOST`: Defaults to `https://clob.polymarket.com`. Do not point at the deprecated `clob-v2.polymarket.com` staging host.
+- `CHAIN_ID`: Polygon mainnet (`137`).
+- `POLYGON_RPC_URL`: RPC endpoint used for direct `eth_sendRawTransaction` (USDC/conditional-token approvals, redemptions).
 - `ADMIN_TOKEN`: Bearer token for dashboard trade execution.
 - `KELLY_FRACTION`: Default 0.10 (Conservative 1/10th Kelly).
 - `MAX_POSITION_PCT`: Max bankroll % per single trade (default 0.05).

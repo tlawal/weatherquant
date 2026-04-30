@@ -704,7 +704,7 @@ async def _poll_for_fill(
             if not clob._client:
                 break
             loop = asyncio.get_event_loop()
-            from py_clob_client.clob_types import OpenOrderParams
+            from py_clob_client_v2.clob_types import OpenOrderParams
 
             # OpenOrderParams.market expects the condition_id (market ID), not
             # the outcome token_id. Without condition_id we cannot safely query
