@@ -52,6 +52,12 @@ _VOLATILE_AT_OR_ABOVE = 0.65
 _KELLY_MULT_CALM = 1.0
 _KELLY_MULT_VOLATILE = 0.5
 
+# Bayesian-upgrade Q6 — σ inflation endpoints. Calm regimes leave σ unchanged;
+# volatile regimes inflate σ by 2× to reflect realized residual variance during
+# front passages, sea breezes, and frontal storms (cf. plan §4.5).
+_SIGMA_INFLATION_CALM = 1.0
+_SIGMA_INFLATION_VOLATILE = 2.0
+
 
 def _clamp01(x: float) -> float:
     if x != x:  # NaN
@@ -149,3 +155,17 @@ def regime_kelly_multiplier(score: float) -> float:
     """
     s = _clamp01(score)
     return _KELLY_MULT_CALM + (_KELLY_MULT_VOLATILE - _KELLY_MULT_CALM) * s
+
+
+def regime_sigma_inflation(score: float) -> float:
+    """Bayesian-upgrade Q6 — map regime score [0,1] → σ multiplier [1.0, 2.0].
+
+    The pre-Q6 pipeline treated regime as a Kelly gate only, so σ stayed
+    constant on volatile days even when realized residual variance was
+    visibly larger. This linear inflation closes the gap so bucket
+    probabilities widen on front-passage days, naturally damping any
+    apparent edge on those days. Replaces the M6 BOCPD posterior in the
+    short term — once M6 lands, that posterior overrides this scalar.
+    """
+    s = _clamp01(score)
+    return _SIGMA_INFLATION_CALM + (_SIGMA_INFLATION_VOLATILE - _SIGMA_INFLATION_CALM) * s

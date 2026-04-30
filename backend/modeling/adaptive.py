@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import math
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -27,6 +28,20 @@ from zoneinfo import ZoneInfo
 import numpy as np
 
 log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Adaptive Kalman tuning (Mehra 1972; Akhlaghi/Zhou/Huang 2017)
+# ---------------------------------------------------------------------------
+# Window of recent innovations used to estimate true innovation covariance.
+# Mehra-style adaptive Q: when sample innovation variance > model-expected
+# (H P H^T + R), the filter is over-confident; inflate Q. When < expected,
+# the filter is under-confident; deflate Q (within bounds).
+_KF_ADAPTIVE_WINDOW = 10
+_KF_ADAPTIVE_MIN_SAMPLES = 5
+_KF_ADAPTIVE_FACTOR_MIN = 0.5
+_KF_ADAPTIVE_FACTOR_MAX = 4.0
+_KF_ADAPTIVE_SMOOTH = 0.7  # weight on previous factor (EWMA-style)
 
 
 # ---------------------------------------------------------------------------
@@ -142,6 +157,17 @@ def run_kalman(
     last_dt: datetime = first[dt_key]
     noise_factor = 1.0
 
+    # Adaptive Q tuning state — Mehra (1972) innovation-covariance estimator.
+    # Tracks the last N innovations; if their sample variance exceeds the
+    # model-implied (H P H^T + R), the filter is over-confident and Q is
+    # inflated. Replaces the hand-tuned weather multipliers as the dominant
+    # noise driver once enough observations are available.
+    innovations: deque[float] = deque(maxlen=_KF_ADAPTIVE_WINDOW)
+    adaptive_q_factor = 1.0
+
+    H = np.array([[1.0, 0.0]])
+    I2 = np.eye(2)
+
     for obs in observations[1:]:
         dt: datetime = obs[dt_key]
         temp: float = obs[temp_key]
@@ -154,10 +180,11 @@ def run_kalman(
         F = np.array([[1.0, delta_min],
                       [0.0, 1.0]])
 
-        # Weather-conditioned process noise
+        # Weather-conditioned process noise (heuristic prior on Q),
+        # then scaled by the Mehra-style adaptive factor below.
         noise_factor = _weather_process_noise(obs)
-        q_temp = 0.05 * noise_factor * delta_min   # position noise
-        q_trend = 0.0005 * noise_factor * delta_min  # trend noise
+        q_temp = 0.05 * noise_factor * delta_min * adaptive_q_factor
+        q_trend = 0.0005 * noise_factor * delta_min * adaptive_q_factor
         Q = np.array([[q_temp, 0.0],
                       [0.0, q_trend]])
 
@@ -166,12 +193,33 @@ def run_kalman(
         P = F @ P @ F.T + Q
 
         # Update (measurement matrix: we observe temperature only)
-        H = np.array([[1.0, 0.0]])
         y = temp - (H @ x)[0]           # innovation
-        S = (H @ P @ H.T)[0, 0] + R     # innovation covariance
+        S = (H @ P @ H.T)[0, 0] + R     # innovation covariance (predicted)
         K = (P @ H.T) / S               # Kalman gain (2×1)
         x = x + K.flatten() * y
-        P = P - np.outer(K.flatten(), H @ P)
+
+        # Joseph-form covariance update — numerically stable when P approaches
+        # singular (e.g. late in the day when σ collapses on the lock).
+        # P = (I - KH) P (I - KH)^T + K R K^T
+        I_KH = I2 - K @ H               # (2,2)
+        P = I_KH @ P @ I_KH.T + R * (K @ K.T)
+
+        # ----------------------------------------------------------------
+        # Adaptive Q update (Mehra 1972; Akhlaghi/Zhou/Huang 2017)
+        # ----------------------------------------------------------------
+        # Append innovation, then compare its sample variance over the
+        # recent window to the model-implied covariance S. The ratio drives
+        # an EWMA-smoothed multiplier on Q for the *next* iteration.
+        innovations.append(float(y))
+        if len(innovations) >= _KF_ADAPTIVE_MIN_SAMPLES:
+            inn_var = float(np.var(innovations, ddof=1))
+            ratio = inn_var / max(1e-6, float(S))
+            target = max(_KF_ADAPTIVE_FACTOR_MIN,
+                         min(_KF_ADAPTIVE_FACTOR_MAX, ratio))
+            adaptive_q_factor = (
+                _KF_ADAPTIVE_SMOOTH * adaptive_q_factor
+                + (1.0 - _KF_ADAPTIVE_SMOOTH) * target
+            )
 
         last_dt = dt
 
@@ -180,7 +228,10 @@ def run_kalman(
         temp_trend_per_min=float(x[1]),
         uncertainty=float(math.sqrt(P[0, 0])),
         n_observations=len(observations),
-        process_noise_factor=float(noise_factor),
+        # Effective noise factor = heuristic weather multiplier × Mehra-adaptive
+        # multiplier. Downstream sigma-blend code reads this to scale extrapolated
+        # uncertainty (see compute_station_predictions :time_unc).
+        process_noise_factor=float(noise_factor * adaptive_q_factor),
     )
 
 

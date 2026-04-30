@@ -896,3 +896,44 @@ class StationCalibration(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
     )
+
+
+class OverrideTrade(Base):
+    """Bayesian-upgrade Q8 — audit trail for manual-override trades.
+
+    One row per /api/trade-override invocation that bypassed signal gates.
+    Captures who, when, on what bucket, with what reason, and which gates
+    were bypassed. Joined with the resulting Polymarket order_id for
+    cross-reference. Read by /redemptions to surface an OVERRIDE badge
+    on positions that came in through this path (UI plan U9).
+    """
+    __tablename__ = "override_trades"
+    __table_args__ = (
+        Index("ix_override_trades_created_at", "created_at"),
+        Index("ix_override_trades_bucket_id", "bucket_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    bucket_id: Mapped[Optional[int]] = mapped_column(Integer)
+    event_id: Mapped[Optional[int]] = mapped_column(Integer)
+    city_slug: Mapped[str] = mapped_column(String(64), nullable=False)
+    operator: Mapped[str] = mapped_column(String(64), nullable=False)
+    side: Mapped[str] = mapped_column(String(16), nullable=False)        # buy_yes|buy_no|sell_yes|sell_no
+    qty: Mapped[Optional[float]] = mapped_column(Float)
+    limit_price: Mapped[Optional[float]] = mapped_column(Float)
+    order_id: Mapped[Optional[str]] = mapped_column(String(128))
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    # Snapshot of model + market at override time, for after-the-fact
+    # justification and replay.
+    model_prob: Mapped[Optional[float]] = mapped_column(Float)
+    market_prob: Mapped[Optional[float]] = mapped_column(Float)
+    true_edge: Mapped[Optional[float]] = mapped_column(Float)
+    spread: Mapped[Optional[float]] = mapped_column(Float)
+    ask_depth: Mapped[Optional[float]] = mapped_column(Float)
+    # JSON dict {gate_name: failure_reason} listing the gates the override
+    # actually bypassed (vs. which would have passed anyway).
+    gates_bypassed_json: Mapped[Optional[str]] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )

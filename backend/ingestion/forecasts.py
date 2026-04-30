@@ -62,8 +62,9 @@ def _compute_model_run_at(source_key: str, fetch_time: datetime) -> Optional[dat
             return (utc - timedelta(days=1)).replace(hour=recent_run, minute=0, second=0, microsecond=0)
         return utc.replace(hour=recent_run, minute=0, second=0, microsecond=0)
 
-    elif source_key == "ecmwf_aifs":
-        # ECMWF AIFS (AI model) runs at 00z, 06z, 12z, 18z — same cadence as GFS
+    elif source_key in ("ecmwf_aifs", "gfs_graphcast", "pangu_weather"):
+        # ECMWF AIFS, DeepMind GraphCast, Huawei Pangu — all AI-NWP models run
+        # 4×/day on the GFS cadence (00z, 06z, 12z, 18z) per their public schedules.
         run_hours = [0, 6, 12, 18]
         recent_run = max((h for h in run_hours if h <= hour), default=18)
         return utc.replace(hour=recent_run, minute=0, second=0, microsecond=0)
@@ -290,10 +291,20 @@ _OM_MODELS = {
     # Released real-time via the open ECMWF catalog, no embargo. Marked as
     # experimental in the UI until the 30-day MAE comparison vs ecmwf_ifs lands.
     "ecmwf_aifs": "ecmwf_aifs025_single",
+    # Bayesian-upgrade phase Q3 — additional AI-NWP foundation models exposed by
+    # Open-Meteo. Architecturally uncorrelated with IFS (different inductive
+    # biases) — exactly what BMA (M1) needs.
+    #   - GraphCast: DeepMind, Lam et al. 2023 *Science* 382:1416
+    #   - Pangu-Weather: Huawei, Bi et al. 2023 *Nature* 619:533
+    # Both run 4×/day on the GFS cadence (00 / 06 / 12 / 18z). Marked experimental.
+    "gfs_graphcast": "gfs_graphcast025",
+    "pangu_weather": "pangu_weather",
 }
 
 # Sources marked experimental in the UI (asterisk badge on city pages).
-EXPERIMENTAL_FORECAST_SOURCES: frozenset[str] = frozenset({"ecmwf_aifs"})
+EXPERIMENTAL_FORECAST_SOURCES: frozenset[str] = frozenset(
+    {"ecmwf_aifs", "gfs_graphcast", "pangu_weather"}
+)
 
 
 async def fetch_open_meteo_models_all(source_filter: Optional[set[str]] = None) -> None:

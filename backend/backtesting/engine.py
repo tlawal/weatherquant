@@ -143,6 +143,11 @@ class SimTrade:
     won: Optional[bool] = None
     pnl: float = 0.0
     exit_reason: Optional[str] = None
+    # Q7 — regime label snapshot at trade open (calm | normal | volatile | None)
+    # Read from the originating ModelSnapshot.inputs_json["regime_label"]; lets
+    # _build_results stratify Brier / win-rate by regime so the operator can
+    # gate volatile-day trades when realized calibration is poor.
+    regime_label: Optional[str] = None
 
 
 @dataclass
@@ -734,6 +739,17 @@ async def fetch_resolved_events() -> list[dict]:
 
             probs = json.loads(snap.probs_json) if snap.probs_json else []
 
+            # Q7 — pull regime label from the snapshot inputs (set by signal_engine
+            # at compute time). Lets _build_results stratify metrics by regime.
+            _snap_regime_label: Optional[str] = None
+            try:
+                _inp = json.loads(snap.inputs_json) if snap.inputs_json else {}
+                _rl = _inp.get("regime_label")
+                if _rl:
+                    _snap_regime_label = str(_rl)
+            except Exception:
+                pass
+
             events_data.append({
                 "event_id": event.id,
                 "city_slug": city.city_slug,
@@ -755,6 +771,7 @@ async def fetch_resolved_events() -> list[dict]:
                 "market_data": mkt_snaps,
                 "later_market_data": all_mkt_snaps,
                 "snapshot_time": snap.computed_at,
+                "regime_label": _snap_regime_label,
             })
 
     log.info("backtest: loaded %d resolved events", len(events_data))
@@ -866,6 +883,7 @@ def simulate_entry(
         entry_price=round(entry_price_slipped, 4),
         shares=shares,
         cost=cost,
+        regime_label=event_data.get("regime_label"),
     )
 
 
@@ -1133,6 +1151,41 @@ class BacktestEngine:
 
         avg_edge = sum(t.true_edge for t in trades) / len(trades) if trades else 0.0
 
+        # Q7 — per-regime breakouts. Lets the operator see Brier/win-rate/PnL
+        # split by atmospheric regime so volatile-day failure modes are visible.
+        # Trades without a recorded regime label fall under "unknown".
+        per_regime: dict[str, dict] = defaultdict(
+            lambda: {"trades": 0, "wins": 0, "pnl": 0.0, "preds": []}
+        )
+        for t in trades:
+            key = t.regime_label or "unknown"
+            pr = per_regime[key]
+            pr["trades"] += 1
+            if t.won:
+                pr["wins"] += 1
+            pr["pnl"] += t.pnl
+            pr["preds"].append((t.model_prob, 1 if t.won else 0))
+
+        per_regime_final: dict[str, dict] = {}
+        for label, data in per_regime.items():
+            n = data["trades"]
+            if n == 0:
+                continue
+            try:
+                _brier, _bss = compute_brier(data["preds"])
+            except Exception:
+                _brier, _bss = None, None
+            per_regime_final[label] = {
+                "trades": n,
+                "win_rate": round(data["wins"] / n, 4),
+                "pnl": round(data["pnl"], 4),
+                "avg_pnl": round(data["pnl"] / n, 4),
+                "brier": round(_brier, 4) if _brier is not None else None,
+                "brier_skill_score": (
+                    round(_bss, 4) if _bss is not None else None
+                ),
+            }
+
         metrics = BacktestMetrics(
             total_trades=len(trades),
             winning_trades=len(winners),
@@ -1179,6 +1232,7 @@ class BacktestEngine:
             "daily_pnl": [{"date": d, "pnl": round(p, 4)} for d, p in sorted(daily_pnl.items())],
             "reliability_bins": reliability,
             "per_city": per_city_final,
+            "per_regime": per_regime_final,  # Q7
             "trade_log": trade_log,
         }
 

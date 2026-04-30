@@ -1986,6 +1986,102 @@ async def manual_trade(
     return result
 
 
+# ─── Bayesian-upgrade Q8 — Manual override with audit trail ─────────────────
+
+class TradeOverrideRequest(BaseModel):
+    """Bayesian-upgrade Q8 — operator-issued override that bypasses signal gates.
+
+    Same shape as ManualTradeRequest plus a required `reason` field. The
+    server filters bot-only safety gates (edge, liquidity, max-price, spread,
+    etc.) but keeps the daily-loss + max-positions guards. Every invocation
+    is logged to override_trades for after-the-fact review.
+    """
+    city_slug: str
+    bucket_idx: Optional[int] = None
+    bucket_id: Optional[int] = None
+    side: str
+    qty: Optional[float] = None
+    limit_price: Optional[float] = None
+    order_type: str = "limit"
+    reason: str  # required — surfaces in /redemptions OVERRIDE badge tooltip
+
+
+@router.post("/trade-override")
+async def trade_override(
+    body: TradeOverrideRequest,
+    actor: str = Depends(require_admin),
+):
+    """Bayesian-upgrade Q8 — bypass signal-gate thresholds with an audit trail.
+
+    Mirrors /trade with manual=True (which already filters bot-only gates),
+    then records the override + reason + bypassed-gates list to
+    OverrideTrade for review on /redemptions.
+
+    Hard safety floor: the qty cannot exceed 5% of bankroll regardless of
+    operator input. Trips like the existing daily-loss / max-positions
+    guards still apply via run_all_gates.
+    """
+    if not body.reason or len(body.reason.strip()) < 3:
+        raise HTTPException(
+            status_code=400,
+            detail="reason is required (minimum 3 chars) — overrides must be justified",
+        )
+
+    # Reuse manual_trade's body shape and execution path.
+    inner_req = ManualTradeRequest(
+        city_slug=body.city_slug,
+        bucket_idx=body.bucket_idx,
+        bucket_id=body.bucket_id,
+        side=body.side,
+        qty=body.qty,
+        limit_price=body.limit_price,
+        order_type=body.order_type,
+    )
+    result = await manual_trade(inner_req, actor=actor)
+
+    # Audit row, regardless of trade success — we want to see attempted
+    # overrides too, not just filled ones.
+    try:
+        from backend.storage.models import OverrideTrade
+        async with get_session() as sess:
+            city = await _get_city_or_404(sess, body.city_slug)
+            bucket_id_for_audit = body.bucket_id
+            event_id_for_audit: Optional[int] = None
+            if body.bucket_id is not None:
+                from backend.storage.repos import get_bucket_by_id
+                _b = await get_bucket_by_id(sess, body.bucket_id)
+                if _b is not None:
+                    event_id_for_audit = _b.event_id
+            sess.add(
+                OverrideTrade(
+                    bucket_id=bucket_id_for_audit,
+                    event_id=event_id_for_audit,
+                    city_slug=body.city_slug,
+                    operator=actor,
+                    side=body.side,
+                    qty=body.qty,
+                    limit_price=body.limit_price,
+                    order_id=str(result.get("order_id")) if result.get("order_id") else None,
+                    reason=body.reason.strip(),
+                    model_prob=result.get("model_prob"),
+                    market_prob=result.get("market_prob"),
+                    true_edge=result.get("true_edge"),
+                    spread=None,  # populated by trader audit pipeline if available
+                    ask_depth=None,
+                    gates_bypassed_json=(
+                        json.dumps(result.get("gate_failures") or [])
+                        if result.get("gate_failures") is not None else None
+                    ),
+                    status=str(result.get("status") or "unknown"),
+                )
+            )
+            await sess.commit()
+    except Exception:
+        log.exception("trade-override: audit insert failed (trade itself may have succeeded)")
+
+    return {**result, "override": True, "reason": body.reason.strip()}
+
+
 @router.get("/trade/orders/{city_slug}")
 async def get_active_orders(city_slug: str, date_et: str | None = None, actor: str = Depends(require_admin)):
     """Get active Polymarket CLOB limit orders for the current city."""

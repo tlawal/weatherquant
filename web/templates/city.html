@@ -417,6 +417,12 @@
     <div class="text-4xl font-bold mono" style="color:#A78BFA">
       {% if model and model.mu is not none %}{{ "%.1f"|format(model.mu) }}°{{ city.unit|default('F') }}{% else %}—{% endif %}
     </div>
+    {# U1 — last-computed timestamp; UTC + city-local from _fmt_utc helper #}
+    {% if model and model.computed_at %}
+    <div class="text-[10px] mt-1 mono opacity-60" style="color:var(--text-muted)" title="Time at which this distribution was last fused from forecast sources + Kalman nowcast">
+      Last computed: {{ model.computed_at }}
+    </div>
+    {% endif %}
     <div class="text-xs mt-2" style="color:var(--text-muted)">
       {% if resolution_high_f is not none and obs_high_f is not none and resolution_high_f != obs_high_f %}
         <span style="color:var(--cyan)">Res. High: {{ "%.1f"|format(resolution_high_f) }}°</span>
@@ -636,6 +642,60 @@
              <a href="{{ forecasts.ecmwf_aifs.url }}" target="_blank" rel="noopener" class="text-[10px] flex items-center gap-1 hover:underline transition-colors" style="color:var(--cyan)">↗ View on Open-Meteo</a>
              {% endif %}
              {{ skill_block(forecasts.ecmwf_aifs.skill) }}
+        </div>
+      </div>
+      {% endif %}
+
+      <!-- DeepMind GraphCast (Open-Meteo) — experimental AI-NWP foundation model (Q3/U3) -->
+      {% if forecasts.gfs_graphcast and forecasts.gfs_graphcast.high_f is not none %}
+      <div class="group relative flex justify-between items-center cursor-pointer hover:bg-white/5 p-1 -mx-1 rounded transition-colors" x-data="{ showMeta: false }">
+        <div class="flex items-center gap-1.5" @click="showMeta = !showMeta" @click.outside="showMeta = false">
+          <span style="color:var(--text-muted)">GraphCast<sup style="color:var(--cyan)">*</sup></span>
+          <button class="hover:text-cyan-400 opacity-30 group-hover:opacity-100 transition-all">ⓘ</button>
+        </div>
+        <span class="mono font-medium text-white">{{ "%.1f"|format(forecasts.gfs_graphcast.high_f) }}°{{ city.unit|default('F') }}</span>
+        <div x-show="showMeta" x-cloak
+             x-transition:enter="transition ease-out duration-100" class="absolute left-0 right-0 top-6 w-auto p-3 rounded-xl shadow-2xl z-50 border font-medium normal-case flex flex-col items-start text-left sm:right-auto sm:w-64"
+             style="background:var(--bg-panel); border-color:var(--border);">
+             <div class="font-bold mb-1 pb-1 border-b w-full" style="color:var(--cyan); border-color:var(--border)">DeepMind GraphCast<sup>*</sup></div>
+             <p class="opacity-80 mb-2 mt-1 italic text-[9px]"><span style="color:var(--cyan)">*Experimental.</span> DeepMind's graph-neural-network weather model (Lam et al. 2023, <em>Science</em> 382:1416). 0.25° global, four runs/day on the GFS cadence (00/06/12/18z). Architecturally uncorrelated with IFS — exactly what Bayesian Model Averaging (M1) needs to widen tail probabilities on multi-modal ensembles. Base weight 0.4 while skill is being measured.</p>
+             {% if forecasts.gfs_graphcast.collected_at %}
+             <p class="opacity-60 text-[9px] mb-2">Collected {{ forecasts.gfs_graphcast.collected_at }}</p>
+             {% endif %}
+             {% if forecasts.gfs_graphcast.model_run_at %}
+             <p class="opacity-60 text-[9px] mb-2">Model run: {{ forecasts.gfs_graphcast.model_run_at }} ({{ forecasts.gfs_graphcast.lead_time_hours }}h lead) — {{ forecasts.gfs_graphcast.model_run_age }}</p>
+             {% endif %}
+             {% if forecasts.gfs_graphcast.url %}
+             <a href="{{ forecasts.gfs_graphcast.url }}" target="_blank" rel="noopener" class="text-[10px] flex items-center gap-1 hover:underline transition-colors" style="color:var(--cyan)">↗ View on Open-Meteo</a>
+             {% endif %}
+             {{ skill_block(forecasts.gfs_graphcast.skill) }}
+        </div>
+      </div>
+      {% endif %}
+
+      <!-- Huawei Pangu-Weather (Open-Meteo) — experimental AI-NWP foundation model (Q3/U3) -->
+      {% if forecasts.pangu_weather and forecasts.pangu_weather.high_f is not none %}
+      <div class="group relative flex justify-between items-center cursor-pointer hover:bg-white/5 p-1 -mx-1 rounded transition-colors" x-data="{ showMeta: false }">
+        <div class="flex items-center gap-1.5" @click="showMeta = !showMeta" @click.outside="showMeta = false">
+          <span style="color:var(--text-muted)">Pangu-Weather<sup style="color:var(--cyan)">*</sup></span>
+          <button class="hover:text-cyan-400 opacity-30 group-hover:opacity-100 transition-all">ⓘ</button>
+        </div>
+        <span class="mono font-medium text-white">{{ "%.1f"|format(forecasts.pangu_weather.high_f) }}°{{ city.unit|default('F') }}</span>
+        <div x-show="showMeta" x-cloak
+             x-transition:enter="transition ease-out duration-100" class="absolute left-0 right-0 top-6 w-auto p-3 rounded-xl shadow-2xl z-50 border font-medium normal-case flex flex-col items-start text-left sm:right-auto sm:w-64"
+             style="background:var(--bg-panel); border-color:var(--border);">
+             <div class="font-bold mb-1 pb-1 border-b w-full" style="color:var(--cyan); border-color:var(--border)">Huawei Pangu-Weather<sup>*</sup></div>
+             <p class="opacity-80 mb-2 mt-1 italic text-[9px]"><span style="color:var(--cyan)">*Experimental.</span> Huawei's 3D Earth-specific transformer weather model (Bi et al. 2023, <em>Nature</em> 619:533). 0.25° global, four runs/day on the GFS cadence (00/06/12/18z). Different inductive bias from GraphCast and IFS, so contributes new information to the BMA mixture. Base weight 0.4 while skill is being measured.</p>
+             {% if forecasts.pangu_weather.collected_at %}
+             <p class="opacity-60 text-[9px] mb-2">Collected {{ forecasts.pangu_weather.collected_at }}</p>
+             {% endif %}
+             {% if forecasts.pangu_weather.model_run_at %}
+             <p class="opacity-60 text-[9px] mb-2">Model run: {{ forecasts.pangu_weather.model_run_at }} ({{ forecasts.pangu_weather.lead_time_hours }}h lead) — {{ forecasts.pangu_weather.model_run_age }}</p>
+             {% endif %}
+             {% if forecasts.pangu_weather.url %}
+             <a href="{{ forecasts.pangu_weather.url }}" target="_blank" rel="noopener" class="text-[10px] flex items-center gap-1 hover:underline transition-colors" style="color:var(--cyan)">↗ View on Open-Meteo</a>
+             {% endif %}
+             {{ skill_block(forecasts.pangu_weather.skill) }}
         </div>
       </div>
       {% endif %}
@@ -1437,15 +1497,26 @@
                 {% else %}—{% endif %}
               </td>
               <td class="px-2 py-2.5 text-center">
-                {% if b.actionable %}
-                <button onclick="quickTrade('{{ city.city_slug }}', {{ b.bucket_idx }}, {{ b.bucket_id }})"
-                  class="px-2 py-0.5 rounded text-xs font-semibold"
-                  style="background:#065F46;border:1px solid #22C55E;color:#86EFAC" title="Strong edge — trade">▶</button>
-                {% elif b.mkt_prob is not none %}
-                <button onclick="quickTrade('{{ city.city_slug }}', {{ b.bucket_idx }}, {{ b.bucket_id }})"
-                  class="px-2 py-0.5 rounded text-xs font-semibold hover:opacity-80 transition-opacity"
-                  style="background:var(--bg-panel);border:1px solid var(--border);color:var(--text-muted)" title="Trade this bucket">▶</button>
-                {% endif %}
+                {# U5 — two-button popover. ▶ uses normal signal gates (the existing
+                   /api/trade path with manual=True). ⚡ calls /api/trade-override
+                   which additionally requires a reason and writes an audit row. #}
+                <div class="inline-flex items-center gap-1">
+                  {% if b.actionable %}
+                  <button onclick="quickTrade('{{ city.city_slug }}', {{ b.bucket_idx }}, {{ b.bucket_id }})"
+                    class="px-2 py-0.5 rounded text-xs font-semibold"
+                    style="background:#065F46;border:1px solid #22C55E;color:#86EFAC" title="Strong edge — trade through normal gates">▶</button>
+                  {% elif b.mkt_prob is not none %}
+                  <button onclick="quickTrade('{{ city.city_slug }}', {{ b.bucket_idx }}, {{ b.bucket_id }})"
+                    class="px-2 py-0.5 rounded text-xs font-semibold hover:opacity-80 transition-opacity"
+                    style="background:var(--bg-panel);border:1px solid var(--border);color:var(--text-muted)" title="Trade this bucket through normal gates">▶</button>
+                  {% endif %}
+                  {% if b.mkt_prob is not none %}
+                  <button onclick="forceTradeWithOverride('{{ city.city_slug }}', {{ b.bucket_idx }}, {{ b.bucket_id }}, {{ b.label|tojson }})"
+                    class="px-1.5 py-0.5 rounded text-[10px] font-bold hover:opacity-80 transition-opacity"
+                    style="background:rgba(234,179,8,0.10);border:1px solid rgba(234,179,8,0.4);color:#FBBF24"
+                    title="Override: bypass signal gates (requires written reason; audit-logged)">⚡</button>
+                  {% endif %}
+                </div>
               </td>
             </tr>
             {% endfor %}
@@ -2369,6 +2440,66 @@ function quickTrade(city_slug, bucket_idx, bucket_id) {
     if (el && el._x_dataStack) {
       el._x_dataStack[0].selectBucket(bucket_idx, bucket_id);
     }
+  }
+}
+
+// U5 / Q8 — Manual-override path. Bypasses signal gates (edge, liquidity,
+// max-price, spread) on this trade in exchange for a required reason that
+// gets logged to override_trades for audit. Posts directly to /api/trade-override
+// — the server's manual=True path filters bot-only gates while keeping the
+// daily-loss + max-positions safety guards.
+async function forceTradeWithOverride(city_slug, bucket_idx, bucket_id, label) {
+  const reason = prompt(
+    `Override signal gates for "${label}"?\n\n` +
+    `This bypasses min_true_edge, liquidity, max-price, and spread checks.\n` +
+    `Daily-loss + max-positions safety gates still apply.\n\n` +
+    `Reason (logged to override_trades audit table):`
+  );
+  if (!reason || reason.trim().length < 3) {
+    if (reason !== null) alert("Reason must be at least 3 characters.");
+    return;
+  }
+  if (!confirm(
+    `Override this trade?\n\n` +
+    `City: ${city_slug}\n` +
+    `Bucket: ${label}\n` +
+    `Side: BUY YES (auto-sized at market)\n` +
+    `Reason: ${reason.trim()}\n\n` +
+    `This action is irreversible and will be audit-logged.`
+  )) return;
+
+  const tok = getAdminToken() || promptForToken();
+  if (!tok) { alert("Admin token required."); return; }
+
+  try {
+    const res = await fetch("/api/trade-override", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Admin-Token": tok,
+      },
+      body: JSON.stringify({
+        city_slug,
+        bucket_idx,
+        bucket_id,
+        side: "buy_yes",
+        order_type: "limit",
+        reason: reason.trim(),
+      }),
+    });
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(payload.detail || `HTTP ${res.status}`);
+    }
+    alert(
+      `Override trade ${payload.status || "submitted"}.\n` +
+      `Order ID: ${payload.order_id || "—"}\n` +
+      (payload.gate_failures && payload.gate_failures.length
+        ? `Bypassed gates: ${payload.gate_failures.join(", ")}`
+        : "All gates would have passed normally.")
+    );
+  } catch (err) {
+    alert(`Override failed: ${err.message}`);
   }
 }
 

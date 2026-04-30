@@ -24,7 +24,11 @@ from backend.modeling.temperature_model import compute_model, ModelResult
 from backend.modeling.calibration import get_calibration_async
 from backend.modeling.calibration_engine import get_reliability_metrics, remap_probability
 from backend.modeling.adaptive import run_adaptive
-from backend.modeling.regime import detect_regime, regime_kelly_multiplier
+from backend.modeling.regime import (
+    detect_regime,
+    regime_kelly_multiplier,
+    regime_sigma_inflation,
+)
 from backend.strategy.kelly import calculate_ev_per_share
 from backend.storage.db import get_session
 from backend.storage.models import Bucket, Event, City
@@ -218,6 +222,9 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         nbm_obs = await get_latest_forecast(sess, city.id, "nbm", today_et)
         ecmwf_ifs_obs = await get_latest_forecast(sess, city.id, "ecmwf_ifs", today_et)
         ecmwf_aifs_obs = await get_latest_forecast(sess, city.id, "ecmwf_aifs", today_et)
+        # Bayesian-upgrade Q3 — additional AI-NWP foundation models (experimental).
+        gfs_graphcast_obs = await get_latest_forecast(sess, city.id, "gfs_graphcast", today_et)
+        pangu_weather_obs = await get_latest_forecast(sess, city.id, "pangu_weather", today_et)
 
         cal = await get_calibration(sess, city.id)
         # Phase B1: lead-time skill table for ensemble weight adjustment.
@@ -469,6 +476,8 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         "nws": nws_obs, "wu_hourly": wu_hourly_obs, "hrrr": hrrr_obs,
         "nbm": nbm_obs, "ecmwf_ifs": ecmwf_ifs_obs,
         "ecmwf_aifs": ecmwf_aifs_obs,
+        "gfs_graphcast": gfs_graphcast_obs,
+        "pangu_weather": pangu_weather_obs,
     }
     model_run_at_by_source: dict[str, datetime] = {}
     lead_skill_mae_by_source: dict[str, Optional[float]] = {}
@@ -488,6 +497,49 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
                 lead_skill_mae_by_source[_src] = _skill.mae_f
                 lead_skill_n_obs_by_source[_src] = _skill.n_obs
 
+    # ── Q6: regime detection BEFORE compute_model so σ inflation can flow ──
+    # The pre-Q6 path detected regime AFTER the model and used the result
+    # only for Kelly sizing. Now we detect early using the raw ensemble
+    # spread (close to the post-debias spread), so volatile regimes widen
+    # σ in the model output itself.
+    _pre_regime: Optional["RegimeResult"] = None
+    try:
+        _pre_highs: list[float] = []
+        for _po in _src_to_obs.values():
+            if _po is not None and getattr(_po, "high_f", None) is not None:
+                _pre_highs.append(float(_po.high_f))
+        _pre_spread = (
+            (max(_pre_highs) - min(_pre_highs)) if len(_pre_highs) >= 2 else None
+        )
+        _recent_snaps_pre = await get_recent_model_snapshots(sess, event.id, limit=4)
+        _pre_hist_spreads: list[float] = []
+        for _s in _recent_snaps_pre:
+            try:
+                _ij = json.loads(_s.inputs_json) if _s.inputs_json else {}
+                _sp = _ij.get("spread")
+                if _sp is not None:
+                    _pre_hist_spreads.append(float(_sp))
+            except Exception:
+                pass
+            if len(_pre_hist_spreads) >= 3:
+                break
+        _pre_regime = detect_regime(
+            current_spread_f=_pre_spread,
+            historical_spreads_f=_pre_hist_spreads or None,
+            pressure_tendency_inhg=(_latest_wx or {}).get("pressure_tendency"),
+            has_precip=bool((_latest_wx or {}).get("has_precip")),
+        )
+    except Exception:
+        log.exception(
+            "signal: %s — pre-model regime detection failed; σ inflation skipped",
+            city.city_slug,
+        )
+        _pre_regime = None
+
+    _regime_sigma_mult: Optional[float] = (
+        regime_sigma_inflation(_pre_regime.score) if _pre_regime else None
+    )
+
     # Run temperature model
     model = compute_model(
         nws_high=nws_obs.high_f if nws_obs else None,
@@ -496,7 +548,14 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         nbm_high=nbm_obs.high_f if nbm_obs else None,
         ecmwf_ifs_high=ecmwf_ifs_obs.high_f if ecmwf_ifs_obs else None,
         ecmwf_aifs_high=ecmwf_aifs_obs.high_f if ecmwf_aifs_obs else None,
+        gfs_graphcast_high=gfs_graphcast_obs.high_f if gfs_graphcast_obs else None,
+        pangu_weather_high=pangu_weather_obs.high_f if pangu_weather_obs else None,
         model_run_at_by_source=model_run_at_by_source or None,
+        # Q4 — settlement time used for lead-time σ growth (NOAA empirical
+        # 1.5 + 0.05·L °F, combined in quadrature with ensemble σ).
+        event_settlement_utc=_settlement_utc,
+        # Q6 — regime-aware σ inflation (1.0 calm → 2.0 volatile).
+        regime_sigma_multiplier=_regime_sigma_mult,
         lead_skill_mae_by_source=lead_skill_mae_by_source or None,
         lead_skill_n_obs_by_source=lead_skill_n_obs_by_source or None,
         now_utc=_now_utc,
@@ -533,6 +592,17 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
     model.inputs["ground_truth_source"] = ground_truth_source
     model.inputs["raw_daily_high"] = daily_high
     model.inputs["observation_minutes"] = valid_minutes
+    # Q7 — stamp regime telemetry on the snapshot so the backtest harness can
+    # split per-regime metrics (Brier/win-rate on CALM vs VOLATILE days).
+    model.inputs["regime_score"] = (
+        round(_pre_regime.score, 3) if _pre_regime else None
+    )
+    model.inputs["regime_label"] = (
+        _pre_regime.label.value if _pre_regime else None
+    )
+    model.inputs["regime_sigma_multiplier"] = (
+        round(_regime_sigma_mult, 3) if _regime_sigma_mult is not None else None
+    )
 
     # Use a single session for all DB writes (model snapshot + per-bucket reads/inserts)
     signals: list[BucketSignal] = []
@@ -551,35 +621,10 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         )
         snapshot_id = snapshot.id if snapshot is not None else None
 
-        # Phase C3 — regime detection. Pull last few historical spreads for
-        # spread-growth signal. Same value stamped on every BucketSignal in
-        # this city this cycle.
-        try:
-            _recent_snaps = await get_recent_model_snapshots(sess, event.id, limit=4)
-            _historical_spreads: list[float] = []
-            # Skip the snapshot we just inserted (newest); take up to 3 prior.
-            for _s in _recent_snaps:
-                if snapshot_id is not None and _s.id == snapshot_id:
-                    continue
-                try:
-                    _inputs = json.loads(_s.inputs_json) if _s.inputs_json else {}
-                    _sp = _inputs.get("spread")
-                    if _sp is not None:
-                        _historical_spreads.append(float(_sp))
-                except Exception:
-                    pass
-                if len(_historical_spreads) >= 3:
-                    break
-            _current_spread = float(model.inputs.get("spread")) if model.inputs.get("spread") is not None else None
-            _regime = detect_regime(
-                current_spread_f=_current_spread,
-                historical_spreads_f=_historical_spreads or None,
-                pressure_tendency_inhg=(_latest_wx or {}).get("pressure_tendency"),
-                has_precip=bool((_latest_wx or {}).get("has_precip")),
-            )
-        except Exception:
-            log.exception("signal: %s — regime detection failed; defaulting to neutral", city.city_slug)
-            _regime = None
+        # Phase C3 + Q6 — regime telemetry already computed pre-model so its
+        # σ inflation could flow through compute_model. Reuse the result for
+        # downstream Kelly multiplier + per-bucket telemetry.
+        _regime = _pre_regime
 
         if city_state == "resolved":
             log.info(

@@ -128,6 +128,10 @@ _FRESHNESS_TAU_HOURS = {
     "nbm": 8.0,
     "gfs": 12.0,
     "ecmwf_ifs": 12.0,
+    "ecmwf_aifs": 12.0,
+    # Bayesian-upgrade Q3 — AI-NWP additions, same 4×/day cadence as GFS/AIFS.
+    "gfs_graphcast": 12.0,
+    "pangu_weather": 12.0,
     "nws": 10.0,
     "wu_hourly": 12.0,
     "wu_history": 12.0,
@@ -138,6 +142,40 @@ _LEAD_SKILL_CLAMP = (0.7, 1.3)
 _FRESHNESS_FLOOR = 0.5
 # Minimum n_obs in a SourceLeadTimeSkill bucket before we trust its MAE.
 _LEAD_SKILL_MIN_N_OBS = 30
+
+
+def _lead_time_sigma_growth(
+    model_run_at_by_source: Optional[dict[str, datetime]],
+    event_settlement_utc: Optional[datetime],
+    unit_mult: float,
+) -> float:
+    """Bayesian-upgrade Q4 — lead-time-conditional σ growth.
+
+    NOAA's empirical MAE growth on next-day high-temperature forecasts is
+    roughly σ_lead(L) ≈ 1.5 + 0.05·L °F over L hours from model issue to
+    event time. Uses the median lead across active sources so a single
+    very-stale source can't dominate the inflation.
+
+    Returns an additive σ (in the model's display unit) to combine in
+    quadrature with the ensemble-disagreement σ. Returns 0 when no metadata
+    is available — keeps behavior identical to the pre-Q4 path in that case.
+    """
+    if not model_run_at_by_source or event_settlement_utc is None:
+        return 0.0
+    target = event_settlement_utc
+    if target.tzinfo is None:
+        target = target.replace(tzinfo=timezone.utc)
+    leads_h: list[float] = []
+    for _mr in model_run_at_by_source.values():
+        if _mr is None:
+            continue
+        mr = _mr if _mr.tzinfo is not None else _mr.replace(tzinfo=timezone.utc)
+        leads_h.append(max(0.0, (target - mr).total_seconds() / 3600.0))
+    if not leads_h:
+        return 0.0
+    leads_h.sort()
+    median_lead = leads_h[len(leads_h) // 2]
+    return (1.5 + 0.05 * median_lead) * unit_mult
 
 
 def _ensemble_sigma(
@@ -508,10 +546,19 @@ def compute_model(
     nbm_high: Optional[float] = None,
     ecmwf_ifs_high: Optional[float] = None,
     ecmwf_aifs_high: Optional[float] = None,
+    # Bayesian-upgrade Q3: AI-NWP foundation models (experimental).
+    gfs_graphcast_high: Optional[float] = None,
+    pangu_weather_high: Optional[float] = None,
     model_run_at_by_source: Optional[dict[str, datetime]] = None,
     lead_skill_mae_by_source: Optional[dict[str, Optional[float]]] = None,
     lead_skill_n_obs_by_source: Optional[dict[str, int]] = None,
     now_utc: Optional[datetime] = None,
+    # Bayesian-upgrade Q4: end-of-day settlement time used to compute lead
+    # for σ growth. None = behave exactly as pre-Q4 (no inflation).
+    event_settlement_utc: Optional[datetime] = None,
+    # Bayesian-upgrade Q6: regime-aware σ inflation multiplier (1.0 = calm,
+    # up to 2.0 = volatile). None = behave exactly as pre-Q6 (no inflation).
+    regime_sigma_multiplier: Optional[float] = None,
 ) -> Optional[ModelResult]:
     """
     Fuse all forecast sources and compute temperature distribution + bucket probabilities.
@@ -576,6 +623,18 @@ def compute_model(
         calibrated["ecmwf_aifs"] = (
             _debias("ecmwf_aifs", ecmwf_aifs_high),
             _weight("ecmwf_aifs", 0.4),
+        )
+    # Bayesian-upgrade Q3: AI-NWP additions. Same base weight as AIFS while we
+    # accumulate per-source skill — lead-skill factors will adjust automatically.
+    if gfs_graphcast_high is not None:
+        calibrated["gfs_graphcast"] = (
+            _debias("gfs_graphcast", gfs_graphcast_high),
+            _weight("gfs_graphcast", 0.4),
+        )
+    if pangu_weather_high is not None:
+        calibrated["pangu_weather"] = (
+            _debias("pangu_weather", pangu_weather_high),
+            _weight("pangu_weather", 0.4),
         )
 
     if not calibrated:
@@ -693,6 +752,27 @@ def compute_model(
     sigma_raw = _ensemble_sigma(
         list(calibrated.values()), fallback_sigma=fallback, sigma_floor=sigma_floor,
     )
+
+    # ── Q4: lead-time-conditional σ growth ───────────────────────────────────
+    # Adds NOAA-empirical 1.5 + 0.05·L °F (median lead across sources) in
+    # quadrature to the ensemble disagreement. This fixes the prior
+    # under-confidence at L > 24h: a 48h forecast carries ~3.9°F of lead
+    # noise that the inter-source spread alone systematically misses.
+    sigma_lead = _lead_time_sigma_growth(
+        model_run_at_by_source, event_settlement_utc, unit_mult,
+    )
+    if sigma_lead > 0.0:
+        sigma_raw = math.sqrt(sigma_raw * sigma_raw + sigma_lead * sigma_lead)
+
+    # ── Q6: regime-aware σ inflation ─────────────────────────────────────────
+    # Caller supplies a multiplier in [1.0, 2.0] from regime_sigma_inflation().
+    # Applied multiplicatively (not in quadrature) because regime here
+    # represents *systematic* widening of forecast residual variance, not an
+    # additional independent noise source. Bounded for safety in case the
+    # caller passes an outlier value.
+    if regime_sigma_multiplier is not None:
+        _mult = max(1.0, min(2.5, float(regime_sigma_multiplier)))
+        sigma_raw = sigma_raw * _mult
 
     # ── Weather-conditioned sigma adjustment ─────────────────────────────────
     # Adjust base sigma using current weather conditions (cloud cover,
