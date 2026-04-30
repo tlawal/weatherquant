@@ -297,15 +297,15 @@ _OM_MODELS = {
     # Open-Meteo. Architecturally uncorrelated with IFS (different inductive
     # biases) — exactly what BMA (M1) needs.
     #   - GraphCast: DeepMind, Lam et al. 2023 *Science* 382:1416
-    #   - Pangu-Weather: Huawei, Bi et al. 2023 *Nature* 619:533
-    # Both run 4×/day on the GFS cadence (00 / 06 / 12 / 18z). Marked experimental.
+    # Runs 4×/day on the GFS cadence (00 / 06 / 12 / 18z). Marked experimental.
+    # (Pangu-Weather, Bi et al. 2023 *Nature* 619:533, was probed but Open-Meteo
+    # does not currently expose it — their AI lineup is AIFS + GraphCast only.)
     "gfs_graphcast": "gfs_graphcast025",
-    "pangu_weather": "pangu_weather",
 }
 
 # Sources marked experimental in the UI (asterisk badge on city pages).
 EXPERIMENTAL_FORECAST_SOURCES: frozenset[str] = frozenset(
-    {"ecmwf_aifs", "gfs_graphcast", "pangu_weather"}
+    {"ecmwf_aifs", "gfs_graphcast"}
 )
 
 

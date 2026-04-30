@@ -33,7 +33,6 @@ _OM_META_ENDPOINTS = {
     # Bayesian-upgrade Q3: AI-NWP models. The schedule-based fallback in
     # forecasts._compute_model_run_at handles 4×/day cadence if these 404.
     "gfs_graphcast": "https://api.open-meteo.com/data/gfs_graphcast025/static/meta.json",
-    "pangu_weather": "https://api.open-meteo.com/data/pangu_weather/static/meta.json",
 }
 
 # Simple TTL cache: key -> (cached_at_utc, value)

@@ -131,7 +131,6 @@ _FRESHNESS_TAU_HOURS = {
     "ecmwf_aifs": 12.0,
     # Bayesian-upgrade Q3 — AI-NWP additions, same 4×/day cadence as GFS/AIFS.
     "gfs_graphcast": 12.0,
-    "pangu_weather": 12.0,
     "nws": 10.0,
     "wu_hourly": 12.0,
     "wu_history": 12.0,
@@ -548,7 +547,6 @@ def compute_model(
     ecmwf_aifs_high: Optional[float] = None,
     # Bayesian-upgrade Q3: AI-NWP foundation models (experimental).
     gfs_graphcast_high: Optional[float] = None,
-    pangu_weather_high: Optional[float] = None,
     model_run_at_by_source: Optional[dict[str, datetime]] = None,
     lead_skill_mae_by_source: Optional[dict[str, Optional[float]]] = None,
     lead_skill_n_obs_by_source: Optional[dict[str, int]] = None,
@@ -630,11 +628,6 @@ def compute_model(
         calibrated["gfs_graphcast"] = (
             _debias("gfs_graphcast", gfs_graphcast_high),
             _weight("gfs_graphcast", 0.4),
-        )
-    if pangu_weather_high is not None:
-        calibrated["pangu_weather"] = (
-            _debias("pangu_weather", pangu_weather_high),
-            _weight("pangu_weather", 0.4),
         )
 
     if not calibrated:

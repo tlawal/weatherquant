@@ -488,7 +488,6 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
         ecmwf_aifs_fc = await get_latest_successful_forecast(sess, city.id, "ecmwf_aifs", target_date_et)
         # Bayesian-upgrade Q3/U3 — additional AI-NWP foundation models (experimental).
         gfs_graphcast_fc = await get_latest_successful_forecast(sess, city.id, "gfs_graphcast", target_date_et)
-        pangu_weather_fc = await get_latest_successful_forecast(sess, city.id, "pangu_weather", target_date_et)
         # Per-source skill (dynamic weight, MAE, bias, yesterday's error) for tooltips.
         try:
             from backend.modeling.station_weights import load_source_skill_summary
@@ -1042,22 +1041,6 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                         f"&start_date={target_date_et}&end_date={target_date_et}&temperature_unit=fahrenheit"
                     ) if city.lat is not None else None,
                     "skill": source_skill.get("gfs_graphcast"),
-                    "experimental": True,
-                },
-                # Bayesian-upgrade Q3/U3 — Huawei Pangu-Weather (experimental, AI model).
-                "pangu_weather": {
-                    "high_f": pangu_weather_fc.high_f if pangu_weather_fc else None,
-                    "age_s": _age(pangu_weather_fc.fetched_at if pangu_weather_fc else None),
-                    "collected_at": _fmt_time_et(pangu_weather_fc.fetched_at if pangu_weather_fc else None),
-                    "model_run_at": _fmt_utc(pangu_weather_fc.model_run_at if pangu_weather_fc else None),
-                    "lead_time_hours": _lead_time_hours(pangu_weather_fc.model_run_at if pangu_weather_fc else None),
-                    "model_run_age": _model_run_age(pangu_weather_fc.model_run_at if pangu_weather_fc else None),
-                    "url": (
-                        f"https://api.open-meteo.com/v1/forecast?latitude={city.lat}"
-                        f"&longitude={city.lon}&hourly=temperature_2m&models=pangu_weather"
-                        f"&start_date={target_date_et}&end_date={target_date_et}&temperature_unit=fahrenheit"
-                    ) if city.lat is not None else None,
-                    "skill": source_skill.get("pangu_weather"),
                     "experimental": True,
                 },
             },

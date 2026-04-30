@@ -673,33 +673,6 @@
       </div>
       {% endif %}
 
-      <!-- Huawei Pangu-Weather (Open-Meteo) — experimental AI-NWP foundation model (Q3/U3) -->
-      {% if forecasts.pangu_weather and forecasts.pangu_weather.high_f is not none %}
-      <div class="group relative flex justify-between items-center cursor-pointer hover:bg-white/5 p-1 -mx-1 rounded transition-colors" x-data="{ showMeta: false }">
-        <div class="flex items-center gap-1.5" @click="showMeta = !showMeta" @click.outside="showMeta = false">
-          <span style="color:var(--text-muted)">Pangu-Weather<sup style="color:var(--cyan)">*</sup></span>
-          <button class="hover:text-cyan-400 opacity-30 group-hover:opacity-100 transition-all">ⓘ</button>
-        </div>
-        <span class="mono font-medium text-white">{{ "%.1f"|format(forecasts.pangu_weather.high_f) }}°{{ city.unit|default('F') }}</span>
-        <div x-show="showMeta" x-cloak
-             x-transition:enter="transition ease-out duration-100" class="absolute left-0 right-0 top-6 w-auto p-3 rounded-xl shadow-2xl z-50 border font-medium normal-case flex flex-col items-start text-left sm:right-auto sm:w-64"
-             style="background:var(--bg-panel); border-color:var(--border);">
-             <div class="font-bold mb-1 pb-1 border-b w-full" style="color:var(--cyan); border-color:var(--border)">Huawei Pangu-Weather<sup>*</sup></div>
-             <p class="opacity-80 mb-2 mt-1 italic text-[9px]"><span style="color:var(--cyan)">*Experimental.</span> Huawei's 3D Earth-specific transformer weather model (Bi et al. 2023, <em>Nature</em> 619:533). 0.25° global, four runs/day on the GFS cadence (00/06/12/18z). Different inductive bias from GraphCast and IFS, so contributes new information to the BMA mixture. Base weight 0.4 while skill is being measured.</p>
-             {% if forecasts.pangu_weather.collected_at %}
-             <p class="opacity-60 text-[9px] mb-2">Collected {{ forecasts.pangu_weather.collected_at }}</p>
-             {% endif %}
-             {% if forecasts.pangu_weather.model_run_at %}
-             <p class="opacity-60 text-[9px] mb-2">Model run: {{ forecasts.pangu_weather.model_run_at }} ({{ forecasts.pangu_weather.lead_time_hours }}h lead) — {{ forecasts.pangu_weather.model_run_age }}</p>
-             {% endif %}
-             {% if forecasts.pangu_weather.url %}
-             <a href="{{ forecasts.pangu_weather.url }}" target="_blank" rel="noopener" class="text-[10px] flex items-center gap-1 hover:underline transition-colors" style="color:var(--cyan)">↗ View on Open-Meteo</a>
-             {% endif %}
-             {{ skill_block(forecasts.pangu_weather.skill) }}
-        </div>
-      </div>
-      {% endif %}
-
       <!-- HRRR 15min (Open-Meteo / NCEP) — evaluation mode, not yet in ensemble -->
       {% if forecasts.hrrr_15min and forecasts.hrrr_15min.high_f is not none %}
       <div class="group relative flex justify-between items-center cursor-pointer hover:bg-white/5 p-1 -mx-1 rounded transition-colors" x-data="{ showMeta: false }">

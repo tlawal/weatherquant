@@ -224,7 +224,6 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         ecmwf_aifs_obs = await get_latest_forecast(sess, city.id, "ecmwf_aifs", today_et)
         # Bayesian-upgrade Q3 — additional AI-NWP foundation models (experimental).
         gfs_graphcast_obs = await get_latest_forecast(sess, city.id, "gfs_graphcast", today_et)
-        pangu_weather_obs = await get_latest_forecast(sess, city.id, "pangu_weather", today_et)
 
         cal = await get_calibration(sess, city.id)
         # Phase B1: lead-time skill table for ensemble weight adjustment.
@@ -477,7 +476,6 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         "nbm": nbm_obs, "ecmwf_ifs": ecmwf_ifs_obs,
         "ecmwf_aifs": ecmwf_aifs_obs,
         "gfs_graphcast": gfs_graphcast_obs,
-        "pangu_weather": pangu_weather_obs,
     }
     model_run_at_by_source: dict[str, datetime] = {}
     lead_skill_mae_by_source: dict[str, Optional[float]] = {}
@@ -549,7 +547,6 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         ecmwf_ifs_high=ecmwf_ifs_obs.high_f if ecmwf_ifs_obs else None,
         ecmwf_aifs_high=ecmwf_aifs_obs.high_f if ecmwf_aifs_obs else None,
         gfs_graphcast_high=gfs_graphcast_obs.high_f if gfs_graphcast_obs else None,
-        pangu_weather_high=pangu_weather_obs.high_f if pangu_weather_obs else None,
         model_run_at_by_source=model_run_at_by_source or None,
         # Q4 — settlement time used for lead-time σ growth (NOAA empirical
         # 1.5 + 0.05·L °F, combined in quadrature with ensemble σ).
