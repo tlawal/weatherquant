@@ -165,6 +165,17 @@
     <button class="model-btn" :class="activeModel === 'nws' && 'active'" @click="setModel('nws')">NWS</button>
     <button class="model-btn" :class="activeModel === 'wu_hourly' && 'active'" @click="setModel('wu_hourly')">WU Hourly</button>
     <button class="model-btn" :class="activeModel === 'nbm' && 'active'" @click="setModel('nbm')">NBM</button>
+    <span class="ml-2 mr-1 opacity-30">|</span>
+    <span class="text-[10px] uppercase tracking-widest font-bold mx-1" style="color:#A78BFA"
+          title="AI-NWP foundation models — ML-based weather prediction (experimental)">AI:</span>
+    <button class="model-btn" :class="activeModel === 'ecmwf_aifs' && 'active'" @click="setModel('ecmwf_aifs')"
+            title="ECMWF AIFS — Artificial Intelligence Forecasting System (0.25° single-level)">AIFS</button>
+    <button class="model-btn" :class="activeModel === 'gfs_graphcast' && 'active'" @click="setModel('gfs_graphcast')"
+            title="GraphCast — DeepMind, Lam et al. 2023 Science 382:1416">GraphCast</button>
+    <button class="model-btn" :class="activeModel === 'pangu_weather' && 'active'" @click="setModel('pangu_weather')"
+            title="Pangu-Weather — Bi et al. 2023 Nature 619:533, NOAA AIWP S3, IFS-init">Pangu</button>
+    <button class="model-btn" :class="activeModel === 'fourcastnet_v2' && 'active'" @click="setModel('fourcastnet_v2')"
+            title="FourCastNet v2-small — NVIDIA, NOAA AIWP S3, IFS-init">FourCastNet</button>
   </div>
 
   <!-- Leaflet Map -->
@@ -198,7 +209,7 @@
       </div>
     </div>
     <div class="overflow-x-auto">
-      <table class="w-full text-xs" style="min-width:72rem">
+      <table class="w-full text-xs" style="min-width:96rem">
         <thead>
           <tr class="text-[10px] uppercase tracking-widest" style="color:var(--text-muted);border-bottom:1px solid var(--border)">
             <th class="px-3 py-2 text-left sort-header" :class="sortCol === 'station_id' ? (sortDir === 'asc' ? 'sort-asc' : 'sort-desc') : ''"
@@ -213,10 +224,17 @@
                 @click="toggleSort('mae_gfs_hrrr_f')">MAE GFS+HRRR</th>
             <th class="px-2 py-2 text-right sort-header" :class="sortCol === 'mae_nws_f' ? (sortDir === 'asc' ? 'sort-asc' : 'sort-desc') : ''"
                 @click="toggleSort('mae_nws_f')">MAE NWS</th>
-            <th class="px-2 py-2 text-right sort-header" :class="sortCol === 'mae_wu_hourly_f' ? (sortDir === 'asc' ? 'sort-asc' : 'sort-desc') : ''"
-                @click="toggleSort('mae_wu_hourly_f')">MAE WU Hourly</th>
-            <th class="px-2 py-2 text-right sort-header" :class="sortCol === 'mae_nbm_f' ? (sortDir === 'asc' ? 'sort-asc' : 'sort-desc') : ''"
-                @click="toggleSort('mae_nbm_f')">MAE NBM</th>
+            <th class="px-2 py-2 text-right" title="MAE for WU Hourly forecast (from source_mae_json)">MAE WU Hourly</th>
+            <th class="px-2 py-2 text-right" title="MAE for NBM forecast (from source_mae_json)">MAE NBM</th>
+            <!-- AI-NWP foundation models -->
+            <th class="px-2 py-2 text-right" style="color:#A78BFA"
+                title="ECMWF AIFS — AI Integrated Forecasting System, 0.25° single-level">MAE AIFS</th>
+            <th class="px-2 py-2 text-right" style="color:#A78BFA"
+                title="GraphCast — DeepMind, Lam et al. 2023 Science 382:1416">MAE GraphCast</th>
+            <th class="px-2 py-2 text-right" style="color:#A78BFA"
+                title="Pangu-Weather — Bi et al. 2023 Nature 619:533 (NOAA AIWP, IFS-init)">MAE Pangu</th>
+            <th class="px-2 py-2 text-right" style="color:#A78BFA"
+                title="FourCastNet v2-small — NVIDIA (NOAA AIWP, IFS-init)">MAE FourCastNet</th>
             <th class="px-2 py-2 text-center sort-header" :class="sortCol === 'winner' ? (sortDir === 'asc' ? 'sort-asc' : 'sort-desc') : ''"
                 @click="toggleSort('winner')">Winner</th>
             <th class="px-2 py-2 text-right sort-header" :class="sortCol === 'bias_f' ? (sortDir === 'asc' ? 'sort-asc' : 'sort-desc') : ''"
@@ -250,11 +268,24 @@
                   :style="maeColor(s.mae_nws_f)"
                   x-text="fmtMae(s.mae_nws_f)"></td>
               <td class="px-2 py-2.5 text-right mono font-bold"
-                  :style="maeColor(s.mae_wu_hourly_f)"
-                  x-text="fmtMae(s.mae_wu_hourly_f)"></td>
+                  :style="maeColor(srcMae(s,'wu_hourly'))"
+                  x-text="fmtMae(srcMae(s,'wu_hourly'))"></td>
               <td class="px-2 py-2.5 text-right mono font-bold"
-                  :style="maeColor(s.mae_nbm_f)"
-                  x-text="fmtMae(s.mae_nbm_f)"></td>
+                  :style="maeColor(srcMae(s,'nbm'))"
+                  x-text="fmtMae(srcMae(s,'nbm'))"></td>
+              <!-- AI-NWP foundation models — purple accent header, normal MAE colour for value -->
+              <td class="px-2 py-2.5 text-right mono font-bold"
+                  :style="maeColor(srcMae(s,'ecmwf_aifs'))"
+                  x-text="fmtMae(srcMae(s,'ecmwf_aifs'))"></td>
+              <td class="px-2 py-2.5 text-right mono font-bold"
+                  :style="maeColor(srcMae(s,'gfs_graphcast'))"
+                  x-text="fmtMae(srcMae(s,'gfs_graphcast'))"></td>
+              <td class="px-2 py-2.5 text-right mono font-bold"
+                  :style="maeColor(srcMae(s,'pangu_weather'))"
+                  x-text="fmtMae(srcMae(s,'pangu_weather'))"></td>
+              <td class="px-2 py-2.5 text-right mono font-bold"
+                  :style="maeColor(srcMae(s,'fourcastnet_v2'))"
+                  x-text="fmtMae(srcMae(s,'fourcastnet_v2'))"></td>
               <td class="px-2 py-2.5 text-center">
                 <span class="text-[10px] font-bold px-2 py-0.5 rounded-full"
                       :class="winnerBadge(s.winner)"
@@ -283,7 +314,7 @@
           </template>
           <template x-if="filteredStations.length === 0">
             <tr>
-              <td colspan="14" class="px-4 py-8 text-center" style="color:var(--text-muted)">
+              <td colspan="18" class="px-4 py-8 text-center" style="color:var(--text-muted)">
                 <span x-show="stations.length === 0 && !loading">No calibration data yet. Press REFRESH CALIBRATION NOW to compute.</span>
                 <span x-show="stations.length > 0">No stations match filter.</span>
               </td>
@@ -350,12 +381,40 @@
       _pollTimer: null,
       _pollTimeout: null,
 
+      // Lazy-parse source_mae_json once per row, cache the parsed map under
+      // a non-enumerable property. Returns the per-source MAE for `key`, or null.
+      // Source names match backend ingestion (see backend/modeling/station_calibration.py
+      // sources list): nws, wu_hourly, hrrr, hrrr_15min, nbm, ecmwf_ifs,
+      // ecmwf_aifs, gfs_graphcast, pangu_weather, fourcastnet_v2.
+      srcMae(s, key) {
+        if (!s) return null;
+        if (s._sourceMaeMap === undefined) {
+          try {
+            s._sourceMaeMap = s.source_mae_json
+              ? (typeof s.source_mae_json === 'string'
+                  ? JSON.parse(s.source_mae_json)
+                  : s.source_mae_json)
+              : null;
+          } catch (e) { s._sourceMaeMap = null; }
+        }
+        const m = s._sourceMaeMap;
+        if (!m) return null;
+        const v = m[key];
+        return (typeof v === 'number') ? v : (v != null ? Number(v) : null);
+      },
+
       maeForModel(s) {
+        // Dedicated DB columns (faster, already indexed for sort).
         if (this.activeModel === 'ecmwf') return s.mae_ecmwf_f;
         if (this.activeModel === 'gfs_hrrr') return s.mae_gfs_hrrr_f;
         if (this.activeModel === 'nws') return s.mae_nws_f;
-        if (this.activeModel === 'wu_hourly') return s.mae_wu_hourly_f;
-        if (this.activeModel === 'nbm') return s.mae_nbm_f;
+        // Sources only carried in source_mae_json.
+        if (this.activeModel === 'wu_hourly') return this.srcMae(s, 'wu_hourly');
+        if (this.activeModel === 'nbm') return this.srcMae(s, 'nbm');
+        if (this.activeModel === 'ecmwf_aifs') return this.srcMae(s, 'ecmwf_aifs');
+        if (this.activeModel === 'gfs_graphcast') return this.srcMae(s, 'gfs_graphcast');
+        if (this.activeModel === 'pangu_weather') return this.srcMae(s, 'pangu_weather');
+        if (this.activeModel === 'fourcastnet_v2') return this.srcMae(s, 'fourcastnet_v2');
         return s.mae_f;
       },
 
@@ -567,17 +626,33 @@
           });
 
           const fmtV = (v) => v != null ? v.toFixed(2) + '°F' : '—';
+          const klass = (v) => v == null ? '' : (v <= 1.5 ? 'tt-green' : v <= 3.0 ? 'tt-amber' : 'tt-red');
           const tradeClass = s.tradeability === 'GREEN' ? 'tt-green' : (s.tradeability === 'AMBER' ? 'tt-amber' : 'tt-red');
+
+          // Resolve per-source MAE: dedicated DB column where available,
+          // otherwise pull from the parsed source_mae_json blob (srcMae).
+          const aiCss = 'color:#A78BFA;font-weight:600';
+          const rows = [
+            { label: 'ECMWF IFS',   v: s.mae_ecmwf_f },
+            { label: 'GFS+HRRR',    v: s.mae_gfs_hrrr_f },
+            { label: 'NWS',         v: s.mae_nws_f },
+            { label: 'WU Hourly',   v: self.srcMae(s, 'wu_hourly') },
+            { label: 'NBM',         v: self.srcMae(s, 'nbm') },
+            // ── AI-NWP ─────────────────────────────────
+            { label: 'AIFS',        v: self.srcMae(s, 'ecmwf_aifs'),     ai: true },
+            { label: 'GraphCast',   v: self.srcMae(s, 'gfs_graphcast'),  ai: true },
+            { label: 'Pangu',       v: self.srcMae(s, 'pangu_weather'),  ai: true },
+            { label: 'FourCastNet', v: self.srcMae(s, 'fourcastnet_v2'), ai: true },
+          ];
+          const rowHtml = rows.map(r =>
+            `<div class="tt-label"${r.ai ? ` style="${aiCss}"` : ''}>${r.label} MAE: <span class="${klass(r.v)}">${fmtV(r.v)}</span></div>`
+          ).join('');
 
           const tooltip = `
             <div class="station-tooltip">
               <div class="tt-station">${s.station_id} — ${s.city_name}</div>
-              <div class="tt-label">ECMWF MAE: <span class="${fmtV(s.mae_ecmwf_f) !== '—' ? (s.mae_ecmwf_f <= 1.5 ? 'tt-green' : s.mae_ecmwf_f <= 3.0 ? 'tt-amber' : 'tt-red') : ''}">${fmtV(s.mae_ecmwf_f)}</span></div>
-              <div class="tt-label">GFS+HRRR MAE: <span class="${fmtV(s.mae_gfs_hrrr_f) !== '—' ? (s.mae_gfs_hrrr_f <= 1.5 ? 'tt-green' : s.mae_gfs_hrrr_f <= 3.0 ? 'tt-amber' : 'tt-red') : ''}">${fmtV(s.mae_gfs_hrrr_f)}</span></div>
-              <div class="tt-label">NWS MAE: <span class="${fmtV(s.mae_nws_f) !== '—' ? (s.mae_nws_f <= 1.5 ? 'tt-green' : s.mae_nws_f <= 3.0 ? 'tt-amber' : 'tt-red') : ''}">${fmtV(s.mae_nws_f)}</span></div>
-              <div class="tt-label">WU Hourly MAE: <span class="${fmtV(s.mae_wu_hourly_f) !== '—' ? (s.mae_wu_hourly_f <= 1.5 ? 'tt-green' : s.mae_wu_hourly_f <= 3.0 ? 'tt-amber' : 'tt-red') : ''}">${fmtV(s.mae_wu_hourly_f)}</span></div>
-              <div class="tt-label">NBM MAE: <span class="${fmtV(s.mae_nbm_f) !== '—' ? (s.mae_nbm_f <= 1.5 ? 'tt-green' : s.mae_nbm_f <= 3.0 ? 'tt-amber' : 'tt-red') : ''}">${fmtV(s.mae_nbm_f)}</span></div>
-              <div class="tt-label">Blended MAE: <span class="${tradeClass}">${fmtV(s.mae_f)}</span></div>
+              ${rowHtml}
+              <div class="tt-label" style="margin-top:4px">Blended MAE: <span class="${tradeClass}">${fmtV(s.mae_f)}</span></div>
               <div class="tt-label">Bias: ${s.bias_f > 0 ? '+' : ''}${s.bias_f.toFixed(2)}°F</div>
               <div class="tt-label">Winner: <strong>${s.winner || '—'}</strong></div>
               <div class="tt-label" style="margin-top:2px">Status: <span class="${tradeClass}">${s.tradeability}</span></div>

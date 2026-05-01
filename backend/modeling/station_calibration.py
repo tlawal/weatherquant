@@ -202,8 +202,19 @@ async def compute_station_calibration(
         )
         return None
 
-    # Fetch per-source forecast highs (includes ecmwf_ifs for model comparison)
-    sources = ["nws", "wu_hourly", "hrrr", "hrrr_15min", "nbm", "ecmwf_ifs"]
+    # Fetch per-source forecast highs. AI-NWP models (ecmwf_aifs, gfs_graphcast,
+    # pangu_weather, fourcastnet_v2) join the existing physics models so the
+    # /stations page can compare AI vs IFS vs GFS+HRRR vs NWS head-to-head.
+    # Source identifiers must match those used by the ingestion pipeline:
+    #   - ecmwf_aifs / gfs_graphcast: Open-Meteo (_OM_MODELS in forecasts.py)
+    #   - pangu_weather / fourcastnet_v2: NOAA AIWP S3 (AIWP_MODELS in aiwp.py)
+    sources = [
+        # Physics / human / scraped
+        "nws", "wu_hourly", "hrrr", "hrrr_15min", "nbm", "ecmwf_ifs",
+        # AI-NWP foundation models (experimental — flagged in
+        # EXPERIMENTAL_FORECAST_SOURCES in backend/ingestion/forecasts.py)
+        "ecmwf_aifs", "gfs_graphcast", "pangu_weather", "fourcastnet_v2",
+    ]
     fc_highs = await _get_forecast_highs(city.id, dates, sources)
 
     # Fetch model mu (fused ensemble)
