@@ -81,6 +81,18 @@ async def job_fetch_om_hrrr_rapid():
     await fetch_open_meteo_models_all(source_filter={"hrrr", "hrrr_15min"})
 
 
+async def job_fetch_aiwp_pangu():
+    """Phase Q3 §13 — Pangu-Weather from NOAA AIWP S3 archive."""
+    from backend.ingestion.aiwp import fetch_pangu
+    await fetch_pangu()
+
+
+async def job_fetch_aiwp_fourcastnet_v2():
+    """Phase Q3 §13 — FourCastNet v2-small from NOAA AIWP S3 archive."""
+    from backend.ingestion.aiwp import fetch_fourcastnet_v2
+    await fetch_fourcastnet_v2()
+
+
 async def job_fetch_herbie_hrrr():
     from backend.ingestion.herbie_side_channel import fetch_herbie_hrrr
     await fetch_herbie_hrrr()
@@ -278,6 +290,12 @@ def create_scheduler() -> AsyncIOScheduler:
     add(job_fetch_open_meteo_models, seconds=900, name="fetch_om_models")  # 15 min
     add(job_fetch_om_hrrr_rapid, seconds=300, name="fetch_om_hrrr_rapid")  # 5 min, gated 40–65 min past the hour
     # Phase C4 — Herbie side-channel harness (no-op if herbie-data not installed).
+    # Phase Q3 §13 — NOAA AIWP S3 archive (Pangu-Weather + FourCastNet v2-small).
+    # Files upload ~5–8h post-init; 1-hour polling catches each new run within
+    # the hour. Idempotency in fetch_aiwp_model() makes this cheap when nothing
+    # is new — both jobs become no-ops between actual file landings.
+    add(job_fetch_aiwp_pangu,           seconds=3600, name="fetch_aiwp_pangu")
+    add(job_fetch_aiwp_fourcastnet_v2,  seconds=3600, name="fetch_aiwp_fourcastnet_v2")
     add(job_fetch_herbie_hrrr,   seconds=900,  name="fetch_herbie_hrrr")   # 15 min — hourly model
     add(job_fetch_herbie_nbm,    seconds=1800, name="fetch_herbie_nbm")    # 30 min
     add(job_fetch_herbie_ifs,    seconds=7200, name="fetch_herbie_ifs")    # 2 h — 4 runs/day

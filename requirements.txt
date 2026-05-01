@@ -25,3 +25,8 @@ netCDF4>=1.7.2
 herbie-data>=2024.8.0
 xarray>=2024.10.0
 cfgrib>=0.9.14
+# NOAA AIWP S3 archive (Phase Q3 §13) — Pangu-Weather + FourCastNetv2-small
+# fetched as NetCDF4 (HDF5) directly from s3://noaa-oar-mlwp-data/.
+# h5netcdf is the engine xarray uses to read those files; h5py is its backend.
+h5netcdf>=1.0
+h5py>=3.10

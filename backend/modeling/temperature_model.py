@@ -131,6 +131,10 @@ _FRESHNESS_TAU_HOURS = {
     "ecmwf_aifs": 12.0,
     # Bayesian-upgrade Q3 — AI-NWP additions, same 4×/day cadence as GFS/AIFS.
     "gfs_graphcast": 12.0,
+    # Bayesian-upgrade Q3 §13 — NOAA AIWP archive (00z + 12z daily, ~8h post-init
+    # latency). Slightly longer TAU because we get fresh runs only twice a day.
+    "pangu_weather": 14.0,
+    "fourcastnet_v2": 14.0,
     "nws": 10.0,
     "wu_hourly": 12.0,
     "wu_history": 12.0,
@@ -547,6 +551,11 @@ def compute_model(
     ecmwf_aifs_high: Optional[float] = None,
     # Bayesian-upgrade Q3: AI-NWP foundation models (experimental).
     gfs_graphcast_high: Optional[float] = None,
+    # §13 — Pangu-Weather + FourCastNetv2-small from NOAA AIWP S3 archive.
+    # Same shape (just another forecast high in city.unit). Sourced via
+    # backend/ingestion/aiwp.py.
+    pangu_weather_high: Optional[float] = None,
+    fourcastnet_v2_high: Optional[float] = None,
     model_run_at_by_source: Optional[dict[str, datetime]] = None,
     lead_skill_mae_by_source: Optional[dict[str, Optional[float]]] = None,
     lead_skill_n_obs_by_source: Optional[dict[str, int]] = None,
@@ -628,6 +637,19 @@ def compute_model(
         calibrated["gfs_graphcast"] = (
             _debias("gfs_graphcast", gfs_graphcast_high),
             _weight("gfs_graphcast", 0.4),
+        )
+    # §13 — NOAA AIWP-sourced AI members. Slightly lower base weight (0.35) to
+    # reflect the 6-hour timestep limitation (true daily peak may sit between
+    # forecast steps); lead-skill factors will refine this once residuals land.
+    if pangu_weather_high is not None:
+        calibrated["pangu_weather"] = (
+            _debias("pangu_weather", pangu_weather_high),
+            _weight("pangu_weather", 0.35),
+        )
+    if fourcastnet_v2_high is not None:
+        calibrated["fourcastnet_v2"] = (
+            _debias("fourcastnet_v2", fourcastnet_v2_high),
+            _weight("fourcastnet_v2", 0.35),
         )
 
     if not calibrated:

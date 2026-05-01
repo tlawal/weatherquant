@@ -488,6 +488,9 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
         ecmwf_aifs_fc = await get_latest_successful_forecast(sess, city.id, "ecmwf_aifs", target_date_et)
         # Bayesian-upgrade Q3/U3 — additional AI-NWP foundation models (experimental).
         gfs_graphcast_fc = await get_latest_successful_forecast(sess, city.id, "gfs_graphcast", target_date_et)
+        # §13 — NOAA AIWP-sourced AI members (Pangu-Weather, FourCastNetv2-small).
+        pangu_weather_fc = await get_latest_successful_forecast(sess, city.id, "pangu_weather", target_date_et)
+        fourcastnet_v2_fc = await get_latest_successful_forecast(sess, city.id, "fourcastnet_v2", target_date_et)
         # Per-source skill (dynamic weight, MAE, bias, yesterday's error) for tooltips.
         try:
             from backend.modeling.station_weights import load_source_skill_summary
@@ -1041,6 +1044,32 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                         f"&start_date={target_date_et}&end_date={target_date_et}&temperature_unit=fahrenheit"
                     ) if city.lat is not None else None,
                     "skill": source_skill.get("gfs_graphcast"),
+                    "experimental": True,
+                },
+                # §13 — Huawei Pangu-Weather, sourced from NOAA AIWP S3 archive.
+                # IFS-initialized, 6-hour timestep. URL points to the AWS Open Data
+                # registry page; no per-city query URL since this is a 3 GB NetCDF.
+                "pangu_weather": {
+                    "high_f": pangu_weather_fc.high_f if pangu_weather_fc else None,
+                    "age_s": _age(pangu_weather_fc.fetched_at if pangu_weather_fc else None),
+                    "collected_at": _fmt_time_et(pangu_weather_fc.fetched_at if pangu_weather_fc else None),
+                    "model_run_at": _fmt_utc(pangu_weather_fc.model_run_at if pangu_weather_fc else None),
+                    "lead_time_hours": _lead_time_hours(pangu_weather_fc.model_run_at if pangu_weather_fc else None),
+                    "model_run_age": _model_run_age(pangu_weather_fc.model_run_at if pangu_weather_fc else None),
+                    "url": "https://registry.opendata.aws/aiwp/",
+                    "skill": source_skill.get("pangu_weather"),
+                    "experimental": True,
+                },
+                # §13 — NVIDIA FourCastNet v2-small, also from NOAA AIWP archive.
+                "fourcastnet_v2": {
+                    "high_f": fourcastnet_v2_fc.high_f if fourcastnet_v2_fc else None,
+                    "age_s": _age(fourcastnet_v2_fc.fetched_at if fourcastnet_v2_fc else None),
+                    "collected_at": _fmt_time_et(fourcastnet_v2_fc.fetched_at if fourcastnet_v2_fc else None),
+                    "model_run_at": _fmt_utc(fourcastnet_v2_fc.model_run_at if fourcastnet_v2_fc else None),
+                    "lead_time_hours": _lead_time_hours(fourcastnet_v2_fc.model_run_at if fourcastnet_v2_fc else None),
+                    "model_run_age": _model_run_age(fourcastnet_v2_fc.model_run_at if fourcastnet_v2_fc else None),
+                    "url": "https://registry.opendata.aws/aiwp/",
+                    "skill": source_skill.get("fourcastnet_v2"),
                     "experimental": True,
                 },
             },
