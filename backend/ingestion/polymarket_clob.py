@@ -71,7 +71,10 @@ class CLOBClient:
                     chain_id=Config.CHAIN_ID,
                     funder=Config.FUNDER_ADDRESS or None,
                 )
-                creds = self._client.create_or_derive_api_creds()
+                try:
+                    creds = self._client.derive_api_key()
+                except Exception:
+                    creds = self._client.create_api_key()
                 self._client.set_api_creds(creds)
                 self.can_trade = True
                 log.info("clob: credentials derived successfully")

@@ -8,7 +8,11 @@ key = os.getenv("POLYMARKET_PRIVATE_KEY")
 chain_id = 137
 
 clob = ClobClient(host, key=key, chain_id=chain_id)
-clob.set_api_creds(clob.create_or_derive_api_creds())
+try:
+    creds = clob.derive_api_key()
+except Exception:
+    creds = clob.create_api_key()
+clob.set_api_creds(creds)
 
 def run():
     res = clob.get_orders(OpenOrderParams(market="0x8f3cb84572c55b7cb2e35478f73076d0401acd3790ef2060996ce8686b41a91a"))

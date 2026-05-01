@@ -88,23 +88,28 @@ def _build_engine() -> AsyncEngine:
             }
         )
     else:
-        # SQLite — bounded async pool. NullPool was leaking aiosqlite daemon
-        # threads under high APScheduler concurrency on Railway: every job
-        # opened a fresh connection, and aiosqlite's per-connection daemon
-        # thread occasionally outlived `session.close()`, accumulating until
-        # the GC ran (visible as SAWarnings about non-checked-in connections).
-        # AsyncAdaptedQueuePool reuses 5 connections across all jobs; SQLite
-        # WAL handles concurrent readers, busy_timeout queues writers.
+        # SQLite — bounded async pool. AsyncAdaptedQueuePool reuses connections
+        # across jobs (vs NullPool, which spawned a fresh aiosqlite daemon
+        # thread per checkout and occasionally orphaned them, exhausting OS
+        # thread limits). Pool size caps daemon-thread count, so it must be
+        # large enough to cover real concurrency without going unbounded.
         #
-        # Critically: do NOT enable pool_pre_ping for SQLite — it doubles
-        # the connect rate by opening a probe connection each checkout,
-        # which on aiosqlite spawns and tears down a daemon thread. The
-        # bounded pool already provides the recycle behavior pre-ping is
-        # meant to give us, without the connect-storm.
+        # Sizing: 15 base + 5 overflow = 20 ceiling. Covers concurrent
+        # dashboard /api/balance polls (multi-tab), 3+ overlapping APScheduler
+        # heartbeat jobs (30s/60s/5min intervals), the signal-engine pass
+        # holding a session per city×date, and ad-hoc /trade requests. The
+        # earlier size=5 cap blew up under exactly this mix (QueuePool limit
+        # reached → run_model timeouts).
+        #
+        # Do NOT enable pool_pre_ping for SQLite — it doubles the connect
+        # rate by opening a probe connection each checkout, which on
+        # aiosqlite spawns and tears down a daemon thread. The bounded
+        # pool already provides the recycle behavior pre-ping is meant
+        # to give us, without the connect-storm.
         from sqlalchemy.pool import AsyncAdaptedQueuePool
         kwargs["poolclass"] = AsyncAdaptedQueuePool
-        kwargs["pool_size"] = 5             # at most 5 aiosqlite daemon threads
-        kwargs["max_overflow"] = 0          # hard cap — never spawn more
+        kwargs["pool_size"] = 15            # base aiosqlite daemon threads
+        kwargs["max_overflow"] = 5          # bursty peak headroom (ceiling 20)
         kwargs["pool_timeout"] = 30         # waiters block this long for a slot
         kwargs["pool_recycle"] = 3600       # rotate hourly, defensive
         kwargs["connect_args"] = {
