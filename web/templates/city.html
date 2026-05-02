@@ -1614,7 +1614,7 @@
                 :class="side === 'sell' ? 'text-white' : ''"
                 :style="side === 'sell' ? 'background:var(--bg-card);box-shadow:0 1px 3px rgba(0,0,0,0.3)' : 'color:var(--text-muted)'">Sell</button>
         <!-- Order Type Toggle -->
-        <button @click="orderType = orderType === 'limit' ? 'market' : 'limit'; if (orderType === 'market') limitPrice = (outcome === 'no' ? noPrice : yesPrice) || yesPrice;" class="ml-auto flex items-center gap-1 text-[10px] px-2 py-1 rounded-md hover:bg-white/10 transition-colors cursor-pointer" style="color:var(--text-muted)">
+        <button @click="orderType = orderType === 'limit' ? 'market' : 'limit'; if (orderType === 'market') limitPrice = (outcome === 'no' ? ((obBid != null) ? (1 - obBid) : noPrice) : yesPrice) || yesPrice;" class="ml-auto flex items-center gap-1 text-[10px] px-2 py-1 rounded-md hover:bg-white/10 transition-colors cursor-pointer" style="color:var(--text-muted)">
           <span x-text="orderType === 'limit' ? 'Limit' : 'Market'" class="font-semibold"></span>
           <span class="opacity-50">▾</span>
         </button>
@@ -1630,7 +1630,7 @@
                   : 'background:var(--bg-panel);color:var(--text-muted)'">
           Yes <span class="mono ml-1" x-text="yesPrice ? (yesPrice * 100).toFixed(0) + '¢' : '—'"></span>
         </button>
-        <button @click="outcome = 'no'; limitPrice = noPrice || limitPrice"
+        <button @click="outcome = 'no'; limitPrice = ((obBid != null) ? (1 - obBid) : noPrice) || limitPrice"
                 class="py-3 rounded-xl font-bold text-sm transition-all border-2"
                 :class="outcome === 'no' ? 'border-red-500/80' : 'border-transparent'"
                 :style="outcome === 'no'
@@ -2276,7 +2276,7 @@ function tradingPanel() {
           this.yesPrice = data.yes_ask;
           this.noPrice = 1 - data.yes_ask;
           if (this.outcome === 'yes') this.limitPrice = data.yes_ask;
-          else this.limitPrice = data.yes_bid || (1 - data.yes_ask);
+          else this.limitPrice = (data.yes_bid != null) ? (1 - data.yes_bid) : (1 - data.yes_ask);
         }
 
         this.obLoaded = true;

@@ -194,7 +194,7 @@ class CLOBClient:
 
             def _create_and_post():
                 order = self._client.create_market_order(args)
-                return self._client.post_order(order, orderType=OrderType.FOK)
+                return self._client.post_order(order, order_type=OrderType.FOK)
 
             result = await asyncio.wait_for(
                 loop.run_in_executor(None, _create_and_post),
@@ -217,11 +217,12 @@ class CLOBClient:
         if not self.can_trade:
             return False
         try:
-            from py_clob_client_v2.clob_types import OpenOrderParams
+            from py_clob_client_v2.clob_types import OrderPayload
             loop = asyncio.get_event_loop()
+            payload = OrderPayload(orderID=order_id)
             await asyncio.wait_for(
                 loop.run_in_executor(
-                    None, lambda: self._client.cancel(order_id)
+                    None, lambda: self._client.cancel_order(payload)
                 ),
                 timeout=10.0,
             )
@@ -241,7 +242,7 @@ class CLOBClient:
             params = OpenOrderParams(market=market)
             return await asyncio.wait_for(
                 loop.run_in_executor(
-                    None, lambda: self._client.get_orders(params)
+                    None, lambda: self._client.get_open_orders(params)
                 ),
                 timeout=10.0,
             )
