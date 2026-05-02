@@ -493,6 +493,31 @@ async def refresh_market_context(
                 error_msg=str(exc),
             )
         raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        # Catch-all so unhandled errors (DB, network, JSON parse, asyncio cancel,
+        # malformed LLM response, etc.) get logged + audited instead of bubbling
+        # to FastAPI as a bare 500 with no detail. Keep the specific 503/400
+        # branches above for the two known error classes.
+        log.exception(
+            "market_context_refresh: unhandled error city=%s date=%s",
+            city_slug, target_date,
+        )
+        try:
+            async with get_session() as sess:
+                await append_audit(
+                    sess,
+                    actor=actor,
+                    action="market_context_refresh",
+                    payload={"city_slug": city_slug, "date_et": target_date},
+                    ok=False,
+                    error_msg=f"{type(exc).__name__}: {exc}",
+                )
+        except Exception:
+            log.exception("market_context_refresh: audit-log write failed")
+        raise HTTPException(
+            status_code=500,
+            detail=f"market_context_refresh failed: {type(exc).__name__}: {exc}",
+        )
 
 
 # ─── Markets ─────────────────────────────────────────────────────────────────

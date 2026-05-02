@@ -255,6 +255,34 @@ async def job_refresh_station_calibrations():
     await refresh_all_station_calibrations()
 
 
+async def job_refresh_lead_time_skills():
+    """Compute per-source MAE/bias at each lead-time bucket for every enabled city.
+
+    Reads resolved Events + ForecastObs.model_run_at over a 90-day window;
+    upserts SourceLeadTimeSkill rows. Surfaced in the city-page Lead-Time Skill
+    panel (web/routes.py:509-525). Without this job the panel is permanently
+    empty because compute_source_lead_time_skills() has no other call site.
+    """
+    from backend.modeling.calibration_engine import compute_source_lead_time_skills
+    from backend.storage.db import get_session
+    from backend.storage.repos import get_all_cities
+
+    async with get_session() as sess:
+        cities = await get_all_cities(sess, enabled_only=True)
+
+    total_combos = 0
+    for city in cities:
+        try:
+            result = await compute_source_lead_time_skills(city.id, days_back=90)
+            total_combos += len(result)
+        except Exception as e:
+            log.warning("refresh_lead_time_skills: city=%s failed: %s", city.slug, e)
+    log.info(
+        "refresh_lead_time_skills: refreshed %d combos across %d cities",
+        total_combos, len(cities),
+    )
+
+
 async def job_sync_positions():
     """Automatically synchronizes database positions with on-chain truth periodically."""
     from backend.execution.position_sync import sync_positions_from_chain
@@ -317,6 +345,7 @@ def create_scheduler() -> AsyncIOScheduler:
     add(job_check_resolved,          seconds=300,   name="check_resolved")  # 5 min
     add(job_auto_redeem,             seconds=43200, name="auto_redeem")  # 12h
     add(job_refresh_station_calibrations, seconds=21600, name="refresh_station_cal")  # 6h
+    add(job_refresh_lead_time_skills,     seconds=21600, name="refresh_lead_time_skills")  # 6h
     add(job_sync_positions,          seconds=600,   name="sync_positions") # 10 min
 
     return scheduler
