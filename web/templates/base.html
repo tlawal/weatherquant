@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en" class="dark">
+<html lang="en" class="dark overflow-x-hidden">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -126,50 +126,53 @@
           <span class="font-bold text-lg tracking-tight" style="color:var(--cyan)">WeatherQuant</span>
         </a>
         <span class="text-xs px-2 py-0.5 rounded font-mono hidden sm:inline" style="background:var(--bg-panel);color:var(--text-muted)">v1</span>
-        <nav class="hidden md:flex gap-4 ml-4">
+        <nav class="hidden md:flex gap-3 lg:gap-4 ml-2 lg:ml-4">
           <a href="/" class="text-sm hover:text-white transition-colors" style="color:var(--text-muted)">Signals</a>
           <a href="/redemptions" class="text-sm hover:text-white transition-colors" style="color:var(--text-muted)">Redemptions</a>
           <a href="/stations" class="text-sm hover:text-white transition-colors" style="color:var(--text-muted)">Stations</a>
           <a href="/strategies" class="text-sm hover:text-white transition-colors" style="color:var(--text-muted)">Strategies</a>
-          <a href="/admin/cities" class="text-sm hover:text-white transition-colors" style="color:var(--text-muted)">Cities</a>
-          <a href="/backtest" class="text-sm hover:text-white transition-colors" style="color:var(--text-muted)">Backtest</a>
-          <a href="/herbie-timing" class="text-sm hover:text-white transition-colors" style="color:var(--text-muted)" title="Herbie side-channel: latency + accuracy comparison vs Open-Meteo">Herbie</a>
+          <a href="/admin/cities" class="text-sm hover:text-white transition-colors hidden lg:inline" style="color:var(--text-muted)">Cities</a>
+          <a href="/backtest" class="text-sm hover:text-white transition-colors hidden lg:inline" style="color:var(--text-muted)">Backtest</a>
+          <a href="/herbie-timing" class="text-sm hover:text-white transition-colors hidden xl:inline" style="color:var(--text-muted)" title="Herbie side-channel: latency + accuracy comparison vs Open-Meteo">Herbie</a>
         </nav>
       </div>
 
       <!-- Right: Balance + ET clock + arming badge -->
-      <div class="flex items-center gap-3">
+      <div class="flex items-center gap-2 md:gap-3">
         <!-- Wallet Balance -->
-        <div class="hidden md:flex items-center gap-3 px-3 py-1 rounded-lg" style="background:var(--bg-panel)"
+        <div class="flex items-center gap-1.5 md:gap-3 px-2 md:px-3 py-1 rounded-lg text-[11px] md:text-sm" style="background:var(--bg-panel)"
              x-data="walletBalance()" x-init="init()"
              @trade-completed.window="refresh()">
-          <div class="flex items-center gap-1.5">
-            <span class="text-[10px] uppercase tracking-widest font-bold" style="color:var(--text-muted)">Cash</span>
-            <span class="mono text-sm font-semibold" style="color:var(--cyan)"
+          <div class="flex items-center gap-1 md:gap-1.5">
+            <span class="text-[9px] md:text-[10px] uppercase tracking-widest font-bold hidden lg:inline" style="color:var(--text-muted)">Cash</span>
+            <span class="text-[9px] md:text-[10px] font-bold lg:hidden" style="color:var(--text-muted)">C</span>
+            <span class="mono font-semibold" style="color:var(--cyan)"
                   x-text="balance !== null ? '$' + balance.toFixed(2) : '—'"></span>
           </div>
-          <div class="w-px h-4" style="background:var(--border)"></div>
-          <div class="flex items-center gap-1.5">
-            <span class="text-[10px] uppercase tracking-widest font-bold" style="color:var(--text-muted)">Exposure</span>
-            <span class="mono text-sm font-medium"
+          <div class="hidden sm:block w-px h-3 md:h-4" style="background:var(--border)"></div>
+          <div class="flex items-center gap-1 md:gap-1.5">
+            <span class="text-[9px] md:text-[10px] uppercase tracking-widest font-bold hidden lg:inline" style="color:var(--text-muted)">Exposure</span>
+            <span class="text-[9px] md:text-[10px] font-bold lg:hidden" style="color:var(--text-muted)">E</span>
+            <span class="mono font-medium"
                   :style="exposure > 0 ? 'color:var(--yellow)' : 'color:var(--text-muted)'"
                   x-text="'$' + exposure.toFixed(2)"></span>
           </div>
-          <div class="w-px h-4" style="background:var(--border)"></div>
-          <div class="flex items-center gap-1.5">
-            <span class="text-[10px] uppercase tracking-widest font-bold" style="color:var(--text-muted)">Total</span>
-            <span class="mono text-sm font-bold" style="color:var(--green)"
+          <div class="hidden sm:block w-px h-3 md:h-4" style="background:var(--border)"></div>
+          <div class="flex items-center gap-1 md:gap-1.5">
+            <span class="text-[9px] md:text-[10px] uppercase tracking-widest font-bold hidden lg:inline" style="color:var(--text-muted)">Total</span>
+            <span class="text-[9px] md:text-[10px] font-bold lg:hidden" style="color:var(--text-muted)">T</span>
+            <span class="mono font-bold" style="color:var(--green)"
                   x-text="'$' + portfolio.toFixed(2)"></span>
           </div>
         </div>
-        <span id="et-clock" class="mono text-sm" style="color:var(--text-muted)">-- ET</span>
-        <div id="arming-badge" class="text-xs px-3 py-1 rounded font-semibold
+        <span id="et-clock" class="mono text-sm hidden sm:inline" style="color:var(--text-muted)">-- ET</span>
+        <div id="arming-badge" class="text-[10px] md:text-xs px-2 md:px-3 py-1 rounded font-semibold whitespace-nowrap
           {% if arming_state == 'ARMED' %}badge-armed glow-red
           {% elif arming_state == 'ARMING_PENDING' %}badge-pending
           {% else %}badge-disarmed{% endif %}">
-          {% if arming_state == 'ARMED' %}🔴 ARMED
-          {% elif arming_state == 'ARMING_PENDING' %}🟡 PENDING
-          {% else %}🟢 SAFE{% endif %}
+          {% if arming_state == 'ARMED' %}<span class="hidden md:inline">🔴 </span>ARMED
+          {% elif arming_state == 'ARMING_PENDING' %}<span class="hidden md:inline">🟡 </span>PENDING
+          {% else %}<span class="hidden md:inline">🟢 </span>SAFE{% endif %}
         </div>
         <!-- API Token -->
         <button @click="$store.auth.showModal = true" class="relative text-lg cursor-pointer" title="API Token">
