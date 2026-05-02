@@ -143,10 +143,18 @@ async def execute_signal(
     # ── Compute position size ─────────────────────────────────────────────────
     if limit_price_override is not None:
         limit_price = limit_price_override
-    elif side == "SELL":
-        limit_price = signal.yes_bid or signal.yes_mid or 0.0
     else:
-        limit_price = signal.yes_ask or signal.yes_mid or 0.0
+        # Pick the YES-book side that corresponds to this trade, then invert
+        # for NO (NO ask ≈ 1 − YES bid; NO bid ≈ 1 − YES ask). YES is the
+        # only book the signal carries; NO is approximated via complements.
+        yes_mid = signal.yes_mid or 0.0
+        if outcome == "no":
+            yes_q = (signal.yes_ask if side == "SELL" else signal.yes_bid) or yes_mid
+            limit_price = (1 - yes_q) if yes_q else 0.0
+        elif side == "SELL":
+            limit_price = signal.yes_bid or yes_mid or 0.0
+        else:
+            limit_price = signal.yes_ask or yes_mid or 0.0
     if limit_price <= 0:
         result["status"] = "error"
         result["error"] = "no valid price"
