@@ -67,7 +67,7 @@ async def notify_trade_filled(
     shares: float,
     price: float,
     edge: float,
-) -> None:
+) -> bool:
     """Notification for a successful fill."""
     try:
         arrow = "\u2b06" if side.upper() == "BUY" else "\u2b07"
@@ -77,9 +77,13 @@ async def notify_trade_filled(
             f"Side: <b>{side.upper()}</b>  Shares: {shares:.2f}\n"
             f"Price: {price:.4f}  Edge: {edge:+.2%}"
         )
-        await send_telegram(text)
+        ok = await send_telegram(text)
+        if not ok:
+            logger.warning("notify_trade_filled: Telegram send skipped or failed")
+        return ok
     except Exception:
         logger.warning("notify_trade_filled failed", exc_info=True)
+        return False
 
 
 async def notify_exit_triggered(

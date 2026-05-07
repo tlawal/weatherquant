@@ -1946,6 +1946,116 @@ class ManualTradeRequest(BaseModel):
     order_type: str = "limit"  # "limit" | "market"
 
 
+async def _notify_late_manual_fill_if_synced(
+    *,
+    sync_res: dict,
+    order_id: int,
+    bucket_id: int,
+    city_slug: str,
+    bucket_label: str,
+    side: str,
+    edge: float,
+) -> bool:
+    """Finalize and alert a manual market fill discovered by position sync.
+
+    execute_signal() only emits Telegram when the 30s fill poll sees the data
+    API position delta. If the indexer lags, position sync can prove the fill
+    later; this helper makes that late path idempotent.
+    """
+    corrections = sync_res.get("corrections") if isinstance(sync_res, dict) else None
+    if not corrections:
+        return False
+
+    match = next(
+        (
+            c for c in corrections
+            if int(c.get("bucket_id") or 0) == int(bucket_id)
+        ),
+        None,
+    )
+    if not match:
+        return False
+
+    old_qty = float(match.get("old_qty", 0) or 0)
+    new_qty = float(match.get("new_qty", 0) or 0)
+    fill_qty = new_qty - old_qty
+    if fill_qty <= 0:
+        return False
+    fill_price = float(match.get("avg_price", 0) or 0)
+    if fill_price <= 0:
+        return False
+
+    from sqlalchemy import select
+    from backend.storage.models import Fill, Order
+
+    async with get_session() as sess:
+        order = await sess.get(Order, order_id)
+        if not order or order.status == "filled":
+            return False
+        existing_fill = (await sess.execute(
+            select(Fill).where(Fill.order_id == order_id).limit(1)
+        )).scalar_one_or_none()
+        if existing_fill is not None:
+            return False
+
+        sess.add(Fill(order_id=order_id, qty=fill_qty, price=fill_price))
+        order.status = "filled"
+        order.fill_qty = fill_qty
+        order.fill_price = fill_price
+        order.cancel_reason = None
+        await sess.commit()
+
+    try:
+        from backend.notifications.telegram import notify_trade_filled
+        ok = await notify_trade_filled(
+            city_slug=city_slug,
+            bucket_label=bucket_label,
+            side=side,
+            shares=fill_qty,
+            price=fill_price,
+            edge=edge,
+        )
+        if ok:
+            log.info(
+                "manual_trade: late fill alert sent order_id=%s bucket_id=%s qty=%.4f price=%.4f",
+                order_id, bucket_id, fill_qty, fill_price,
+            )
+        return ok
+    except Exception:
+        log.warning("manual_trade: late fill Telegram failed", exc_info=True)
+        return False
+
+
+async def _retry_late_manual_fill_alert(
+    *,
+    order_id: int,
+    bucket_id: int,
+    city_slug: str,
+    bucket_label: str,
+    side: str,
+    edge: float,
+    attempts: int = 3,
+    initial_delay_s: float = 2.0,
+    interval_s: float = 4.0,
+) -> None:
+    from backend.execution.position_sync import sync_positions_from_chain
+
+    for attempt in range(attempts):
+        await asyncio.sleep(initial_delay_s if attempt == 0 else interval_s)
+        sync_res = await sync_positions_from_chain(http_timeout_s=6.0)
+        sent = await _notify_late_manual_fill_if_synced(
+            sync_res=sync_res,
+            order_id=order_id,
+            bucket_id=bucket_id,
+            city_slug=city_slug,
+            bucket_label=bucket_label,
+            side=side,
+            edge=edge,
+        )
+        if sent:
+            return
+
+
 @router.post("/trade")
 async def manual_trade(
     body: ManualTradeRequest,
@@ -2058,16 +2168,35 @@ async def manual_trade(
     )
     if body.order_type == "market" and result.get("status") in {"filled", "open"}:
         try:
-            from backend.execution.position_sync import (
-                schedule_position_sync_retries,
-                sync_positions_from_chain,
-            )
+            from backend.execution.position_sync import sync_positions_from_chain
             sync_res = await sync_positions_from_chain(
                 http_timeout_s=5.0,
-                total_timeout_s=6.0,
             )
             result["position_sync"] = sync_res
-            asyncio.create_task(schedule_position_sync_retries())
+            if (
+                result.get("status") == "open"
+                and result.get("order_id")
+                and clob_side == "BUY"
+            ):
+                sent = await _notify_late_manual_fill_if_synced(
+                    sync_res=sync_res,
+                    order_id=int(result["order_id"]),
+                    bucket_id=bucket.id,
+                    city_slug=body.city_slug,
+                    bucket_label=bucket.label or signal.label,
+                    side=clob_side,
+                    edge=signal.true_edge,
+                )
+                result["late_fill_alert_sent"] = sent
+                if not sent:
+                    asyncio.create_task(_retry_late_manual_fill_alert(
+                        order_id=int(result["order_id"]),
+                        bucket_id=bucket.id,
+                        city_slug=body.city_slug,
+                        bucket_label=bucket.label or signal.label,
+                        side=clob_side,
+                        edge=signal.true_edge,
+                    ))
         except Exception:
             log.debug("manual_trade: post-trade position sync failed", exc_info=True)
     return result

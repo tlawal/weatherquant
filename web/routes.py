@@ -1471,6 +1471,7 @@ async def strategies_page(request: Request):
         get_all_cities,
     )
     from backend.storage.models import Bucket, Event
+    from sqlalchemy import select
 
     today_et = et_today()
 
@@ -1479,18 +1480,35 @@ async def strategies_page(request: Request):
         raw_signals = await get_signals_for_latest_snapshot(sess, limit=200)
         cities = await get_all_cities(sess)
 
+        bucket_ids = {sig.bucket_id for sig in raw_signals}
+        if bucket_ids:
+            bucket_rows = list((await sess.execute(
+                select(Bucket).where(Bucket.id.in_(bucket_ids))
+            )).scalars().all())
+        else:
+            bucket_rows = []
+        bucket_map = {b.id: b for b in bucket_rows}
+
+        event_ids = {b.event_id for b in bucket_rows}
+        if event_ids:
+            event_rows = list((await sess.execute(
+                select(Event).where(Event.id.in_(event_ids))
+            )).scalars().all())
+        else:
+            event_rows = []
+        event_map = {e.id: e for e in event_rows}
+
     city_map = {c.id: c for c in cities}
 
     # Build bucket probability heatmap data grouped by city
     heatmap_data = {}  # city_slug -> list of bucket dicts
     for sig in raw_signals:
-        async with get_session() as sess:
-            bucket = await sess.get(Bucket, sig.bucket_id)
-            if not bucket:
-                continue
-            event = await sess.get(Event, bucket.event_id)
-            if not event or event.date_et != today_et:
-                continue
+        bucket = bucket_map.get(sig.bucket_id)
+        if not bucket:
+            continue
+        event = event_map.get(bucket.event_id)
+        if not event or event.date_et != today_et:
+            continue
         city = city_map.get(event.city_id)
         if not city:
             continue

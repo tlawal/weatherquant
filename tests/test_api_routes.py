@@ -1,10 +1,14 @@
 import asyncio
+import inspect
 from datetime import datetime
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 import backend.api.routes as api_routes
+import backend.notifications.telegram as telegram_mod
 import backend.storage.db as storage_db
+import web.routes as web_routes
 from backend.execution.position_sync import sync_positions_from_chain
 from backend.storage.models import (
     Base,
@@ -12,8 +16,10 @@ from backend.storage.models import (
     City,
     Event,
     ForecastObs,
+    Fill,
     MetarObs,
     ModelSnapshot,
+    Order,
     Position,
     Signal,
     WorkerHeartbeat,
@@ -307,6 +313,206 @@ def test_manual_market_trade_triggers_position_sync(tmp_path, monkeypatch):
     _run(engine.dispose())
 
 
+def test_manual_market_open_trade_sends_late_fill_alert_from_sync(tmp_path, monkeypatch):
+    engine, session_factory = _run(_setup_test_db(tmp_path, monkeypatch))
+    city = _run(_create_city(session_factory))
+    sent = []
+
+    async def seed():
+        async with session_factory() as session:
+            event = Event(city_id=city.id, date_et=city_local_date(city), status="ok")
+            session.add(event)
+            await session.flush()
+            bucket = Bucket(
+                event_id=event.id,
+                bucket_idx=0,
+                label="Will the highest temperature in Atlanta be 80-81F?",
+                yes_token_id="yes-token",
+                no_token_id="no-token",
+                condition_id="cond-token",
+            )
+            session.add(bucket)
+            await session.flush()
+            order = Order(
+                bucket_id=bucket.id,
+                side="buy_yes",
+                qty=5,
+                limit_price=0.25,
+                status="open",
+                gates_json="{}",
+            )
+            session.add(order)
+            await session.commit()
+            return bucket.id, order.id
+
+    class FakeClob:
+        can_trade = True
+
+        async def get_balance(self):
+            return 10.0
+
+    bucket_id, order_id = _run(seed())
+
+    async def fake_execute_signal(*args, **kwargs):
+        return {"status": "open", "order_id": order_id}
+
+    async def fake_sync_positions_from_chain(*args, **kwargs):
+        return {
+            "ok": True,
+            "synced": 1,
+            "corrections": [{
+                "bucket_id": bucket_id,
+                "old_qty": 0,
+                "new_qty": 5,
+                "avg_price": 0.25,
+            }],
+        }
+
+    async def fake_notify_trade_filled(**kwargs):
+        sent.append(kwargs)
+        return True
+
+    monkeypatch.setattr("backend.ingestion.polymarket_clob.get_clob", lambda: FakeClob())
+    monkeypatch.setattr("backend.execution.trader.execute_signal", fake_execute_signal)
+    monkeypatch.setattr("backend.execution.position_sync.sync_positions_from_chain", fake_sync_positions_from_chain)
+    monkeypatch.setattr("backend.notifications.telegram.notify_trade_filled", fake_notify_trade_filled)
+
+    res = _run(api_routes.manual_trade(api_routes.ManualTradeRequest(
+        city_slug=city.city_slug,
+        bucket_id=bucket_id,
+        side="buy_yes",
+        qty=5,
+        order_type="market",
+    ), actor="test"))
+
+    assert res["status"] == "open"
+    assert res["late_fill_alert_sent"] is True
+    assert len(sent) == 1
+    assert sent[0]["shares"] == 5
+    assert sent[0]["price"] == 0.25
+
+    async def check():
+        async with session_factory() as session:
+            order = await session.get(Order, order_id)
+            fills = (await session.execute(
+                select(Fill).where(Fill.order_id == order_id)
+            )).scalars().all()
+            return order, fills
+
+    order, fills = _run(check())
+    assert order.status == "filled"
+    assert order.fill_qty == 5
+    assert order.fill_price == 0.25
+    assert len(fills) == 1
+
+    _run(engine.dispose())
+
+
+def test_late_fill_alert_ignores_non_matching_sync_correction(tmp_path, monkeypatch):
+    engine, session_factory = _run(_setup_test_db(tmp_path, monkeypatch))
+    city = _run(_create_city(session_factory))
+    sent = []
+
+    async def seed():
+        async with session_factory() as session:
+            event = Event(city_id=city.id, date_et=city_local_date(city), status="ok")
+            session.add(event)
+            await session.flush()
+            bucket = Bucket(event_id=event.id, bucket_idx=0, label="A", condition_id="cond")
+            session.add(bucket)
+            await session.flush()
+            order = Order(bucket_id=bucket.id, side="buy_yes", qty=5, limit_price=0.25, status="open")
+            session.add(order)
+            await session.commit()
+            return bucket.id, order.id
+
+    bucket_id, order_id = _run(seed())
+
+    async def fake_notify_trade_filled(**kwargs):
+        sent.append(kwargs)
+        return True
+
+    monkeypatch.setattr("backend.notifications.telegram.notify_trade_filled", fake_notify_trade_filled)
+    alerted = _run(api_routes._notify_late_manual_fill_if_synced(
+        sync_res={"corrections": [{"bucket_id": bucket_id + 999, "old_qty": 0, "new_qty": 5, "avg_price": 0.25}]},
+        order_id=order_id,
+        bucket_id=bucket_id,
+        city_slug=city.city_slug,
+        bucket_label="A",
+        side="BUY",
+        edge=0.1,
+    ))
+
+    assert alerted is False
+    assert sent == []
+
+    _run(engine.dispose())
+
+
+def test_late_fill_alert_is_idempotent_for_filled_order(tmp_path, monkeypatch):
+    engine, session_factory = _run(_setup_test_db(tmp_path, monkeypatch))
+    city = _run(_create_city(session_factory))
+    sent = []
+
+    async def seed():
+        async with session_factory() as session:
+            event = Event(city_id=city.id, date_et=city_local_date(city), status="ok")
+            session.add(event)
+            await session.flush()
+            bucket = Bucket(event_id=event.id, bucket_idx=0, label="A", condition_id="cond")
+            session.add(bucket)
+            await session.flush()
+            order = Order(bucket_id=bucket.id, side="buy_yes", qty=5, limit_price=0.25, status="filled", fill_qty=5, fill_price=0.25)
+            session.add(order)
+            await session.flush()
+            session.add(Fill(order_id=order.id, qty=5, price=0.25))
+            await session.commit()
+            return bucket.id, order.id
+
+    bucket_id, order_id = _run(seed())
+
+    async def fake_notify_trade_filled(**kwargs):
+        sent.append(kwargs)
+        return True
+
+    monkeypatch.setattr("backend.notifications.telegram.notify_trade_filled", fake_notify_trade_filled)
+    alerted = _run(api_routes._notify_late_manual_fill_if_synced(
+        sync_res={"corrections": [{"bucket_id": bucket_id, "old_qty": 0, "new_qty": 5, "avg_price": 0.25}]},
+        order_id=order_id,
+        bucket_id=bucket_id,
+        city_slug=city.city_slug,
+        bucket_label="A",
+        side="BUY",
+        edge=0.1,
+    ))
+
+    assert alerted is False
+    assert sent == []
+
+    _run(engine.dispose())
+
+
+def test_notify_trade_filled_returns_send_result(monkeypatch):
+    calls = []
+
+    async def fake_send_telegram(message, parse_mode="HTML"):
+        calls.append((message, parse_mode))
+        return True
+
+    monkeypatch.setattr(telegram_mod, "send_telegram", fake_send_telegram)
+    ok = _run(telegram_mod.notify_trade_filled(
+        city_slug="atlanta",
+        bucket_label="80-81F",
+        side="BUY",
+        shares=5,
+        price=0.25,
+        edge=0.1,
+    ))
+
+    assert ok is True
+    assert calls and "atlanta" in calls[0][0]
+
+
 def test_redemptions_overlays_api_position_without_admin_sync(tmp_path, monkeypatch):
     engine, session_factory = _run(_setup_test_db(tmp_path, monkeypatch))
     city = _run(_create_city(session_factory))
@@ -384,6 +590,92 @@ def test_redemptions_template_wraps_market_titles():
     html = open("web/templates/redemptions.html", encoding="utf-8").read()
     assert "whitespace-normal break-words leading-snug" in html
     assert 'text-cyan-600 font-semibold mt-0.5 truncate' not in html
+
+
+def test_position_sync_does_not_cancel_db_work_with_global_timeout():
+    sig = inspect.signature(sync_positions_from_chain)
+    assert "total_timeout_s" not in sig.parameters
+    src = inspect.getsource(sync_positions_from_chain)
+    assert "wait_for" not in src
+
+
+def test_strategies_page_bulk_loads_heatmap_without_per_signal_sessions(tmp_path, monkeypatch):
+    engine, session_factory = _run(_setup_test_db(tmp_path, monkeypatch))
+    city = _run(_create_city(session_factory))
+    session_entries = {"count": 0}
+
+    async def seed():
+        async with session_factory() as session:
+            event = Event(
+                city_id=city.id,
+                date_et=city_local_date(city),
+                status="ok",
+            )
+            session.add(event)
+            await session.flush()
+            snapshot = ModelSnapshot(
+                event_id=event.id,
+                mu=82.0,
+                sigma=2.5,
+                probs_json="[]",
+            )
+            session.add(snapshot)
+            await session.flush()
+
+            for idx in range(25):
+                bucket = Bucket(
+                    event_id=event.id,
+                    bucket_idx=idx,
+                    label=f"Atlanta bucket {idx}",
+                    low_f=70.0 + idx,
+                    high_f=71.0 + idx,
+                    yes_token_id=f"yes-{idx}",
+                    no_token_id=f"no-{idx}",
+                    condition_id=f"cond-{idx}",
+                )
+                session.add(bucket)
+                await session.flush()
+                session.add(
+                    Signal(
+                        bucket_id=bucket.id,
+                        model_snapshot_id=snapshot.id,
+                        model_prob=0.20,
+                        mkt_prob=0.10,
+                        raw_edge=0.10,
+                        exec_cost=0.01,
+                        true_edge=0.09,
+                    )
+                )
+            await session.commit()
+
+    _run(seed())
+
+    original_get_session = storage_db.get_session
+
+    def counting_get_session():
+        session_entries["count"] += 1
+        return original_get_session()
+
+    async def fake_fetch_openmeteo_metadata(key):
+        return {}
+
+    def fake_template_response(template_name, context):
+        return {
+            "template_name": template_name,
+            "context": context,
+        }
+
+    monkeypatch.setattr(storage_db, "get_session", counting_get_session)
+    monkeypatch.setattr(web_routes, "fetch_openmeteo_metadata", fake_fetch_openmeteo_metadata)
+    monkeypatch.setattr(web_routes.templates, "TemplateResponse", fake_template_response)
+
+    response = _run(web_routes.strategies_page(request=None))
+
+    assert response["template_name"] == "strategies.html"
+    assert len(response["context"]["heatmap_data"][city.city_slug]["buckets"]) == 25
+    assert session_entries["count"] == 1
+
+    _run(engine.dispose())
 
 
 def test_health_handles_naive_heartbeat_timestamps(tmp_path, monkeypatch):
