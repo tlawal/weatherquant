@@ -146,14 +146,33 @@ def _build_engine() -> AsyncEngine:
 
 
 async def _run_ddl(ddl: str) -> None:
-    """Run a single DDL statement in its own transaction. Silently ignore failures
-    (e.g., column already exists). Critical: never shares a transaction with other DDL."""
+    """Run a single DDL statement in its own transaction.
+
+    Idempotent migrations: ADD COLUMN / CREATE INDEX statements that fail
+    because the schema element already exists are downgraded to DEBUG. *All
+    other failures* are logged at WARNING with the full DDL so we can see
+    when a real migration breaks (e.g. lock contention with live traffic or
+    a malformed ALTER). The previous catch-all at DEBUG level masked a
+    genuine ALTER TABLE failure on production for the M1 Phase 3 migration —
+    invisible at INFO log level until the column was needed by an ORM read.
+    """
     try:
         from sqlalchemy import text
         async with _engine.begin() as conn:
             await conn.execute(text(ddl))
     except Exception as e:
-        log.debug("ddl: skipped (already applied or not supported): %s — %s", ddl[:60], e)
+        msg = str(e).lower()
+        # Postgres + SQLite both surface "already exists" / "duplicate column"
+        # text on idempotent failures. Treat those as benign.
+        benign = (
+            "already exists" in msg
+            or "duplicate column" in msg
+            or "duplicate key" in msg
+        )
+        if benign:
+            log.debug("ddl: skipped (already applied): %s", ddl[:80])
+        else:
+            log.warning("ddl: FAILED — %s — %s", ddl[:80], e)
 
 
 async def init_db() -> None:
@@ -279,7 +298,10 @@ async def init_db() -> None:
     # update job. Marking the event as processed gives strict at-most-once
     # semantics: the online updater nudges weights by `lr` per observation,
     # so double-processing would over-correct.
-    await _run_ddl("ALTER TABLE events ADD COLUMN bma_online_processed_at TIMESTAMP WITH TIME ZONE")
+    # IF NOT EXISTS makes this idempotent on retry — important because the
+    # initial production deploy of this migration silently failed (likely a
+    # lock contention with live traffic) and required a manual recovery.
+    await _run_ddl("ALTER TABLE events ADD COLUMN IF NOT EXISTS bma_online_processed_at TIMESTAMP WITH TIME ZONE")
     await _run_ddl("CREATE INDEX IF NOT EXISTS ix_events_bma_online ON events (bma_online_processed_at)")
 
     # station_calibrations — per-source MAE breakdown
