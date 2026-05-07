@@ -335,6 +335,127 @@ def test_em_log_likelihood_monotonically_increases():
     assert result.log_likelihood >= init_ll - 1e-9
 
 
+# ─────────────────── Phase 3 online-EM weight updates ──────────────────────
+
+def test_online_em_no_op_when_density_underflows():
+    """If every forecast is so far from y that the mixture density underflows,
+    the update is a no-op rather than a crash."""
+    from backend.modeling.bma import online_em_step
+
+    weights = {"a": 0.5, "b": 0.5}
+    # Observed = 80, forecasts at 200 and -50 with σ=0.1 → density ≈ 0.
+    forecasts = {"a": 200.0, "b": -50.0}
+    sigma = {"a": 0.1, "b": 0.1}
+    out = online_em_step(weights, forecasts, observed_y=80.0, sigma_by_source=sigma)
+    # No-op: weights unchanged
+    assert out == pytest.approx(weights)
+
+
+def test_online_em_nudges_toward_more_accurate_source():
+    """A single observation favoring source A should pull A's weight up."""
+    from backend.modeling.bma import online_em_step
+
+    weights = {"a": 0.5, "b": 0.5}
+    forecasts = {"a": 80.05, "b": 81.5}  # A nearly perfect, B 1.5° off
+    sigma = {"a": 1.0, "b": 1.0}
+    out = online_em_step(weights, forecasts, observed_y=80.0, sigma_by_source=sigma)
+    assert out["a"] > 0.5
+    assert out["b"] < 0.5
+    # Weights still sum to 1 and respect floor.
+    assert sum(out.values()) == pytest.approx(1.0, abs=1e-9)
+
+
+def test_online_em_preserves_floor_invariant():
+    """After the update, every weight remains ≥ EM_WEIGHT_FLOOR."""
+    from backend.modeling.bma import EM_WEIGHT_FLOOR, online_em_step
+
+    weights = {"a": 0.999, "b": 0.001}  # b at near-floor already
+    # Push hard against b: A perfectly accurate, B 10° off
+    forecasts = {"a": 80.0, "b": 90.0}
+    sigma = {"a": 1.0, "b": 1.0}
+    out = online_em_step(weights, forecasts, observed_y=80.0, sigma_by_source=sigma, lr=0.5)
+    for s, w in out.items():
+        assert w >= EM_WEIGHT_FLOOR - 1e-12
+
+
+def test_online_em_leaves_missing_sources_approximately_unchanged():
+    """When a source is absent from this observation, its weight is not
+    directly updated by the M-step. Global renormalization can shrink it
+    slightly (~1-2%) when the present sources collectively gain mass; that's
+    expected and acceptable. The offline batch refit handles long-run
+    availability penalties exactly."""
+    from backend.modeling.bma import online_em_step
+
+    weights = {"a": 0.4, "b": 0.4, "c": 0.2}
+    # Only A and B forecast; C is missing.
+    forecasts = {"a": 80.0, "b": 81.0}
+    sigma = {"a": 1.0, "b": 1.0, "c": 1.0}
+    out = online_em_step(weights, forecasts, observed_y=80.0, sigma_by_source=sigma)
+    # C's weight should be very close to its input — at most a few percent
+    # of dilution from renormalization, and never the dramatic shifts that
+    # A and B see from the actual EM update.
+    assert abs(out["c"] - 0.2) < 0.01
+    # Also verify A and B did move (so we know the test is exercising the
+    # algorithm, not just trivially passing).
+    assert out["a"] != pytest.approx(0.4, abs=1e-3)
+
+
+def test_online_em_lr_zero_is_identity():
+    """Sanity: lr=0 means no update."""
+    from backend.modeling.bma import online_em_step
+
+    weights = {"a": 0.6, "b": 0.4}
+    forecasts = {"a": 90.0, "b": 80.0}  # adversarial — B is right but lr=0
+    sigma = {"a": 1.0, "b": 1.0}
+    out = online_em_step(weights, forecasts, observed_y=80.0, sigma_by_source=sigma, lr=0.0)
+    assert out == pytest.approx(weights, abs=1e-9)
+
+
+def test_online_em_small_lr_makes_small_changes():
+    """A single observation with lr=0.05 should move weights by < lr × |r-w|."""
+    from backend.modeling.bma import online_em_step
+
+    weights = {"a": 0.5, "b": 0.5}
+    forecasts = {"a": 80.0, "b": 80.5}
+    sigma = {"a": 1.0, "b": 1.0}
+    out = online_em_step(weights, forecasts, observed_y=80.0, sigma_by_source=sigma, lr=0.05)
+    # Even with A clearly preferred (perfect), one step at lr=0.05 shouldn't
+    # move A by more than ~0.05 × 1.0 (full responsibility delta).
+    assert abs(out["a"] - weights["a"]) < 0.06
+
+
+def test_online_em_repeated_steps_converge_toward_offline_fit():
+    """Sequence of online updates from a stream of (forecast, y) pairs should
+    pull weights toward what offline-EM would compute on the same training.
+
+    Demonstrates the correctness of the online-EM trajectory."""
+    from backend.modeling.bma import (
+        fit_bma_weights_em,
+        online_em_step,
+    )
+
+    # Build training where source 'good' is much better than 'bad'
+    training: list[tuple[dict, float]] = []
+    for i in range(200):
+        y = 80.0 + (i % 10) * 0.1
+        training.append(({"good": y + 0.05, "bad": y + 1.5}, y))
+
+    sigma = {"good": 1.0, "bad": 1.0}
+
+    # Offline fit on the whole training set
+    offline = fit_bma_weights_em(training, sigma)
+
+    # Online updates from uniform start, lr=0.05, replay the same data
+    weights = {"good": 0.5, "bad": 0.5}
+    for forecasts, y in training:
+        weights = online_em_step(weights, forecasts, y, sigma, lr=0.05)
+
+    # Online with this many updates should land within a few percent of offline
+    assert abs(weights["good"] - offline.weights["good"]) < 0.1
+    # And on the right side of 0.5 — we know good > 0.5
+    assert weights["good"] > 0.7
+
+
 def test_predictive_to_dict_serializable():
     p = build_bma_predictive(
         calibrated_means={"hrrr": 82.0, "ifs": 80.0},

@@ -229,6 +229,112 @@ async def load_training_data_for_city(
 
 # ──────────────────── Sigma loader (shared with predictive) ─────────────────
 
+async def apply_online_em_for_event(
+    sess: AsyncSession,
+    *,
+    city_id: int,
+    event_id: int,
+    date_et: str,
+    lr: float = 0.05,
+) -> dict[int, int]:
+    """Apply one online-EM step per (lead_bucket) using this event's forecasts
+    + settlement. Touches every BMAWeights row whose lead_bucket has at least
+    one matching forecast for this event.
+
+    Returns: {lead_bucket: n_sources_updated} — useful for logging.
+
+    Caller is responsible for committing and for marking the event as
+    processed (Event.bma_online_processed_at). This function only mutates
+    BMAWeights.
+    """
+    from backend.modeling.bma import online_em_step
+    from backend.storage.models import BMAWeights, ForecastObs, Event
+    from zoneinfo import ZoneInfo
+
+    # Settlement high (same priority as Phase 2 loader).
+    observed_y = await _settlement_high_for_event(sess, city_id, date_et)
+    if observed_y is None:
+        return {}
+
+    event = (await sess.execute(select(Event).where(Event.id == event_id))).scalar_one_or_none()
+    if event is None:
+        return {}
+
+    et = ZoneInfo("America/New_York")
+    event_end_local = datetime.strptime(date_et, "%Y-%m-%d").replace(
+        hour=23, minute=59, second=59, tzinfo=et,
+    )
+    event_end_utc = event_end_local.astimezone(timezone.utc)
+
+    # Per-source forecast at its actual lead bucket (latest run wins).
+    forecasts = (
+        await sess.execute(
+            select(ForecastObs).where(
+                ForecastObs.city_id == city_id,
+                ForecastObs.date_et == date_et,
+                ForecastObs.model_run_at.isnot(None),
+                ForecastObs.high_f.isnot(None),
+            )
+        )
+    ).scalars().all()
+
+    # Group: {lead_bucket: {source: μ_ik}}.
+    by_bucket: dict[int, dict[str, float]] = {}
+    for fc in forecasts:
+        mr = fc.model_run_at
+        if mr.tzinfo is None:
+            mr = mr.replace(tzinfo=timezone.utc)
+        lead_h = max(0.0, (event_end_utc - mr).total_seconds() / 3600.0)
+        bucket = _bucket_lead(lead_h)
+        per_src = by_bucket.setdefault(bucket, {})
+        # Keep the latest run per (source, bucket) — same as Phase 2.
+        existing_mr = getattr(per_src.get(f"_mr_{fc.source}", None), "value", None)
+        if fc.source not in per_src or (existing_mr is None or mr > existing_mr):
+            per_src[fc.source] = float(fc.high_f)
+
+    summary: dict[int, int] = {}
+    for lead_bucket, forecasts_dict in by_bucket.items():
+        # Pull current weights + σ for this bucket.
+        rows = (
+            await sess.execute(
+                select(BMAWeights).where(
+                    BMAWeights.city_id == city_id,
+                    BMAWeights.lead_time_bucket_hours == lead_bucket,
+                )
+            )
+        ).scalars().all()
+        if not rows:
+            # No fitted weights at this bucket yet — nothing to update online.
+            # The nightly batch will create them once enough data accumulates.
+            continue
+
+        current_weights = {r.source: float(r.weight) for r in rows}
+        sigma_by_source = {r.source: float(r.sigma_f) for r in rows}
+
+        updated = online_em_step(
+            current_weights=current_weights,
+            forecasts=forecasts_dict,
+            observed_y=observed_y,
+            sigma_by_source=sigma_by_source,
+            lr=lr,
+        )
+
+        # Write back. Only mutate weights — σ stays whatever the offline
+        # fitter wrote (Phase 3 intentionally does not update σ; that's M3
+        # plan territory).
+        n_updated = 0
+        for r in rows:
+            new_w = updated.get(r.source)
+            if new_w is not None and abs(new_w - r.weight) > 1e-9:
+                r.weight = float(new_w)
+                r.n_obs = int(r.n_obs or 0) + 1
+                r.fitted_at = datetime.now(timezone.utc)
+                n_updated += 1
+        summary[lead_bucket] = n_updated
+
+    return summary
+
+
 async def load_sigma_by_source_for_city(
     sess: AsyncSession,
     city_id: int,

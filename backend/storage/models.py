@@ -94,6 +94,10 @@ class Event(Base):
     resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     winning_bucket_idx: Mapped[Optional[int]] = mapped_column(Integer)
     redeemed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    # M1 Phase 3 — set when job_online_em_updates has consumed this event's
+    # settlement to nudge BMA weights. Strict at-most-once semantics: NULL
+    # means "not yet processed", any timestamp means "already processed".
+    bma_online_processed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow

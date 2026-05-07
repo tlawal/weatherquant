@@ -275,6 +275,13 @@ async def init_db() -> None:
     await _run_ddl("ALTER TABLE metar_obs_extended ADD COLUMN IF NOT EXISTS wx_string VARCHAR(64)")
     await _run_ddl("ALTER TABLE metar_obs_extended ADD COLUMN IF NOT EXISTS condition VARCHAR(32)")
 
+    # M1 Phase 3 — track which events have been processed by the online-EM
+    # update job. Marking the event as processed gives strict at-most-once
+    # semantics: the online updater nudges weights by `lr` per observation,
+    # so double-processing would over-correct.
+    await _run_ddl("ALTER TABLE events ADD COLUMN bma_online_processed_at TIMESTAMP WITH TIME ZONE")
+    await _run_ddl("CREATE INDEX IF NOT EXISTS ix_events_bma_online ON events (bma_online_processed_at)")
+
     # station_calibrations — per-source MAE breakdown
     await _run_ddl("ALTER TABLE station_calibrations ADD COLUMN source_mae_json TEXT")
     await _run_ddl("ALTER TABLE station_calibrations ADD COLUMN rmse_f FLOAT DEFAULT 0.0")

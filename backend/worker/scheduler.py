@@ -358,6 +358,81 @@ async def job_fit_bma_weights():
     )
 
 
+async def job_online_em_updates():
+    """M1 Phase 3 — apply one online-EM step per newly-resolved event.
+
+    Strict at-most-once: only events where `winning_bucket_idx IS NOT NULL`
+    AND `bma_online_processed_at IS NULL` are processed. The job marks each
+    event as processed after applying updates so a re-run can't double-nudge
+    the weights. Each EM step touches BMAWeights rows for the lead-buckets
+    present in the event's forecasts.
+
+    Cadence: hourly. New events resolve at 23:59:59 ET (≈04:00 UTC) so the
+    next-hour run picks them up. Cheap when there are no new resolutions —
+    the WHERE clause returns zero rows and the function exits.
+    """
+    from datetime import datetime, timezone
+
+    from sqlalchemy import select
+    from backend.modeling.bma_weights_repo import apply_online_em_for_event
+    from backend.storage.db import get_session
+    from backend.storage.models import Event
+
+    n_processed = 0
+    n_skipped = 0
+    n_failed = 0
+    total_lead_buckets = 0
+
+    async with get_session() as sess:
+        events = (
+            await sess.execute(
+                select(Event).where(
+                    Event.winning_bucket_idx.isnot(None),
+                    Event.bma_online_processed_at.is_(None),
+                )
+            )
+        ).scalars().all()
+
+    for event in events:
+        # Per-event in its own session so one failure doesn't roll back the
+        # rest of the batch. Same isolation pattern as nightly fitter.
+        try:
+            async with get_session() as sess:
+                summary = await apply_online_em_for_event(
+                    sess,
+                    city_id=event.city_id,
+                    event_id=event.id,
+                    date_et=event.date_et,
+                )
+                # Mark the event processed regardless of whether any bucket
+                # was updated — empty summary means "no fitted weights at any
+                # active lead yet", which we record so we don't keep
+                # re-trying the same event each hour.
+                event_in_sess = (
+                    await sess.execute(
+                        select(Event).where(Event.id == event.id)
+                    )
+                ).scalar_one()
+                event_in_sess.bma_online_processed_at = datetime.now(timezone.utc)
+                await sess.commit()
+            if summary:
+                n_processed += 1
+                total_lead_buckets += len(summary)
+            else:
+                n_skipped += 1
+        except Exception as e:
+            n_failed += 1
+            log.warning(
+                "online_em_updates: event_id=%s city_id=%s failed: %s",
+                event.id, event.city_id, e,
+            )
+
+    log.info(
+        "online_em_updates: %d events updated (%d lead-buckets), %d skipped (no fits yet), %d failed",
+        n_processed, total_lead_buckets, n_skipped, n_failed,
+    )
+
+
 async def job_sync_positions():
     """Automatically synchronizes database positions with on-chain truth periodically."""
     from backend.execution.position_sync import sync_positions_from_chain
@@ -427,6 +502,10 @@ def create_scheduler() -> AsyncIOScheduler:
     # (12 cities × 10 lead buckets ≈ 120 EM fits per pass) so coalesce + a
     # single instance protect against overlap on slow days.
     add(job_fit_bma_weights,              seconds=86400, name="fit_bma_weights")  # 24h
+    # M1 Phase 3 — apply online-EM nudges from each newly-resolved event.
+    # Hourly cadence: events resolve at 23:59:59 ET so the next-hour pass
+    # picks them up; processed marker on Event ensures at-most-once.
+    add(job_online_em_updates,            seconds=3600,  name="online_em_updates")  # 1h
     add(job_sync_positions,          seconds=600,   name="sync_positions") # 10 min
 
     return scheduler

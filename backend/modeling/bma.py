@@ -457,6 +457,106 @@ def fit_bma_weights_em(
     )
 
 
+# ───────────────────── Online EM weight update (Phase 3) ───────────────────
+#
+# Reference: Cappé, O. & Moulines, E. (2009). On-line expectation–maximisation
+# algorithm for latent data models. JRSS B 71(3):593–613.
+#
+# The offline EM in `fit_bma_weights_em` reprocesses the entire training
+# window each night. That's robust but slow to react: a regime shift today
+# only moves weights tomorrow. Online EM applies one stochastic E+M step per
+# new observation, using a small learning rate `lr` to keep the trajectory
+# stable. With lr ≈ 0.05 and ~50 settled events flowing in per month, the
+# online updater closes ~30% of the gap to the new equilibrium between
+# nightly batch refits — fast enough to catch front-passage clusters while
+# slow enough that one anomalous resolution can't crash the weights.
+#
+# Update rule (single new observation `(forecasts, y)`):
+#
+#     E:  rₖ = wₖ · N(y | μ_k, σ_k²)  /  Σⱼ wⱼ · N(y | μ_j, σ_j²)
+#     M:  wₖ_new = (1 − lr) · wₖ + lr · rₖ                   for sources present
+#         wₖ_new = wₖ                                          for sources absent
+#
+# Sources absent from this observation aren't updated — the offline batch
+# refit (every 24h) handles availability penalties via the standard Raftery
+# /N normalization. Online and offline thus play complementary roles:
+# online = fast adjuster within the day; offline = correct anchor.
+
+ONLINE_EM_LR_DEFAULT = 0.05
+
+
+def online_em_step(
+    current_weights: dict[str, float],
+    forecasts: dict[str, float],
+    observed_y: float,
+    sigma_by_source: dict[str, float],
+    lr: float = ONLINE_EM_LR_DEFAULT,
+) -> dict[str, float]:
+    """Apply one online-EM update to BMA mixture weights given a new settled
+    observation.
+
+    Args:
+        current_weights: {source: wₖ} from the most recent offline fit (or
+            from a prior online step). Must sum > 0; renormalized at end so
+            the input doesn't have to be exactly normalized.
+        forecasts: {source: μ_ik} for this newly-settled event. Sources may
+            be missing (e.g. HRRR didn't run that day); missing sources
+            are left unchanged.
+        observed_y: realized daily-high temperature for this event (°F).
+        sigma_by_source: {source: σₖ} held fixed (matches offline-EM Phase 2).
+        lr: learning rate. Smaller = slower to react, more stable.
+
+    Returns:
+        Updated {source: weight} dict, summing to 1, all entries above
+        EM_WEIGHT_FLOOR. If the per-obs density underflows (every forecast
+        far from y), returns `current_weights` unchanged.
+    """
+    # E-step on this single observation
+    numerator: dict[str, float] = {}
+    denom = 0.0
+    for s, w in current_weights.items():
+        if s not in forecasts or s not in sigma_by_source:
+            continue
+        pdf = _gaussian_pdf(observed_y, forecasts[s], sigma_by_source[s])
+        contribution = w * pdf
+        numerator[s] = contribution
+        denom += contribution
+
+    if denom <= 0:
+        # Pathological: every forecast was so far from y that the mixture
+        # density underflowed. No-op rather than corrupt the weights with a
+        # division-by-zero or with an arbitrary fallback.
+        return dict(current_weights)
+
+    # M-step: nudge each present source toward its responsibility; leave
+    # absent sources untouched. lr ≈ 0.05 keeps any single observation from
+    # dominating, even ones with extreme PDF ratios.
+    new_weights: dict[str, float] = {}
+    for s, w in current_weights.items():
+        if s in numerator:
+            r = numerator[s] / denom
+            new_weights[s] = (1.0 - lr) * w + lr * r
+        else:
+            new_weights[s] = w
+
+    # Floor with redistribution (same algorithm as offline-EM M-step) so the
+    # weight invariants from Phase 2 hold at every intermediate online step.
+    total = sum(new_weights.values())
+    if total > 0:
+        new_weights = {s: w / total for s, w in new_weights.items()}
+
+    floor_deficit = 0.0
+    for s, w in new_weights.items():
+        if w < EM_WEIGHT_FLOOR:
+            floor_deficit += (EM_WEIGHT_FLOOR - w)
+            new_weights[s] = EM_WEIGHT_FLOOR
+    if floor_deficit > 0:
+        largest = max(new_weights, key=new_weights.get)
+        new_weights[largest] -= floor_deficit
+
+    return new_weights
+
+
 # ───────────────────── Audit / dict export ──────────────────────────────────
 
 def predictive_to_dict(p: BMAPredictive) -> dict:
