@@ -283,6 +283,81 @@ async def job_refresh_lead_time_skills():
     )
 
 
+async def job_fit_bma_weights():
+    """M1 Phase 2 — fit BMA mixture weights via offline EM (Raftery 2005).
+
+    For each enabled city × standard lead-time bucket:
+      1. Load training data: (forecasts_dict, observed_y) tuples from settled
+         events in the last 90 days.
+      2. Pull σᵢ from SourceLeadTimeSkill at the same lead bucket.
+      3. Fit weights via fit_bma_weights_em.
+      4. Upsert into BMAWeights (replace-on-write per (city, lead_bucket)).
+
+    `build_bma_predictive` reads these weights at fuse time when present;
+    falls back to legacy lead-skill × freshness weights when absent (cold
+    start). Runs once nightly at 03:00 ET; the SourceLeadTimeSkill upstream
+    refresh runs every 6h so weights are always fit against the freshest σᵢ.
+    """
+    from backend.modeling.bma import fit_bma_weights_em
+    from backend.modeling.bma_weights_repo import (
+        load_sigma_by_source_for_city,
+        load_training_data_for_city,
+        upsert_bma_weights,
+    )
+    from backend.storage.db import get_session
+    from backend.storage.repos import get_all_cities
+
+    # Match the lead buckets used by SourceLeadTimeSkill so σᵢ aligns with wᵢ.
+    lead_buckets = (72, 48, 36, 24, 18, 12, 6, 3, 1, 0)
+
+    async with get_session() as sess:
+        cities = await get_all_cities(sess, enabled_only=True)
+
+    total_fits = 0
+    total_combos = 0
+    for city in cities:
+        for lead in lead_buckets:
+            total_combos += 1
+            try:
+                async with get_session() as sess:
+                    sigma_by_source = await load_sigma_by_source_for_city(
+                        sess, city.id, lead,
+                    )
+                    if not sigma_by_source:
+                        # No SourceLeadTimeSkill rows at this lead yet — skip
+                        # silently. The 6h refresh_lead_time_skills job will
+                        # backfill these as settled events accumulate.
+                        continue
+                    training = await load_training_data_for_city(
+                        sess, city.id, lead, days_back=90,
+                    )
+                    if not training:
+                        continue
+                    fit = fit_bma_weights_em(training, sigma_by_source)
+                    written = await upsert_bma_weights(
+                        sess,
+                        city_id=city.id,
+                        lead_bucket_hours=lead,
+                        fit_result=fit,
+                        sigma_by_source=sigma_by_source,
+                    )
+                    await sess.commit()
+                    total_fits += 1
+                    log.debug(
+                        "bma_fit: city=%s lead=%dh n_obs=%d converged=%s ll=%.3f rows=%d",
+                        city.slug, lead, fit.n_obs, fit.converged, fit.log_likelihood, written,
+                    )
+            except Exception as e:
+                log.warning(
+                    "bma_fit: city=%s lead=%dh failed: %s",
+                    city.slug, lead, e,
+                )
+    log.info(
+        "bma_fit: completed %d / %d (city × lead) fits",
+        total_fits, total_combos,
+    )
+
+
 async def job_sync_positions():
     """Automatically synchronizes database positions with on-chain truth periodically."""
     from backend.execution.position_sync import sync_positions_from_chain
@@ -346,6 +421,12 @@ def create_scheduler() -> AsyncIOScheduler:
     add(job_auto_redeem,             seconds=43200, name="auto_redeem")  # 12h
     add(job_refresh_station_calibrations, seconds=21600, name="refresh_station_cal")  # 6h
     add(job_refresh_lead_time_skills,     seconds=21600, name="refresh_lead_time_skills")  # 6h
+    # M1 Phase 2 — refit BMA mixture weights nightly. Cadence is 24h because
+    # weights only meaningfully shift after a few new settled events arrive,
+    # and the upstream SourceLeadTimeSkill σᵢ refreshes every 6h. Heavy job
+    # (12 cities × 10 lead buckets ≈ 120 EM fits per pass) so coalesce + a
+    # single instance protect against overlap on slow days.
+    add(job_fit_bma_weights,              seconds=86400, name="fit_bma_weights")  # 24h
     add(job_sync_positions,          seconds=600,   name="sync_positions") # 10 min
 
     return scheduler

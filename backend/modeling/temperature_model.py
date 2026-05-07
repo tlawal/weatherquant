@@ -580,6 +580,13 @@ def compute_model(
     # Bayesian-upgrade Q6: regime-aware σ inflation multiplier (1.0 = calm,
     # up to 2.0 = volatile). None = behave exactly as pre-Q6 (no inflation).
     regime_sigma_multiplier: Optional[float] = None,
+    # M1 Phase 2: EM-fit BMA mixing weights from BMAWeights (per (city, lead)).
+    # Caller supplies {source: weight} when a fit exists for the operative
+    # lead bucket; build_bma_predictive uses these instead of the legacy
+    # weights_by_source for matching sources, falling back to legacy for any
+    # source not present in the fitted set. None = pure shadow on legacy
+    # weights (Phase 1 behavior).
+    fitted_bma_weights_by_source: Optional[dict[str, float]] = None,
 ) -> Optional[ModelResult]:
     """
     Fuse all forecast sources and compute temperature distribution + bucket probabilities.
@@ -719,6 +726,7 @@ def compute_model(
             lead_skill_mae_by_source=lead_skill_mae_by_source or {},
             lead_skill_n_obs_by_source=lead_skill_n_obs_by_source or {},
             sigma_unit_mult=(5.0 / 9.0 if unit == "C" else 1.0),
+            fitted_weights_by_source=fitted_bma_weights_by_source,
         )
     except Exception:
         log.exception("model: BMA shadow predictive failed; legacy path unaffected")

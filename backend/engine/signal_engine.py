@@ -485,6 +485,9 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
     model_run_at_by_source: dict[str, datetime] = {}
     lead_skill_mae_by_source: dict[str, Optional[float]] = {}
     lead_skill_n_obs_by_source: dict[str, int] = {}
+    # M1 Phase 2 — track each source's lead-bucket so we can pick a
+    # representative bucket for the BMA fitted-weights fetch below.
+    lead_bucket_by_source: dict[str, int] = {}
     for _src, _obs in _src_to_obs.items():
         if _obs is None or _obs.high_f is None:
             continue
@@ -495,10 +498,33 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
             model_run_at_by_source[_src] = _mr
             _lead_h = max(0.0, (_settlement_utc - _mr).total_seconds() / 3600.0)
             _bucket = bucket_lead_time(_lead_h)
+            lead_bucket_by_source[_src] = _bucket
             _skill = lead_skills_by_key.get((_src, _bucket))
             if _skill is not None:
                 lead_skill_mae_by_source[_src] = _skill.mae_f
                 lead_skill_n_obs_by_source[_src] = _skill.n_obs
+
+    # M1 Phase 2 — fetch EM-fit BMA weights for the operative lead bucket.
+    # Pick the median lead bucket across active sources; that single fit
+    # represents the panel's "typical" lead at trade time. Sources with
+    # leads outside that bucket still get their fitted weight (graceful
+    # approximation) and any source missing from the fitted set falls back
+    # to the legacy lead-skill × freshness weight inside build_bma_predictive.
+    fitted_bma_weights: Optional[dict[str, float]] = None
+    if lead_bucket_by_source:
+        try:
+            from backend.modeling.bma_weights_repo import get_bma_weights_for_city
+
+            _buckets_sorted = sorted(lead_bucket_by_source.values())
+            _operative_bucket = _buckets_sorted[len(_buckets_sorted) // 2]
+            fitted_bma_weights = await get_bma_weights_for_city(
+                sess, city.id, _operative_bucket,
+            )
+        except Exception:
+            log.exception(
+                "signal: %s — BMA fitted weights fetch failed; legacy weights used",
+                city.city_slug,
+            )
 
     # ── Q6: regime detection BEFORE compute_model so σ inflation can flow ──
     # The pre-Q6 path detected regime AFTER the model and used the result
@@ -562,6 +588,8 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         regime_sigma_multiplier=_regime_sigma_mult,
         lead_skill_mae_by_source=lead_skill_mae_by_source or None,
         lead_skill_n_obs_by_source=lead_skill_n_obs_by_source or None,
+        # M1 Phase 2 — EM-fit BMA mixing weights (None when no fit yet).
+        fitted_bma_weights_by_source=fitted_bma_weights,
         now_utc=_now_utc,
         daily_high_metar=ground_truth_high,
         current_temp_f=metar.temp_f if metar else None,

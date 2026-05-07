@@ -177,6 +177,7 @@ def build_bma_predictive(
     lead_skill_mae_by_source: Optional[dict[str, float]] = None,
     lead_skill_n_obs_by_source: Optional[dict[str, int]] = None,
     sigma_unit_mult: float = 1.0,
+    fitted_weights_by_source: Optional[dict[str, float]] = None,
 ) -> BMAPredictive:
     """Assemble a BMAPredictive from the same inputs `compute_model` already has.
 
@@ -187,6 +188,8 @@ def build_bma_predictive(
         weights_by_source: {source: w_i}. Pre-normalization OK; weights are
             normalized in BMAPredictive.__post_init__. Caller passes the same
             base × lead-factor × freshness-factor product the legacy path uses.
+            Used when `fitted_weights_by_source` is None or a source is missing
+            from the fitted set (graceful fallback).
         lead_skill_mae_by_source: {source: MAE °F at the relevant lead bucket}
             from SourceLeadTimeSkill. MAE is the natural σ proxy: under a
             zero-mean Laplace residual model, σ ≈ MAE · √2 / √π · √2 ≈ MAE.
@@ -197,15 +200,28 @@ def build_bma_predictive(
             fall back to BMA_PRIOR_SIGMA_F.
         sigma_unit_mult: 1.0 for °F outputs, 5/9 for °C. Applied to the prior σ
             and floor; MAE values are already in display units from the caller.
+        fitted_weights_by_source: optional EM-fit weights from BMAWeights
+            (M1 Phase 2). When present, takes precedence over `weights_by_source`
+            for sources in the fitted set; sources missing from the fitted set
+            fall back to `weights_by_source` so a brand-new source isn't
+            dropped from the mixture mid-deploy. None = use legacy weights only.
     """
     mae_map = lead_skill_mae_by_source or {}
     n_map = lead_skill_n_obs_by_source or {}
+    fitted = fitted_weights_by_source or {}
     components: list[BMAComponent] = []
     fallback_used = False
     notes: list[str] = []
+    fitted_used = False
 
     for src, mu in calibrated_means.items():
-        w = float(weights_by_source.get(src, 0.0))
+        # Prefer the fitted EM weight; fall back to the legacy lead-skill ×
+        # freshness weight when the source isn't in the fitted set yet.
+        if src in fitted:
+            w = float(fitted[src])
+            fitted_used = True
+        else:
+            w = float(weights_by_source.get(src, 0.0))
         if w <= 0.0:
             # Source is in the panel but weights downscaled it to zero — skip;
             # mixture should not include it. Edge case: all weights zero →
@@ -229,6 +245,8 @@ def build_bma_predictive(
             source=src, mu=float(mu), sigma=sigma, weight=w, n_obs=n,
         ))
 
+    if fitted_used:
+        notes.append("M1 Phase 2: EM-fitted weights in use")
     return BMAPredictive(
         components=components,
         sigma_unit_mult=sigma_unit_mult,
@@ -362,12 +380,17 @@ def fit_bma_weights_em(
     converged = False
     n_iter = 0
 
+    n_total = len(training)
+
     for n_iter in range(1, max_iter + 1):
         # ── E-step ──────────────────────────────────────────────────────
-        # responsibility_sum[k] accumulates Σ_i r_ik
-        # active_count[k] is the number of obs where source k had a forecast
+        # responsibility_sum[k] accumulates Σ_i r_ik over ALL training obs.
+        # Sources missing on a given obs contribute 0 there — that's the
+        # availability-aware behavior we want: a source that misses 25% of
+        # days gets ~25% less weight automatically, and at fuse time the
+        # downstream renormalization among available sources still produces
+        # sensible probabilities.
         responsibility_sum = {s: 0.0 for s in sources}
-        active_count = {s: 0 for s in sources}
         for forecasts, y in training:
             # Per-source numerator wₖ · N(y | μ_ik, σₖ)
             numerator = {}
@@ -387,27 +410,33 @@ def fit_bma_weights_em(
                 continue
             for s, num in numerator.items():
                 responsibility_sum[s] += num / denom
-                active_count[s] += 1
 
         # ── M-step ──────────────────────────────────────────────────────
-        # Standard Raftery 2005: wₖ = (1/N) Σ_i r_ik. We use active_count[s]
-        # rather than total N so a source missing on half the days isn't
-        # halved spuriously — its weight is the *conditional* mixing weight
-        # given that it ran.
-        new_weights: dict[str, float] = {}
-        for s in sources:
-            n_active = active_count[s]
-            if n_active > 0:
-                new_weights[s] = responsibility_sum[s] / n_active
-            else:
-                # Source never had a forecast in training — give it the floor
-                # so the predictive PDF doesn't drop it entirely (allows it
-                # to recover if it returns later with relevant data).
-                new_weights[s] = EM_WEIGHT_FLOOR
-        # Floor + renormalize
-        new_weights = {s: max(w, EM_WEIGHT_FLOOR) for s, w in new_weights.items()}
+        # Standard Raftery 2005: wₖ = (1/N) Σ_i r_ik.
+        new_weights: dict[str, float] = {
+            s: responsibility_sum[s] / n_total for s in sources
+        }
+
+        # Normalize first (handles obs we skipped above where every source's
+        # density underflowed — they'd leave new_weights summing < 1).
         total = sum(new_weights.values())
-        new_weights = {s: w / total for s, w in new_weights.items()}
+        if total > 0:
+            new_weights = {s: w / total for s, w in new_weights.items()}
+
+        # Apply floor with redistribution: clamp tiny weights to EM_WEIGHT_FLOOR
+        # and subtract the deficit from the largest weight. This preserves
+        # sum=1 exactly (no second normalization needed) and guarantees the
+        # floor invariant — protecting trapped sources without slipping back
+        # below threshold via float rounding. The largest weight always has
+        # enough headroom to absorb at most (K−1) × floor of deficit.
+        floor_deficit = 0.0
+        for s, w in new_weights.items():
+            if w < EM_WEIGHT_FLOOR:
+                floor_deficit += (EM_WEIGHT_FLOOR - w)
+                new_weights[s] = EM_WEIGHT_FLOOR
+        if floor_deficit > 0:
+            largest = max(new_weights, key=new_weights.get)
+            new_weights[largest] -= floor_deficit
 
         # ── Convergence ────────────────────────────────────────────────
         ll = _log_likelihood(training, new_weights, sigma_by_source, sources)

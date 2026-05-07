@@ -322,6 +322,46 @@ class SourceLeadTimeSkill(Base):
     city_ref: Mapped[City] = relationship("City", back_populates="source_lead_time_skills")
 
 
+class BMAWeights(Base):
+    """M1 Phase 2 — fitted Bayesian Model Averaging mixing weights.
+
+    One row per (city, source, lead_bucket). Re-fit nightly from the rolling
+    settled-event window via `fit_bma_weights_em` (Raftery 2005 EM). When a row
+    exists for the operative (city, lead_bucket) at trade time, the BMA
+    predictive uses these weights instead of the legacy lead-skill × freshness
+    weights. When absent (cold start), the legacy weights flow through
+    unchanged.
+    """
+    __tablename__ = "bma_weights"
+    __table_args__ = (
+        UniqueConstraint("city_id", "source", "lead_time_bucket_hours", name="uq_bma_weight_city_source_lead"),
+        Index("ix_bma_weight_city_lead", "city_id", "lead_time_bucket_hours"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    city_id: Mapped[int] = mapped_column(Integer, ForeignKey("cities.id"), nullable=False)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    # Lead time bucket in hours, matching SourceLeadTimeSkill conventions:
+    # {72, 48, 36, 24, 18, 12, 6, 3, 1, 0}.
+    lead_time_bucket_hours: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Fitted mixture weight wₖ ∈ [EM_WEIGHT_FLOOR, 1.0]; weights across the same
+    # (city_id, lead_time_bucket_hours) sum to 1.0 by construction.
+    weight: Mapped[float] = mapped_column(Float, nullable=False)
+    # σ used for this kernel during fitting (held fixed in Phase 2; updated
+    # online in Phase 3). Stored for audit + reuse at fuse time so we always
+    # know which σ produced these weights.
+    sigma_f: Mapped[float] = mapped_column(Float, nullable=False)
+    # Number of training observations backing this fit. Below
+    # EM_MIN_TRAINING_OBS the weights are uniform cold-start defaults;
+    # consumers may choose to fall back to legacy weights when n_obs is low.
+    n_obs: Mapped[int] = mapped_column(Integer, default=0)
+    # Final log-likelihood + iter count + convergence flag for audit.
+    log_likelihood: Mapped[Optional[float]] = mapped_column(Float)
+    n_iter: Mapped[Optional[int]] = mapped_column(Integer)
+    converged: Mapped[bool] = mapped_column(Boolean, default=False)
+    fitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
 class MarketContextSnapshot(Base):
     """Stored Market Context narrative and structured source payload for a city/date."""
     __tablename__ = "market_context_snapshots"
