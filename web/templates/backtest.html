@@ -14,12 +14,20 @@
       </p>
     </div>
     <div class="flex items-center gap-2 flex-wrap">
-      <span class="text-xs mono px-2 py-1 rounded" style="background:var(--bg-panel);color:var(--text-muted)">
-        Resolved Events: <strong style="color:var(--cyan)">{{ resolved_count }}</strong>
+      <span class="text-xs mono px-2 py-1 rounded" style="background:var(--bg-panel);color:var(--text-muted)"
+            title="Events with known winner AND a logged ModelSnapshot AND a MarketSnapshot per bucket. The simulator can replay these.">
+        Replayable:
+        <strong style="color:var(--cyan)" x-text="coverage ? coverage.replayable : {{ coverage.replayable }}"></strong>
       </span>
       <span class="text-xs mono px-2 py-1 rounded" style="background:var(--bg-panel);color:var(--text-muted)"
-            title="Resolved markets pulled from Polymarket's Gamma API">
-        Gamma: <strong style="color:var(--cyan)">{{ gamma_resolved_count }}</strong>
+            title="Events with a model forecast logged but no market history — Brier score only, no trade simulation.">
+        Brier-only:
+        <strong style="color:var(--text-primary)" x-text="coverage ? coverage.brier_only : {{ coverage.brier_only }}"></strong>
+      </span>
+      <span class="text-xs mono px-2 py-1 rounded" style="background:var(--bg-panel);color:var(--text-muted)"
+            title="Gamma-resolved markets the bot never tracked. Reference data only — the simulator skips these.">
+        Outcome-only:
+        <strong style="color:var(--text-muted)" x-text="coverage ? coverage.outcome_only : {{ coverage.outcome_only }}"></strong>
       </span>
       <button @click="enrichGamma()" class="text-xs px-3 py-1.5 rounded cursor-pointer transition-colors"
               style="background:var(--bg-panel);color:var(--text-muted);border:1px solid var(--border)"
@@ -29,6 +37,60 @@
       </button>
     </div>
   </div>
+
+  <!-- ── COVERAGE EMPTY-STATE NOTICE ─────────────────────────────────────────── -->
+  <template x-if="coverage">
+    <div>
+      <!-- Scheduler not persisting model forecasts -->
+      <div x-show="coverage.replayable === 0 && coverage.model_snapshots === 0"
+           class="px-4 py-3 rounded text-xs"
+           style="background:rgba(220, 100, 100, 0.08); border:1px solid rgba(220, 100, 100, 0.4); color:var(--text-primary)">
+        <strong style="color:#ff8888">No model forecasts logged.</strong>
+        <span style="color:var(--text-muted)">
+          The signal engine writes one <span class="mono">model_snapshots</span> row per active event every 60s,
+          but the table is empty. The scheduler may not be running — check
+          <span class="mono">worker_heartbeats.scheduler_alive</span> and the Railway logs for
+          <span class="mono">scheduler: signal_engine produced N signals</span>.
+        </span>
+      </div>
+
+      <!-- Forecasts logged but nothing has resolved with snapshots yet -->
+      <div x-show="coverage.replayable === 0 && coverage.model_snapshots > 0"
+           class="px-4 py-3 rounded text-xs"
+           style="background:var(--bg-card); border:1px solid var(--border); color:var(--text-primary)">
+        <strong style="color:var(--cyan)">Backtester is warming up.</strong>
+        <span style="color:var(--text-muted)">
+          The bot has logged
+          <span class="mono" x-text="coverage.model_snapshots.toLocaleString()"></span>
+          model forecasts and
+          <span class="mono" x-text="coverage.market_snapshots.toLocaleString()"></span>
+          market snapshots, but no event has both resolved AND been tracked end-to-end yet.
+          The first replayable result lands once one tracked event closes
+          (typically the day after first arming).
+        </span>
+      </div>
+
+      <!-- Have replayable events but not enough for walk-forward -->
+      <div x-show="coverage.replayable > 0 && coverage.needs_more_days"
+           class="px-4 py-3 rounded text-xs"
+           style="background:var(--bg-card); border:1px solid var(--border); color:var(--text-primary)">
+        <strong style="color:var(--cyan)">Single-pass mode active.</strong>
+        <span style="color:var(--text-muted)">
+          <span class="mono" x-text="coverage.replayable"></span>
+          replayable events available — walk-forward optimization needs
+          <span class="mono" x-text="coverage.walkforward_threshold"></span>
+          (train + test windows). Single-pass simulation runs now;
+          walk-forward mode activates automatically once you have enough history.
+          <span x-show="coverage.earliest_snapshot && coverage.latest_snapshot">
+            Tracked range:
+            <span class="mono" x-text="coverage.earliest_snapshot"></span>
+            →
+            <span class="mono" x-text="coverage.latest_snapshot"></span>.
+          </span>
+        </span>
+      </div>
+    </div>
+  </template>
 
   <!-- ── ENRICHMENT STATUS BANNER ────────────────────────────────────────────── -->
   <div class="px-4 py-2 rounded text-xs flex items-center justify-between gap-3"
@@ -69,7 +131,10 @@
       <p><strong>2.</strong> For each event, we replay the model's probability forecast + market prices that existed at the time.</p>
       <p><strong>3.</strong> We simulate trades using Kelly sizing, check for quick-flip exits, then resolve at the actual outcome.</p>
       <p><strong>4.</strong> Walk-forward mode splits data into rolling train/test windows and optimizes parameters on the training set before testing — this prevents overfitting.</p>
-      <p><strong>Tip:</strong> If "Resolved Events" shows 0, click <em>Enrich from Gamma</em> to pull historical outcomes from the Polymarket API.</p>
+      <p><strong>Tip:</strong> The page can only simulate trades on events the bot tracked while they were open
+        (full <span class="mono">model_snapshots</span> + <span class="mono">market_snapshots</span> history).
+        <em>Enrich from Gamma</em> imports historical outcomes for reference, but it cannot synthesize the
+        forecasts and orderbooks that weren't logged at the time. Replayable grows by ~1/city/day once the bot is armed.</p>
     </div>
   </details>
 
@@ -421,6 +486,7 @@ function backtestPage() {
     pollTimer: null,
     status: null,          // { last_enriched_at, total_markets, matched_markets, matched_events }
     enrichResult: null,    // last successful enrichment payload
+    coverage: {{ coverage | tojson }},  // initial server-rendered, refreshable via /api/backtest/coverage
 
     init() {
       this.loadEnrichmentStatus();
@@ -434,6 +500,17 @@ function backtestPage() {
         }
       } catch (e) {
         // Non-fatal — banner just stays in its "no enrichment yet" state
+      }
+    },
+
+    async loadCoverage() {
+      try {
+        const res = await fetch('/api/backtest/coverage');
+        if (res.ok) {
+          this.coverage = await res.json();
+        }
+      } catch (e) {
+        // Non-fatal — server-rendered coverage stays in place
       }
     },
 
@@ -453,8 +530,8 @@ function backtestPage() {
         const res = await fetch('/api/backtest/enrich-gamma', { method: 'POST' });
         const data = await res.json();
         this.enrichResult = data;
-        // Refresh banner status
-        await this.loadEnrichmentStatus();
+        // Refresh banner + coverage strip without a reload
+        await Promise.all([this.loadEnrichmentStatus(), this.loadCoverage()]);
         const matched = data.matched_events ?? 0;
         const stored = data.stored ?? 0;
         const metar = data.matched_metar ?? 0;
@@ -464,8 +541,7 @@ function backtestPage() {
           'Weather markets: ' + (data.weather_matched ?? 0) + '\n' +
           'Stored: ' + stored + '\n' +
           'Matched to local events: ' + matched + '\n' +
-          'Matched to METAR actuals: ' + metar + '\n\n' +
-          'Reload the page to update the counts at the top.'
+          'Matched to METAR actuals: ' + metar
         );
       } catch (e) {
         this.error = 'Gamma enrichment failed: ' + e.message;

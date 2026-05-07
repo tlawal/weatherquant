@@ -663,6 +663,90 @@ async def count_resolved_sources() -> dict:
     return {"resolved_local": int(local), "resolved_gamma": int(gamma)}
 
 
+async def get_coverage_breakdown() -> dict:
+    """Three-tier coverage report driving the /backtest banner.
+
+    Tiers:
+      - replayable:    local Event with winning_bucket_idx + ≥1 ModelSnapshot
+                       AND every bucket has ≥1 MarketSnapshot. Full simulation.
+      - brier_only:    same as replayable minus the MarketSnapshot requirement.
+                       Forecast accuracy can be measured but no trade simulation.
+      - outcome_only:  Gamma-resolved markets with no usable local snapshots.
+                       Reference data only — the simulator skips these.
+
+    Also reports raw model_snapshots/market_snapshots counts so that an empty
+    DB lights up "scheduler not running" diagnostics on the page itself.
+    """
+    train = BacktestParams.walk_forward_train_days
+    test = BacktestParams.walk_forward_test_days
+    needed_for_walkforward = int(train) + int(test)
+
+    async with get_session() as sess:
+        # Raw snapshot row counts — fast, helps spot a dead scheduler
+        n_model = (await sess.execute(
+            select(func.count(ModelSnapshot.id))
+        )).scalar_one() or 0
+        n_market = (await sess.execute(
+            select(func.count(MarketSnapshot.id))
+        )).scalar_one() or 0
+
+        # Events that resolved AND have at least one ModelSnapshot
+        events_with_model_q = (
+            select(Event.id, Event.date_et)
+            .where(Event.winning_bucket_idx.isnot(None))
+            .where(
+                Event.id.in_(select(ModelSnapshot.event_id).distinct())
+            )
+        )
+        events_with_model = (await sess.execute(events_with_model_q)).all()
+        n_with_model = len(events_with_model)
+
+        # Of those, how many have ≥1 MarketSnapshot per bucket?
+        # Tradable iff: every bucket of the event has at least one snapshot.
+        replayable = 0
+        replayable_dates: list[str] = []
+        for ev_id, date_et in events_with_model:
+            bucket_count = (await sess.execute(
+                select(func.count(Bucket.id))
+                .where(Bucket.event_id == ev_id)
+            )).scalar_one() or 0
+            if bucket_count == 0:
+                continue
+            covered_buckets = (await sess.execute(
+                select(func.count(func.distinct(MarketSnapshot.bucket_id)))
+                .join(Bucket, Bucket.id == MarketSnapshot.bucket_id)
+                .where(Bucket.event_id == ev_id)
+            )).scalar_one() or 0
+            if covered_buckets >= bucket_count:
+                replayable += 1
+                if date_et:
+                    replayable_dates.append(date_et)
+
+        brier_only = max(0, n_with_model - replayable)
+
+        # Gamma-resolved markets minus what's already covered locally
+        gamma_resolved = (await sess.execute(
+            select(func.count(BacktestResolvedEvent.id))
+            .where(BacktestResolvedEvent.winning_bucket_idx.isnot(None))
+        )).scalar_one() or 0
+        outcome_only = max(0, int(gamma_resolved) - replayable - brier_only)
+
+    earliest = min(replayable_dates) if replayable_dates else None
+    latest = max(replayable_dates) if replayable_dates else None
+
+    return {
+        "replayable": int(replayable),
+        "brier_only": int(brier_only),
+        "outcome_only": int(outcome_only),
+        "model_snapshots": int(n_model),
+        "market_snapshots": int(n_market),
+        "earliest_snapshot": earliest,
+        "latest_snapshot": latest,
+        "needs_more_days": int(replayable) < needed_for_walkforward,
+        "walkforward_threshold": needed_for_walkforward,
+    }
+
+
 async def fetch_resolved_events() -> list[dict]:
     """Load all resolved events with their buckets, model snapshots, and market snapshots.
 

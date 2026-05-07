@@ -237,6 +237,197 @@ def build_bma_predictive(
     )
 
 
+# ───────────────────── Offline EM weight fitter (Phase 2) ──────────────────
+#
+# Reference: Raftery, Gneiting, Balabdaoui, Polakowski (2005) §3.
+# Given training data (per-source forecast means, observed value), the EM
+# algorithm finds the mixing weights wₖ that maximize the likelihood under:
+#
+#     y_i ~ Σₖ wₖ · N(μ_ik, σₖ²)
+#
+# We hold σₖ fixed at the SourceLeadTimeSkill MAE so Phase 2 only fits weights
+# (Phase 3 will update σ online via NIG conjugates per Section 6 Layer 2). The
+# E-step computes responsibilities; the M-step replaces wₖ with the average
+# responsibility across observations. Iterates until log-likelihood plateaus.
+
+EM_MAX_ITER_DEFAULT = 200
+EM_LL_TOL_DEFAULT = 1e-6
+EM_MIN_TRAINING_OBS = 30      # below this, return uniform weights (cold start)
+EM_WEIGHT_FLOOR = 1e-4         # don't let any source go to zero — trapped sources
+                               # can't recover when new evidence favors them
+
+
+@dataclass
+class BMAFitResult:
+    weights: dict[str, float]    # fitted wₖ (sum to 1)
+    log_likelihood: float        # final log-likelihood
+    n_iter: int                  # iterations used
+    converged: bool              # True if Δll < tol before max_iter
+    n_obs: int                   # training set size
+    sources: list[str]           # ordered key list (for stable serialization)
+
+
+def _gaussian_pdf(y: float, mu: float, sigma: float) -> float:
+    if sigma <= 0:
+        return 0.0
+    z = (y - mu) / sigma
+    return math.exp(-0.5 * z * z) / (sigma * math.sqrt(2.0 * math.pi))
+
+
+def _log_likelihood(
+    training: list[tuple[dict[str, float], float]],
+    weights: dict[str, float],
+    sigma_by_source: dict[str, float],
+    sources: list[str],
+) -> float:
+    """Σ_i log Σₖ wₖ · N(y_i | μ_ik, σₖ).
+
+    Floors per-obs likelihood at 1e-300 to keep log finite when a single
+    forecast is wildly off (e.g. 30°F miss). Such observations contribute a
+    near-constant penalty to LL so they don't dominate convergence.
+    """
+    ll = 0.0
+    for forecasts, y in training:
+        per_obs = 0.0
+        for src in sources:
+            if src not in forecasts:
+                continue
+            per_obs += weights[src] * _gaussian_pdf(y, forecasts[src], sigma_by_source[src])
+        ll += math.log(max(per_obs, 1e-300))
+    return ll
+
+
+def fit_bma_weights_em(
+    training: list[tuple[dict[str, float], float]],
+    sigma_by_source: dict[str, float],
+    init_weights: Optional[dict[str, float]] = None,
+    max_iter: int = EM_MAX_ITER_DEFAULT,
+    tol: float = EM_LL_TOL_DEFAULT,
+) -> BMAFitResult:
+    """Fit BMA mixture weights via EM (Raftery et al. 2005).
+
+    Args:
+        training: list of `(forecasts, observed_y)` pairs. `forecasts` is a
+            dict {source: μ_ik (°F)}; sources may be missing on some obs (e.g.
+            HRRR didn't run on day 5) and the algorithm handles that — those
+            obs contribute zero responsibility to the absent source's weight.
+        sigma_by_source: {source: σₖ (°F)}, held fixed during the fit. Use
+            SourceLeadTimeSkill MAE per source × lead-bucket. Sources missing
+            from this map default to BMA_PRIOR_SIGMA_F.
+        init_weights: starting wₖ. Defaults to uniform 1/K. Must sum > 0.
+        max_iter, tol: convergence controls.
+
+    Returns:
+        BMAFitResult with fitted weights (sum to 1), final log-likelihood,
+        iteration count, and convergence flag.
+
+    Cold-start guard: if `len(training) < EM_MIN_TRAINING_OBS`, returns
+    uniform weights without iterating. Caller decides whether to use the
+    result based on `n_obs`.
+    """
+    # Discover the union of sources across training + sigma_by_source. Sources
+    # in only one but not the other are problematic; we exclude any source
+    # missing a σ since the E-step would crash.
+    all_sources = set(sigma_by_source.keys())
+    for forecasts, _ in training:
+        all_sources.update(forecasts.keys())
+    sources = sorted(s for s in all_sources if s in sigma_by_source)
+
+    if not sources:
+        return BMAFitResult(
+            weights={}, log_likelihood=float("-inf"),
+            n_iter=0, converged=False, n_obs=len(training), sources=[],
+        )
+
+    # Cold start
+    if len(training) < EM_MIN_TRAINING_OBS:
+        uniform = {s: 1.0 / len(sources) for s in sources}
+        ll = _log_likelihood(training, uniform, sigma_by_source, sources) if training else float("-inf")
+        return BMAFitResult(
+            weights=uniform, log_likelihood=ll, n_iter=0,
+            converged=False, n_obs=len(training), sources=sources,
+        )
+
+    # Initialize weights
+    if init_weights:
+        total = sum(init_weights.get(s, 0.0) for s in sources)
+        if total <= 0:
+            weights = {s: 1.0 / len(sources) for s in sources}
+        else:
+            weights = {s: init_weights.get(s, 0.0) / total for s in sources}
+    else:
+        weights = {s: 1.0 / len(sources) for s in sources}
+
+    prev_ll = float("-inf")
+    converged = False
+    n_iter = 0
+
+    for n_iter in range(1, max_iter + 1):
+        # ── E-step ──────────────────────────────────────────────────────
+        # responsibility_sum[k] accumulates Σ_i r_ik
+        # active_count[k] is the number of obs where source k had a forecast
+        responsibility_sum = {s: 0.0 for s in sources}
+        active_count = {s: 0 for s in sources}
+        for forecasts, y in training:
+            # Per-source numerator wₖ · N(y | μ_ik, σₖ)
+            numerator = {}
+            denom = 0.0
+            for s in sources:
+                if s not in forecasts:
+                    continue
+                pdf = _gaussian_pdf(y, forecasts[s], sigma_by_source[s])
+                contribution = weights[s] * pdf
+                numerator[s] = contribution
+                denom += contribution
+            if denom <= 0:
+                # Pathological obs — every forecast far enough from y that the
+                # mixture density underflows. Skip; these contribute nothing
+                # to the M-step but stay in the LL computation as a small
+                # constant penalty.
+                continue
+            for s, num in numerator.items():
+                responsibility_sum[s] += num / denom
+                active_count[s] += 1
+
+        # ── M-step ──────────────────────────────────────────────────────
+        # Standard Raftery 2005: wₖ = (1/N) Σ_i r_ik. We use active_count[s]
+        # rather than total N so a source missing on half the days isn't
+        # halved spuriously — its weight is the *conditional* mixing weight
+        # given that it ran.
+        new_weights: dict[str, float] = {}
+        for s in sources:
+            n_active = active_count[s]
+            if n_active > 0:
+                new_weights[s] = responsibility_sum[s] / n_active
+            else:
+                # Source never had a forecast in training — give it the floor
+                # so the predictive PDF doesn't drop it entirely (allows it
+                # to recover if it returns later with relevant data).
+                new_weights[s] = EM_WEIGHT_FLOOR
+        # Floor + renormalize
+        new_weights = {s: max(w, EM_WEIGHT_FLOOR) for s, w in new_weights.items()}
+        total = sum(new_weights.values())
+        new_weights = {s: w / total for s, w in new_weights.items()}
+
+        # ── Convergence ────────────────────────────────────────────────
+        ll = _log_likelihood(training, new_weights, sigma_by_source, sources)
+        if abs(ll - prev_ll) < tol:
+            weights = new_weights
+            converged = True
+            break
+        weights = new_weights
+        prev_ll = ll
+
+    return BMAFitResult(
+        weights=weights,
+        log_likelihood=ll,
+        n_iter=n_iter,
+        converged=converged,
+        n_obs=len(training),
+        sources=sources,
+    )
+
+
 # ───────────────────── Audit / dict export ──────────────────────────────────
 
 def predictive_to_dict(p: BMAPredictive) -> dict:
