@@ -491,6 +491,8 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
         # §13 — NOAA AIWP-sourced AI members (Pangu-Weather, FourCastNetv2-small).
         pangu_weather_fc = await get_latest_successful_forecast(sess, city.id, "pangu_weather", target_date_et)
         fourcastnet_v2_fc = await get_latest_successful_forecast(sess, city.id, "fourcastnet_v2", target_date_et)
+        # §17 — Microsoft Aurora (Swin transformer) via NOAA AIWP.
+        aurora_fc = await get_latest_successful_forecast(sess, city.id, "aurora", target_date_et)
         # Per-source skill (dynamic weight, MAE, bias, yesterday's error) for tooltips.
         try:
             from backend.modeling.station_weights import load_source_skill_summary
@@ -1078,6 +1080,18 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                     "model_run_age": _model_run_age(fourcastnet_v2_fc.model_run_at if fourcastnet_v2_fc else None),
                     "url": "https://registry.opendata.aws/aiwp/",
                     "skill": source_skill.get("fourcastnet_v2"),
+                    "experimental": True,
+                },
+                # §17 — Microsoft Aurora (Swin transformer), NOAA AIWP archive.
+                "aurora": {
+                    "high_f": aurora_fc.high_f if aurora_fc else None,
+                    "age_s": _age(aurora_fc.fetched_at if aurora_fc else None),
+                    "collected_at": _fmt_time_et(aurora_fc.fetched_at if aurora_fc else None),
+                    "model_run_at": _fmt_utc(aurora_fc.model_run_at if aurora_fc else None),
+                    "lead_time_hours": _lead_time_hours(aurora_fc.model_run_at if aurora_fc else None),
+                    "model_run_age": _model_run_age(aurora_fc.model_run_at if aurora_fc else None),
+                    "url": "https://registry.opendata.aws/aiwp/",
+                    "skill": source_skill.get("aurora"),
                     "experimental": True,
                 },
             },

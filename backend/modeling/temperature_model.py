@@ -149,6 +149,9 @@ _FRESHNESS_TAU_HOURS = {
     # latency). Slightly longer TAU because we get fresh runs only twice a day.
     "pangu_weather": 14.0,
     "fourcastnet_v2": 14.0,
+    # Microsoft Aurora — same NOAA AIWP cadence (00z + 12z) and ~8h IFS-init
+    # latency, so reuse the 14h decay constant.
+    "aurora": 14.0,
     "nws": 10.0,
     "wu_hourly": 12.0,
     "wu_history": 12.0,
@@ -570,6 +573,8 @@ def compute_model(
     # backend/ingestion/aiwp.py.
     pangu_weather_high: Optional[float] = None,
     fourcastnet_v2_high: Optional[float] = None,
+    # Microsoft Aurora (Bodnar et al. 2024) via NOAA AIWP S3 archive.
+    aurora_high: Optional[float] = None,
     model_run_at_by_source: Optional[dict[str, datetime]] = None,
     lead_skill_mae_by_source: Optional[dict[str, Optional[float]]] = None,
     lead_skill_n_obs_by_source: Optional[dict[str, int]] = None,
@@ -671,6 +676,14 @@ def compute_model(
         calibrated["fourcastnet_v2"] = (
             _debias("fourcastnet_v2", fourcastnet_v2_high),
             _weight("fourcastnet_v2", 0.35),
+        )
+    # Microsoft Aurora (Bodnar et al. 2024) via NOAA AIWP. Same base weight as
+    # the other AI-NWP members; lead-skill + freshness factors will fold in
+    # once SourceLeadTimeSkill rows accumulate.
+    if aurora_high is not None:
+        calibrated["aurora"] = (
+            _debias("aurora", aurora_high),
+            _weight("aurora", 0.35),
         )
 
     if not calibrated:

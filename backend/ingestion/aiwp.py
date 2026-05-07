@@ -60,10 +60,22 @@ AIWP_MODELS: dict[str, tuple[str, str, str]] = {
     "pangu_weather":  ("PANG", "v100", "IFS"),
     # (FourCastNet v2-small, IFS-initialized.)
     "fourcastnet_v2": ("FOUR", "v200", "IFS"),
+    # (Microsoft Aurora — Swin transformer; Bodnar et al. 2024.) NOAA AIWP
+    # added this in 2024-2025; the AWS Open Data Registry catalog page is
+    # stale and lists only 4 models, but the S3 bucket carries it. IFS-init
+    # for analysis-quality consistency with our other AIWP sources.
+    # Architecturally distinct from Pangu (3D Earth transformer) and
+    # FourCastNet (spherical FNO) — adds a 4th inductive bias to the AI
+    # ensemble, which BMA mixture variance benefits from more than another
+    # FCN variant would.
+    "aurora":         ("AURO", "v100", "IFS"),
     # ── Future flips (adding a row here is the only code change required):
     # "fourcastnet_v1":  ("FOUR", "v100", "IFS"),  # superseded by v2-small
     # "graphcast_aiwp":  ("GRAP", "v100", "IFS"),  # we already have GraphCast
     #                                              #   via Open-Meteo
+    # "fourcastnet_v3":  ("FOUR", "v300", "IFS"),  # NOT YET in AIWP (probed
+    #                                              #   2026-05-07); §18 plan
+    #                                              #   covers self-host path
 }
 
 # Confirmed `t2` in both PANG_v100 and FOUR_v200 IFS files (2026-04 probe).
@@ -387,9 +399,14 @@ async def fetch_fourcastnet_v2() -> int:
     return await fetch_aiwp_model("fourcastnet_v2")
 
 
+async def fetch_aurora() -> int:
+    return await fetch_aiwp_model("aurora")
+
+
 __all__ = [
     "AIWP_MODELS",
     "fetch_aiwp_model",
     "fetch_pangu",
     "fetch_fourcastnet_v2",
+    "fetch_aurora",
 ]

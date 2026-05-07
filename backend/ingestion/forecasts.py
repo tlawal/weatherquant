@@ -308,7 +308,7 @@ _OM_MODELS = {
 # These are sourced from the NOAA AIWP S3 archive via backend/ingestion/aiwp.py,
 # NOT from Open-Meteo — they don't appear in _OM_MODELS above.
 EXPERIMENTAL_FORECAST_SOURCES: frozenset[str] = frozenset(
-    {"ecmwf_aifs", "gfs_graphcast", "pangu_weather", "fourcastnet_v2"}
+    {"ecmwf_aifs", "gfs_graphcast", "pangu_weather", "fourcastnet_v2", "aurora"}
 )
 
 

@@ -227,6 +227,8 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         # §13 — NOAA AIWP-sourced AI members.
         pangu_weather_obs = await get_latest_forecast(sess, city.id, "pangu_weather", today_et)
         fourcastnet_v2_obs = await get_latest_forecast(sess, city.id, "fourcastnet_v2", today_et)
+        # §17 — Microsoft Aurora (Swin transformer) via NOAA AIWP.
+        aurora_obs = await get_latest_forecast(sess, city.id, "aurora", today_et)
 
         cal = await get_calibration(sess, city.id)
         # Phase B1: lead-time skill table for ensemble weight adjustment.
@@ -481,6 +483,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         "gfs_graphcast": gfs_graphcast_obs,
         "pangu_weather": pangu_weather_obs,
         "fourcastnet_v2": fourcastnet_v2_obs,
+        "aurora": aurora_obs,
     }
     model_run_at_by_source: dict[str, datetime] = {}
     lead_skill_mae_by_source: dict[str, Optional[float]] = {}
@@ -580,6 +583,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         gfs_graphcast_high=gfs_graphcast_obs.high_f if gfs_graphcast_obs else None,
         pangu_weather_high=pangu_weather_obs.high_f if pangu_weather_obs else None,
         fourcastnet_v2_high=fourcastnet_v2_obs.high_f if fourcastnet_v2_obs else None,
+        aurora_high=aurora_obs.high_f if aurora_obs else None,
         model_run_at_by_source=model_run_at_by_source or None,
         # Q4 — settlement time used for lead-time σ growth (NOAA empirical
         # 1.5 + 0.05·L °F, combined in quadrature with ensemble σ).
