@@ -769,6 +769,56 @@ async def check_resolved(actor: str = Depends(require_admin)):
     return {"ok": True, "newly_resolved": count}
 
 
+@router.post("/api/admin/recompute-lead-time-skills")
+async def admin_recompute_lead_time_skills(
+    city_slug: Optional[str] = None,
+    days_back: int = 90,
+    actor: str = Depends(require_admin),
+):
+    """§19 — Manually trigger Lead-Time Skill recompute with diagnostic output.
+
+    Bypasses the 6h scheduler cadence and returns per-city counts that
+    explain why rows are or aren't being written.
+
+    Query params:
+        city_slug: optional — restrict to one city. Omit to process all
+            enabled cities.
+        days_back: default 90 — lookback window for resolved events.
+    """
+    from backend.modeling.calibration_engine import compute_source_lead_time_skills
+
+    async with get_session() as sess:
+        if city_slug:
+            city = await _get_city_or_404(sess, city_slug)
+            cities = [city]
+        else:
+            cities = await get_all_cities(sess, enabled_only=True)
+
+    per_city: dict[str, dict] = {}
+    total_combos_written = 0
+    for city in cities:
+        try:
+            diag = await compute_source_lead_time_skills(
+                city.id, days_back=days_back, return_diagnostics=True,
+            )
+            per_city[city.city_slug] = diag
+            total_combos_written += diag.get("source_bucket_combos_written", 0)
+        except Exception as exc:
+            log.exception(
+                "admin_recompute_lead_time_skills: city_slug=%s failed",
+                city.city_slug,
+            )
+            per_city[city.city_slug] = {"error": f"{type(exc).__name__}: {exc}"}
+
+    return {
+        "ok": True,
+        "lookback_days": days_back,
+        "cities_processed": len(cities),
+        "total_combos_written": total_combos_written,
+        "per_city": per_city,
+    }
+
+
 @router.post("/api/redeem/{event_id}")
 async def redeem_event(event_id: int, force: bool = False, actor: str = Depends(require_admin)):
     """Manually redeem positions for a single resolved event. Use ?force=true to retry."""

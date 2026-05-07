@@ -345,20 +345,58 @@ async def compute_source_lead_time_skills(
     city_id: int,
     days_back: int = 90,
     min_obs_per_bucket: int = 5,
-) -> dict:
+    return_diagnostics: bool = False,
+):
     """Compute MAE and bias per forecast source at each lead-time bucket.
 
     Joins ForecastObs (with model_run_at) to resolved Event settlement highs.
     Lead time = hours between model_run_at and the end of the event day (23:59:59
     local time, approximated as midnight ET + timezone offset).
 
-    Returns a dict keyed by (source, lead_time_bucket) with {mae, bias, n}.
+    Args:
+        return_diagnostics: when True, returns a dict shaped for the admin
+            recompute endpoint (counts + reason-codes for empty buckets) so
+            the operator can see *why* the table isn't populating. When
+            False (default, scheduler path), returns the skill map for
+            backwards compat.
+
+    Returns:
+        - When `return_diagnostics=False` (default): `dict` keyed by
+          (source, lead_time_bucket) with {mae, bias, n}.
+        - When `return_diagnostics=True`: a flat dict with
+          `events_resolved`, `events_with_settlement`,
+          `forecast_obs_with_model_run_at`, `source_bucket_combos_attempted`,
+          `source_bucket_combos_below_min_n`, `source_bucket_combos_written`,
+          `missing_reasons` (per "<source>:<bucket>" key explaining why empty),
+          and `skills` (the same map as the non-diagnostic return).
     """
     from backend.storage.models import SourceLeadTimeSkill
     from backend.storage.repos import get_daily_high_metar
 
     today_et = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days_back)).strftime("%Y-%m-%d")
+
+    # Counters for diagnostic-mode return — incremented as we walk the data.
+    diag = {
+        "events_resolved": 0,
+        "events_with_settlement": 0,
+        "forecast_obs_with_model_run_at": 0,
+        "source_bucket_combos_attempted": 0,
+        "source_bucket_combos_below_min_n": 0,
+        "source_bucket_combos_written": 0,
+        "missing_reasons": {},
+        "skills": {},
+    }
+
+    def _wrap(skills_map: dict):
+        """Pick the right return shape based on return_diagnostics."""
+        if return_diagnostics:
+            diag["skills"] = {
+                f"{src}:{bucket}h": v
+                for (src, bucket), v in skills_map.items()
+            }
+            return diag
+        return skills_map
 
     async with get_session() as sess:
         # Get resolved events for this city in the lookback window
@@ -372,10 +410,11 @@ async def compute_source_lead_time_skills(
             )
         )
         events = (await sess.execute(event_stmt)).scalars().all()
+        diag["events_resolved"] = len(events)
 
         if not events:
             log.info("lead_time_skill: no resolved events for city_id=%s in last %d days", city_id, days_back)
-            return {}
+            return _wrap({})
 
         # Collect forecast obs for these events that have model_run_at
         results: dict = {}
@@ -399,6 +438,7 @@ async def compute_source_lead_time_skills(
 
             if obs_high is None:
                 continue
+            diag["events_with_settlement"] += 1
 
             # Get all forecast obs with model_run_at for this event
             fc_stmt = (
@@ -411,6 +451,7 @@ async def compute_source_lead_time_skills(
                 )
             )
             forecasts = (await sess.execute(fc_stmt)).scalars().all()
+            diag["forecast_obs_with_model_run_at"] += len(forecasts)
 
             for fc in forecasts:
                 # Approximate event end time as midnight ET of date_et
@@ -437,10 +478,17 @@ async def compute_source_lead_time_skills(
                 results[key]["errors"].append(error)
                 results[key]["n"] += 1
 
+        diag["source_bucket_combos_attempted"] = len(results)
+
         # Compute MAE and bias per bucket
         skills = {}
         for (source, bucket), data in results.items():
             if data["n"] < min_obs_per_bucket:
+                diag["source_bucket_combos_below_min_n"] += 1
+                if return_diagnostics:
+                    diag["missing_reasons"][f"{source}:{bucket}h"] = (
+                        f"n={data['n']}<{min_obs_per_bucket}"
+                    )
                 continue
             errors = data["errors"]
             mae = sum(abs(e) for e in errors) / len(errors)
@@ -479,11 +527,13 @@ async def compute_source_lead_time_skills(
                 )
                 sess.add(skill)
 
+        diag["source_bucket_combos_written"] = len(skills)
+
         await sess.commit()
 
         log.info(
             "lead_time_skill: city_id=%s computed %d source/bucket combos from %d events",
             city_id, len(skills), len(events),
         )
-        return skills
+        return _wrap(skills)
 

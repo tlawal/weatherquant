@@ -904,9 +904,23 @@
     </p>
     {% endif %}
   {% else %}
-    <p class="text-[11px] opacity-70" style="color:var(--text-muted)">
-      No lead-time skill data yet. Data appears after events resolve and <code>compute_source_lead_time_skills()</code> runs.
+    <p class="text-[11px] opacity-70 mb-2" style="color:var(--text-muted)">
+      No lead-time skill data yet. Either the 6h scheduler hasn't run, or no
+      (source, lead-bucket) combo has the required ≥5 obs. Click
+      <strong>Refresh Skills</strong> to recompute now and see why.
     </p>
+    <div class="flex items-center gap-2 flex-wrap" id="lts-refresh-{{ city.city_slug }}">
+      <button onclick="refreshLeadTimeSkills('{{ city.city_slug }}')"
+              class="text-[10px] px-2 py-0.5 rounded font-semibold cursor-pointer hover:opacity-80 transition-opacity"
+              style="background:var(--bg-panel); border:1px solid var(--cyan); color:var(--cyan)">
+        Refresh Skills ↻
+      </button>
+      <span id="lts-refresh-status-{{ city.city_slug }}"
+            class="text-[10px] mono opacity-70" style="color:var(--text-muted)"></span>
+    </div>
+    <pre id="lts-refresh-detail-{{ city.city_slug }}" x-cloak
+         class="text-[10px] mono mt-2 p-2 rounded hidden whitespace-pre-wrap"
+         style="background:var(--bg-panel); border:1px solid var(--border); color:var(--text-muted); max-height:240px; overflow-y:auto"></pre>
   {% endif %}
 </div>
 
@@ -2578,6 +2592,53 @@ function tradingPanel() {
       }
     },
   };
+}
+
+// §19 — Manual trigger of compute_source_lead_time_skills with diagnostic
+// output. Used from the empty-state Lead-Time Skill panel so the operator
+// can diagnose why the table is empty without waiting on the 6h scheduler.
+async function refreshLeadTimeSkills(city_slug) {
+  const status = document.getElementById('lts-refresh-status-' + city_slug);
+  const detail = document.getElementById('lts-refresh-detail-' + city_slug);
+  if (status) status.textContent = 'computing…';
+  if (detail) { detail.classList.add('hidden'); detail.textContent = ''; }
+  const tok = getAdminToken();
+  if (!tok) {
+    if (status) status.textContent = 'admin token required (use the 🔑 in the header)';
+    if (window.Alpine && Alpine.store('auth')) Alpine.store('auth').showModal = true;
+    return;
+  }
+  try {
+    const url = '/api/admin/recompute-lead-time-skills?city_slug=' + encodeURIComponent(city_slug) + '&days_back=90';
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {'X-Admin-Token': tok},
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      if (status) status.textContent = 'error ' + res.status;
+      if (detail) {
+        detail.classList.remove('hidden');
+        detail.textContent = JSON.stringify(data, null, 2);
+      }
+      return;
+    }
+    const city = (data.per_city || {})[city_slug] || {};
+    const written = city.source_bucket_combos_written || 0;
+    if (status) {
+      status.textContent = `wrote ${written} combos · ${city.events_resolved || 0} resolved events · ${city.forecast_obs_with_model_run_at || 0} forecasts with model_run_at`;
+    }
+    if (detail) {
+      detail.classList.remove('hidden');
+      detail.textContent = JSON.stringify(city, null, 2);
+    }
+    // If we wrote rows, reload after a beat so the panel renders the populated state.
+    if (written > 0) {
+      setTimeout(() => window.location.reload(), 1200);
+    }
+  } catch (e) {
+    if (status) status.textContent = 'error: ' + e.message;
+  }
 }
 
 // Global: open trading panel from bucket table ▶ button
