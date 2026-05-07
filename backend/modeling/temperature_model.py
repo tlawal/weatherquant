@@ -38,6 +38,11 @@ from zoneinfo import ZoneInfo
 
 from scipy.stats import norm as _norm
 
+from backend.modeling.bma import (
+    bma_bucket_probabilities,
+    build_bma_predictive,
+    predictive_to_dict,
+)
 from backend.modeling.distribution import bucket_probabilities, conditional_bucket_probabilities
 from backend.modeling.settlement import (
     bucket_upper_bound,
@@ -101,6 +106,15 @@ class ModelResult:
     observed_bucket_idx: Optional[int] = None
     observed_bucket_upper_f: Optional[float] = None
     inputs: dict = field(default_factory=dict)
+    # ── M1 BMA shadow output ──────────────────────────────────────────────
+    # Computed alongside the legacy single-Gaussian path; does NOT drive
+    # trades during shadow phase. Trade decisions still use mu/sigma/probs.
+    # After 14 days of side-by-side CRPS comparison the shadow path can be
+    # promoted by swapping mu/sigma/probs for bma_mu/bma_sigma/bma_probs.
+    bma_mu: Optional[float] = None
+    bma_sigma: Optional[float] = None
+    bma_probs: Optional[list[float]] = None
+    bma_meta: Optional[dict] = None
 
 
 def _interpolate_table(table: list, hour: int) -> float:
@@ -692,6 +706,24 @@ def compute_model(
     total_weight = sum(w for _, w in calibrated.values())
     mu_multi_model = sum(v * w for v, w in calibrated.values()) / total_weight
 
+    # ── M1 BMA shadow predictive (Phase 1) ───────────────────────────────────
+    # Build a Gaussian-mixture predictive distribution over the same calibrated
+    # per-source means, using SourceLeadTimeSkill MAE as σᵢ when available.
+    # SHADOW MODE: computed for comparison only — `mu_final`, `sigma_final`,
+    # `probs` below remain driven by the legacy single-Gaussian path. Once we
+    # have ≥14 days of side-by-side CRPS we'll promote the BMA outputs.
+    try:
+        bma_predictive = build_bma_predictive(
+            calibrated_means={src: mu_val for src, (mu_val, _) in calibrated.items()},
+            weights_by_source={src: w for src, (_, w) in calibrated.items()},
+            lead_skill_mae_by_source=lead_skill_mae_by_source or {},
+            lead_skill_n_obs_by_source=lead_skill_n_obs_by_source or {},
+            sigma_unit_mult=(5.0 / 9.0 if unit == "C" else 1.0),
+        )
+    except Exception:
+        log.exception("model: BMA shadow predictive failed; legacy path unaffected")
+        bma_predictive = None
+
     vals = [v for v, _ in calibrated.values()]
     spread = (max(vals) - min(vals)) if len(vals) >= 2 else 0.0
 
@@ -1087,6 +1119,47 @@ def compute_model(
             "peak_timing_source": adaptive.peak_timing_source,
         }
 
+    # ── M1 BMA shadow output (read-only; does not affect trade decisions) ───
+    bma_mu_out: Optional[float] = None
+    bma_sigma_out: Optional[float] = None
+    bma_probs_out: Optional[list[float]] = None
+    bma_meta_out: Optional[dict] = None
+    if bma_predictive is not None and bma_predictive.components:
+        try:
+            bma_mu_out = float(bma_predictive.mean)
+            bma_sigma_out = float(bma_predictive.sigma)
+            if canonical_buckets:
+                bma_probs_out = bma_bucket_probabilities(bma_predictive, canonical_buckets)
+            bma_meta_out = predictive_to_dict(bma_predictive)
+            # Diagnostic: how far the mixture mean drifts from the legacy
+            # weighted mean. Should be ~0 in Phase 1 because we feed the
+            # same per-source weights — non-zero values indicate a
+            # normalization edge case or unit-conversion path.
+            bma_meta_out["mu_delta_vs_legacy"] = round(
+                bma_mu_out - float(mu_multi_model), 3
+            )
+            # Diagnostic: σ comparison. Mixture σ should generally be ≥ legacy
+            # ensemble σ because it adds the within-source variance term that
+            # _ensemble_sigma omits.
+            bma_meta_out["sigma_delta_vs_legacy_raw"] = round(
+                bma_sigma_out - float(sigma_raw), 3
+            )
+        except Exception:
+            log.exception("model: BMA shadow output failed; legacy path unaffected")
+            bma_mu_out = bma_sigma_out = bma_probs_out = None
+            bma_meta_out = None
+
+    # Persist BMA shadow output via the existing ModelSnapshot.inputs_json
+    # path so we can compute CRPS comparisons offline against settled events.
+    # No schema migration needed — inputs is already a JSON column.
+    if bma_meta_out is not None:
+        inputs["bma_shadow"] = {
+            "mu": round(bma_mu_out, 3) if bma_mu_out is not None else None,
+            "sigma": round(bma_sigma_out, 3) if bma_sigma_out is not None else None,
+            "probs": [round(p, 6) for p in (bma_probs_out or [])],
+            **bma_meta_out,
+        }
+
     return ModelResult(
         mu=float(mu_final),
         sigma=float(sigma_final),
@@ -1103,4 +1176,8 @@ def compute_model(
         observed_bucket_idx=observed_bucket_idx,
         observed_bucket_upper_f=observed_bucket_upper_f,
         inputs=inputs,
+        bma_mu=bma_mu_out,
+        bma_sigma=bma_sigma_out,
+        bma_probs=bma_probs_out,
+        bma_meta=bma_meta_out,
     )
