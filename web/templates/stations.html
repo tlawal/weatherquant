@@ -176,6 +176,8 @@
             title="Pangu-Weather — Bi et al. 2023 Nature 619:533, NOAA AIWP S3, IFS-init">Pangu</button>
     <button class="model-btn" :class="activeModel === 'fourcastnet_v2' && 'active'" @click="setModel('fourcastnet_v2')"
             title="FourCastNet v2-small — NVIDIA, NOAA AIWP S3, IFS-init">FourCastNet</button>
+    <button class="model-btn" :class="activeModel === 'aurora' && 'active'" @click="setModel('aurora')"
+            title="Microsoft Aurora — Bodnar et al. 2024, Swin transformer foundation model, NOAA AIWP S3, IFS-init">Aurora</button>
   </div>
 
   <!-- Leaflet Map -->
@@ -235,6 +237,8 @@
                 title="Pangu-Weather — Bi et al. 2023 Nature 619:533 (NOAA AIWP, IFS-init)">MAE Pangu</th>
             <th class="px-2 py-2 text-right" style="color:#A78BFA"
                 title="FourCastNet v2-small — NVIDIA (NOAA AIWP, IFS-init)">MAE FourCastNet</th>
+            <th class="px-2 py-2 text-right" style="color:#A78BFA"
+                title="Microsoft Aurora — Swin transformer foundation model (Bodnar et al. 2024, NOAA AIWP, IFS-init)">MAE Aurora</th>
             <th class="px-2 py-2 text-center sort-header" :class="sortCol === 'winner' ? (sortDir === 'asc' ? 'sort-asc' : 'sort-desc') : ''"
                 @click="toggleSort('winner')">Winner</th>
             <th class="px-2 py-2 text-right sort-header" :class="sortCol === 'bias_f' ? (sortDir === 'asc' ? 'sort-asc' : 'sort-desc') : ''"
@@ -286,6 +290,9 @@
               <td class="px-2 py-2.5 text-right mono font-bold"
                   :style="maeColor(srcMae(s,'fourcastnet_v2'))"
                   x-text="fmtMae(srcMae(s,'fourcastnet_v2'))"></td>
+              <td class="px-2 py-2.5 text-right mono font-bold"
+                  :style="maeColor(srcMae(s,'aurora'))"
+                  x-text="fmtMae(srcMae(s,'aurora'))"></td>
               <td class="px-2 py-2.5 text-center">
                 <span class="text-[10px] font-bold px-2 py-0.5 rounded-full"
                       :class="winnerBadge(s.winner)"
