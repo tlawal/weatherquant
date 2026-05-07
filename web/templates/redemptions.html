@@ -50,6 +50,62 @@
   </div>
 </div>
 
+<!-- U7 — Alpha-vs-market callout card. Self-loads from /api/calibration/edge.json
+     on mount; click-through opens the full Alpha Dashboard. Red border when the
+     legacy model is losing to market for 5+ consecutive days (kill-switch territory). -->
+<a href="/calibration/edge"
+   class="block mb-6 card p-4 transition-all hover:opacity-90 cursor-pointer no-underline"
+   style="border-color:var(--border)"
+   x-data="redemptionsAlphaCard()" x-init="load()"
+   :style="`border-color: ${borderColor()}; ${borderColor() === 'var(--red)' ? 'box-shadow: 0 0 12px rgba(239,68,68,0.20);' : ''}`"
+   :title="tooltip">
+  <div class="flex items-start justify-between gap-3 flex-wrap">
+    <div class="flex-1 min-w-0">
+      <div class="text-[0.6rem] font-bold tracking-wider uppercase mb-1" style="color:var(--text-muted)">
+        Alpha over market — last 30 days · <span x-text="nEventsLabel"></span>
+      </div>
+      <div class="text-sm font-mono leading-relaxed">
+        <span style="color:var(--text-muted)">Brier:</span>
+        <span class="ml-1 mr-3">
+          legacy <span class="font-semibold" x-text="legacyBrierLabel"></span>
+        </span>
+        <span class="ml-1 mr-3">
+          BMA <span class="font-semibold" style="color:#FBBF24" x-text="bmaBrierLabel"></span>
+        </span>
+        <span class="ml-1">
+          market <span class="font-semibold" style="color:var(--text-muted)" x-text="marketBrierLabel"></span>
+        </span>
+      </div>
+    </div>
+    <div class="flex items-center gap-3 flex-shrink-0">
+      <div class="text-right">
+        <div class="text-[0.6rem] font-bold tracking-wider uppercase mb-0.5" style="color:var(--text-muted)">Legacy edge</div>
+        <div class="text-lg font-bold font-mono"
+             :style="`color:${legacyColor()}`"
+             x-text="legacyEdgeLabel"></div>
+      </div>
+      <div class="text-right">
+        <div class="text-[0.6rem] font-bold tracking-wider uppercase mb-0.5" style="color:#FBBF24">BMA edge</div>
+        <div class="text-lg font-bold font-mono"
+             :style="`color:${bmaColor()}`"
+             x-text="bmaEdgeLabel"></div>
+      </div>
+      <div class="text-right">
+        <div class="text-[0.6rem] font-bold tracking-wider uppercase mb-0.5" style="color:var(--text-muted)">BMA streak</div>
+        <div class="text-lg font-bold font-mono"
+             :style="`color:${streak >= 14 ? 'var(--green)' : 'var(--text-muted)'}`"
+             x-text="streakLabel"></div>
+      </div>
+      <span class="text-xs px-2 py-0.5 rounded font-bold tracking-wider"
+            x-show="streak >= 14"
+            style="background:rgba(34,197,94,0.15); color:var(--green); border:1px solid rgba(34,197,94,0.4)">
+        ▲ READY TO PROMOTE
+      </span>
+      <span class="text-[10px] mono opacity-60">↗</span>
+    </div>
+  </div>
+</a>
+
 <!-- FILTER TABS -->
 <div class="flex items-center gap-2 mb-4 border-b border-[var(--border)] pb-2 font-mono text-sm" id="filter-tabs">
   <button onclick="setFilter('ALL')" class="filter-tab px-3 py-1 rounded bg-[var(--bg-panel)] text-[var(--cyan)] font-bold border border-[var(--cyan)]" data-filter="ALL">ALL OPEN</button>
@@ -122,6 +178,102 @@
 
 {% block scripts %}
 <script>
+// U7 — alpha-vs-market card. Mirrors the chip on /, but expanded to surface
+// per-path Brier values + BMA promotion signal. Color coding: green = source
+// beats market, red = source loses to market, gray = no data yet. The card's
+// outer border turns red when the legacy model is losing for a streak (kill-
+// switch eyeball signal — implemented by recent-day comparison from by_day).
+function redemptionsAlphaCard() {
+  return {
+    legacyBrier: null, bmaBrier: null, marketBrier: null,
+    legacyEdgeBps: null, bmaEdgeBps: null,
+    streak: 0, nEvents: 0,
+    legacyLosingStreak: 0,
+    tooltip: 'Alpha Dashboard — loading…',
+    legacyBrierLabel: '—', bmaBrierLabel: '—', marketBrierLabel: '—',
+    legacyEdgeLabel: '—', bmaEdgeLabel: '—',
+    streakLabel: '0d', nEventsLabel: 'loading…',
+    legacyColor() { return this._color(this.legacyEdgeBps); },
+    bmaColor()    { return this._color(this.bmaEdgeBps); },
+    borderColor() {
+      // 5+ consecutive days of legacy-losing-to-market → red border (kill switch).
+      if (this.legacyLosingStreak >= 5) return 'var(--red)';
+      return 'var(--border)';
+    },
+    _color(bps) {
+      if (bps === null || bps === undefined) return 'var(--text-muted)';
+      if (bps > 0) return 'var(--green)';
+      if (bps < 0) return 'var(--red)';
+      return 'var(--text-muted)';
+    },
+    _bpsLabel(bps) {
+      if (bps === null || bps === undefined) return '—';
+      return `${bps >= 0 ? '+' : ''}${bps.toFixed(1)} bps`;
+    },
+    _brierLabel(b) {
+      if (b === null || b === undefined) return '—';
+      return b.toFixed(4);
+    },
+    async load() {
+      try {
+        const r = await fetch('/api/calibration/edge.json?days_back=30');
+        if (!r.ok) {
+          this.nEventsLabel = 'unavailable';
+          return;
+        }
+        const d = await r.json();
+        const src = d.by_source || {};
+        const sig = d.promotion_signal || {};
+
+        this.legacyBrier = src.legacy && src.legacy.brier;
+        this.bmaBrier    = src.bma    && src.bma.brier;
+        this.marketBrier = src.market && src.market.brier;
+        this.legacyEdgeBps = sig.current_edge_legacy_bps;
+        this.bmaEdgeBps    = sig.current_edge_bma_bps;
+        this.streak  = sig.consecutive_days_bma_wins || 0;
+        this.nEvents = d.n_events || 0;
+
+        // Compute legacy-losing-to-market streak from by_day (most-recent first).
+        const byDay = (d.by_day || []).slice();
+        let losing = 0;
+        for (let i = byDay.length - 1; i >= 0; i--) {
+          const row = byDay[i];
+          if (row.legacy_brier === null || row.market_brier === null
+              || row.legacy_brier === undefined || row.market_brier === undefined) continue;
+          if (row.legacy_brier > row.market_brier) {
+            losing += 1;
+          } else {
+            break;
+          }
+        }
+        this.legacyLosingStreak = losing;
+
+        this.legacyBrierLabel = this._brierLabel(this.legacyBrier);
+        this.bmaBrierLabel    = this._brierLabel(this.bmaBrier);
+        this.marketBrierLabel = this._brierLabel(this.marketBrier);
+        this.legacyEdgeLabel  = this._bpsLabel(this.legacyEdgeBps);
+        this.bmaEdgeLabel     = this._bpsLabel(this.bmaEdgeBps);
+        this.streakLabel      = `${this.streak}d`;
+        this.nEventsLabel     = this.nEvents
+          ? `${this.nEvents} settled events`
+          : 'no settled events yet';
+
+        this.tooltip = (
+          `Alpha vs market — last 30 days, ${this.nEvents} events.\n`
+          + `Legacy edge: ${this._bpsLabel(this.legacyEdgeBps)}\n`
+          + `BMA shadow edge: ${this._bpsLabel(this.bmaEdgeBps)}\n`
+          + `BMA winning streak: ${this.streak} day(s)`
+          + (this.streak >= 14 ? ' — ▲ READY TO PROMOTE' : '')
+          + (losing >= 5 ? `\n⚠ Legacy losing to market for ${losing} consecutive days` : '')
+          + '\nClick for full Alpha Dashboard.'
+        );
+      } catch (e) {
+        this.nEventsLabel = 'error';
+      }
+    },
+  };
+}
+
 let CURRENT_FILTER = 'ALL';
 let RAW_DATA = [];
 let SORT_COL = null;   // 'city' | 'entry_time' | 'mark' | 'pnl'
@@ -322,8 +474,8 @@ function renderTable() {
       tbody.innerHTML += `
         <tr class="hover:bg-[rgba(255,255,255,0.02)] transition-colors">
           <td class="py-2 px-2 lg:py-3 lg:px-4 align-top">
-            <div class="font-bold text-gray-200 text-[0.8rem] truncate max-w-[280px]" title="${evt.city_name || 'On-Chain'}"><a href="/city/${evt.city_slug}" class="hover:underline">${evt.city_name || 'On-Chain'}</a></div>
-            <div class="text-[0.65rem] text-cyan-600 font-semibold mt-0.5 truncate max-w-[280px]" title="${b.label}">${b.label}</div>
+            <div class="font-bold text-gray-200 text-[0.8rem] max-w-[360px] whitespace-normal leading-tight" title="${evt.city_name || 'On-Chain'}"><a href="/city/${evt.city_slug}" class="hover:underline">${evt.city_name || 'On-Chain'}</a></div>
+            <div class="text-[0.65rem] text-cyan-600 font-semibold mt-1 max-w-[420px] whitespace-normal break-words leading-snug" title="${b.label}">${b.label}</div>
           </td>
           <td class="py-2 px-2 lg:py-3 lg:px-4 align-top">
             <div class="text-gray-300 text-[0.75rem] font-semibold">$${b.avg_cost.toFixed(3)} at ${eTime}</div>
@@ -373,16 +525,24 @@ function renderTable() {
 async function loadEvents() {
   const loading = document.getElementById('loading');
   const refreshBtn = document.getElementById('refresh-btn');
+  loading.innerHTML = '<div class="spinner mx-auto"></div><div class="text-sm font-mono" style="color:var(--cyan)">LOADING POSITIONS...</div>';
   loading.classList.remove('hidden');
   document.getElementById('events-card').classList.add('hidden');
   document.getElementById('empty').classList.add('hidden');
   if (refreshBtn) { refreshBtn.disabled = true; refreshBtn.textContent = 'Refreshing...'; }
+  const slowLoadTimer = setTimeout(() => {
+    if (!loading.classList.contains('hidden')) {
+      loading.innerHTML = '<div class="spinner mx-auto"></div><div class="text-sm font-mono" style="color:var(--cyan)">LOADING POSITIONS...</div><div class="text-xs font-mono text-gray-500">Waiting on live Polymarket/on-chain status. DB positions will render as soon as available.</div>';
+    }
+  }, 2500);
 
   try {
     const [redRes, posRes] = await Promise.all([
       fetch('/api/redemptions'),
       fetch('/positions')
     ]);
+    if (!redRes.ok) throw new Error(`/api/redemptions returned ${redRes.status}`);
+    if (!posRes.ok) throw new Error(`/positions returned ${posRes.status}`);
     const red = await redRes.json();
     const posReq = await posRes.json();
 
@@ -439,6 +599,7 @@ async function loadEvents() {
   } catch (e) {
     loading.innerHTML = '<div class="text-red-400 text-sm font-mono">SYSTEM ERROR: ' + e.message + '</div>';
   } finally {
+    clearTimeout(slowLoadTimer);
     if (refreshBtn) { refreshBtn.disabled = false; refreshBtn.textContent = 'Refresh Positions \u21BB'; }
   }
 }

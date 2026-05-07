@@ -1115,6 +1115,29 @@ async def _sync_api_positions_to_db(api_positions: list[dict], session):
             await session.rollback()
 
 
+async def _fetch_wallet_api_positions(timeout_s: float = 6.0) -> tuple[list[dict], str | None]:
+    """Fetch Polymarket data-api positions for the configured wallet."""
+    import aiohttp
+
+    try:
+        from backend.execution.chain_utils import get_wallet_address
+        addr = get_wallet_address()
+    except Exception:
+        addr = Config.FUNDER_ADDRESS or None
+    if not addr:
+        return [], None
+
+    timeout = aiohttp.ClientTimeout(total=timeout_s)
+    async with aiohttp.ClientSession(timeout=timeout) as http:
+        url = f"https://data-api.polymarket.com/positions?user={addr}"
+        async with http.get(url) as resp:
+            if resp.status != 200:
+                log.warning("polymarket positions fetch returned %d", resp.status)
+                return [], addr
+            data = await resp.json()
+            return (data if isinstance(data, list) else []), addr
+
+
 @router.get("/api/redemptions")
 async def redemptions_list():
     """All events that have positions, with resolution and on-chain status."""
@@ -1130,6 +1153,8 @@ async def redemptions_list():
         unredeemed = await get_unredeemed_resolved_events(sess)
         redeemed = await get_recently_redeemed_events(sess, days=30)
 
+    api_positions_task = asyncio.create_task(_fetch_wallet_api_positions())
+
     all_events = {e.id: e for e in unresolved + unredeemed + redeemed}
     events = sorted(all_events.values(), key=lambda e: e.date_et, reverse=True)
 
@@ -1141,14 +1166,14 @@ async def redemptions_list():
                 condition_ids.add(b.condition_id)
 
     determined_map = {}
+    cid_to_market_id = {}
     if condition_ids:
-        timeout = aiohttp.ClientTimeout(total=10)
+        timeout = aiohttp.ClientTimeout(total=4)
         async with aiohttp.ClientSession(timeout=timeout) as http:
             # Step 1: fetch negRiskMarketID for each event from Gamma API (or default to condition ID if not NegRisk)
-            cid_to_market_id = {}
-            for evt in events:
+            async def fetch_market_id(evt):
                 if not evt.gamma_event_id:
-                    continue
+                    return
                 try:
                     url = f"https://gamma-api.polymarket.com/events/{evt.gamma_event_id}"
                     async with http.get(url) as resp:
@@ -1164,56 +1189,41 @@ async def redemptions_list():
                                     cid_to_market_id[b.condition_id] = market_id
                 except Exception:
                     pass
+            await asyncio.gather(*(fetch_market_id(evt) for evt in events))
 
             # Step 2: call getDetermined(negRiskMarketID)
-            for cid in condition_ids:
+            async def fetch_determined(cid):
                 # Fall back to checking the condition_id if negRiskMarketID is absent (standard CTF)
                 mid = cid_to_market_id.get(cid, cid)
                 if not mid:
                     determined_map[cid] = None
-                    continue
+                    return
                 try:
                     mid_hex = mid.replace("0x", "")
                     data = f"0x{GET_DETERMINED_SEL}{mid_hex.zfill(64)}"
-                    resp = await (await http.post(POLYGON_RPC, json={
-                        "jsonrpc": "2.0", "id": 1, "method": "eth_call",
-                        "params": [{"to": NEG_RISK_ADAPTER, "data": data}, "latest"],
-                    })).json()
+                    call = http.post(POLYGON_RPC, json={
+                            "jsonrpc": "2.0", "id": 1, "method": "eth_call",
+                            "params": [{"to": NEG_RISK_ADAPTER, "data": data}, "latest"],
+                        })
+                    resp = await (await asyncio.wait_for(call, timeout=4.0)).json()
                     if "result" in resp:
                         determined_map[cid] = int(resp["result"], 16) != 0
                     else:
                         determined_map[cid] = None
                 except Exception:
                     determined_map[cid] = None
+            await asyncio.gather(*(fetch_determined(cid) for cid in condition_ids))
 
     # ── Fetch live prices from Polymarket API (for when DB snapshots are stale) ──
     cid_to_api_price = {}
-    api_positions_list = []  # Store full list for reuse in on-chain section
-    addr = Config.FUNDER_ADDRESS
-    if not addr and Config.POLYMARKET_PRIVATE_KEY:
-        try:
-            from eth_account import Account
-            addr = Account.from_key(Config.POLYMARKET_PRIVATE_KEY).address
-        except Exception:
-            pass
-    if addr:
-        try:
-            timeout = aiohttp.ClientTimeout(total=10)
-            async with aiohttp.ClientSession(timeout=timeout) as http:
-                url = f"https://data-api.polymarket.com/positions?user={addr}"
-                async with http.get(url) as resp:
-                    if resp.status == 200:
-                        api_positions_list = await resp.json()
-                        for pos in api_positions_list:
-                            cid = pos.get("conditionId", "")
-                            if cid:
-                                cid_to_api_price[cid] = float(pos.get("curPrice", 0))
-                
-                # Sync API positions to database for auto-redeem support
-                async with get_session() as sess:
-                    await _sync_api_positions_to_db(api_positions_list, sess)
-        except Exception:
-            pass
+    try:
+        api_positions_list, addr = await api_positions_task
+    except Exception:
+        api_positions_list, addr = [], None
+    for pos in api_positions_list:
+        cid = pos.get("conditionId", "")
+        if cid:
+            cid_to_api_price[cid] = float(pos.get("curPrice", 0) or 0)
 
     # ── Bulk-fetch market snapshots & station calibrations (avoid N+1) ──
     all_bucket_ids = [b.id for evt in events for b in evt.buckets if b.condition_id]
@@ -1332,11 +1342,37 @@ async def redemptions_list():
             "station_tradeability": cal.tradeability if cal else None,
         })
 
+    # Overlay live data-api positions onto DB-backed rows. This lets a manual
+    # buy appear on /redemptions immediately even if the background DB sync has
+    # not caught up yet.
+    api_pos_by_cid = {
+        p.get("conditionId", ""): p
+        for p in api_positions_list
+        if p.get("conditionId") and float(p.get("size", 0) or 0) > 0
+    }
+    for r in rows:
+        for b in r["buckets"]:
+            api_pos = api_pos_by_cid.get(b.get("condition_id"))
+            if not api_pos:
+                continue
+            size = float(api_pos.get("size", 0) or 0)
+            avg_price = float(api_pos.get("avgPrice", 0) or 0)
+            cur_price = float(api_pos.get("curPrice", 0) or 0)
+            if size <= 0:
+                continue
+            b["net_qty"] = size
+            b["avg_cost"] = avg_price
+            b["live_price"] = cur_price if cur_price > 0 else (b.get("live_price") or avg_price)
+            b["last_mkt_price"] = b["live_price"]
+            b["entry_type"] = b.get("entry_type") or "MANUAL"
+            if not b.get("label") or b.get("label", "").startswith("Bucket"):
+                b["label"] = f"{api_pos.get('outcome', 'YES')} — {api_pos.get('title', '')}"
+
     # ── Fetch on-chain positions from Polymarket data API (catches manual trades) ──
     db_condition_ids = set()
     for r in rows:
         for b in r["buckets"]:
-            if b["condition_id"]:
+            if b["condition_id"] and b.get("net_qty", 0) > 0:
                 db_condition_ids.add(b["condition_id"])
 
     # Use API positions list already fetched above
@@ -1411,13 +1447,25 @@ async def redemptions_list():
                         "winning_bucket_idx": None,
                         "buckets": [{
                             "bucket_idx": 0,
+                            "bucket_id": None,
+                            "position_id": None,
                             "label": f"{pos.get('outcome', 'YES')} — {pos.get('title', '')}",
                             "condition_id": cid,
                             "net_qty": size,
                             "avg_cost": avg_price,
+                            "last_mkt_price": live_price,
                             "live_price": live_price,
+                            "live_bid": 0,
+                            "live_spread": 0,
+                            "snapshot_at": None,
+                            "snapshot_stale": True,
                             "is_winner": pos.get("curPrice", 0) == 1,
                             "on_chain_determined": determined,
+                            "entry_type": "MANUAL",
+                            "strategy": None,
+                            "governing_exit_conditions": None,
+                            "current_exit_status": None,
+                            "entry_time": None,
                         }],
                     })
         except Exception as e:
@@ -2008,6 +2056,20 @@ async def manual_trade(
         limit_price_override=body.limit_price,
         outcome=token_outcome,
     )
+    if body.order_type == "market" and result.get("status") in {"filled", "open"}:
+        try:
+            from backend.execution.position_sync import (
+                schedule_position_sync_retries,
+                sync_positions_from_chain,
+            )
+            sync_res = await sync_positions_from_chain(
+                http_timeout_s=5.0,
+                total_timeout_s=6.0,
+            )
+            result["position_sync"] = sync_res
+            asyncio.create_task(schedule_position_sync_retries())
+        except Exception:
+            log.debug("manual_trade: post-trade position sync failed", exc_info=True)
     return result
 
 
