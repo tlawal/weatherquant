@@ -1,0 +1,261 @@
+{% extends "base.html" %}
+{% block title %}Alpha Dashboard — WeatherQuant{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+
+  <!-- ── Header + lookback selector ─────────────────────────────────────── -->
+  <div class="flex items-end justify-between flex-wrap gap-3">
+    <div>
+      <h1 class="text-2xl font-bold tracking-tight" style="color:var(--text-main)">
+        Alpha Dashboard
+      </h1>
+      <p class="text-sm mt-1" style="color:var(--text-muted)">
+        Brier(model) − Brier(market) over settled events.
+        The only metric that directly measures whether we add value over the market.
+      </p>
+    </div>
+    <form method="get" class="flex items-center gap-2 text-xs">
+      <span style="color:var(--text-muted)">Lookback</span>
+      {% for d in [7, 14, 30, 60, 90] %}
+        <a href="?days_back={{ d }}"
+           class="px-2 py-1 rounded mono {% if days_back == d %}font-bold{% endif %}"
+           style="background:{% if days_back == d %}var(--cyan){% else %}var(--bg-panel){% endif %};color:{% if days_back == d %}#000{% else %}var(--text-muted){% endif %}">
+          {{ d }}d
+        </a>
+      {% endfor %}
+    </form>
+  </div>
+
+  <!-- ── Headline KPIs ───────────────────────────────────────────────────── -->
+  {% set src = metrics.by_source %}
+  {% set sig = metrics.promotion_signal %}
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+    <div class="card p-4">
+      <div class="text-[10px] uppercase tracking-widest" style="color:var(--text-muted)">Settled events</div>
+      <div class="text-2xl font-bold mono mt-1">{{ metrics.n_events }}</div>
+      <div class="text-[11px] mt-0.5" style="color:var(--text-muted)">{{ metrics.n_buckets }} buckets / {{ metrics.lookback_days }}d</div>
+    </div>
+    <div class="card p-4">
+      <div class="text-[10px] uppercase tracking-widest" style="color:var(--text-muted)">Legacy edge</div>
+      <div class="text-2xl font-bold mono mt-1"
+           style="color:{% if src.legacy.edge_bps is not none and src.legacy.edge_bps > 0 %}var(--green){% elif src.legacy.edge_bps is not none and src.legacy.edge_bps < 0 %}var(--red){% else %}var(--text-muted){% endif %}">
+        {% if src.legacy.edge_bps is not none %}
+          {{ "%+.1f"|format(src.legacy.edge_bps) }} bps
+        {% else %}—{% endif %}
+      </div>
+      <div class="text-[11px] mt-0.5" style="color:var(--text-muted)">
+        Brier {{ "%.4f"|format(src.legacy.brier) if src.legacy.brier is not none else '—' }}
+      </div>
+    </div>
+    <div class="card p-4">
+      <div class="text-[10px] uppercase tracking-widest" style="color:#FBBF24">BMA shadow edge</div>
+      <div class="text-2xl font-bold mono mt-1"
+           style="color:{% if src.bma.edge_bps is not none and src.bma.edge_bps > 0 %}var(--green){% elif src.bma.edge_bps is not none and src.bma.edge_bps < 0 %}var(--red){% else %}var(--text-muted){% endif %}">
+        {% if src.bma.edge_bps is not none %}
+          {{ "%+.1f"|format(src.bma.edge_bps) }} bps
+        {% else %}—{% endif %}
+      </div>
+      <div class="text-[11px] mt-0.5" style="color:var(--text-muted)">
+        Brier {{ "%.4f"|format(src.bma.brier) if src.bma.brier is not none else '—' }} (n={{ src.bma.n }})
+      </div>
+    </div>
+    <div class="card p-4">
+      <div class="text-[10px] uppercase tracking-widest" style="color:var(--text-muted)">Promotion signal</div>
+      <div class="text-2xl font-bold mono mt-1"
+           style="color:{% if sig.bma_better_than_legacy %}var(--green){% else %}var(--text-muted){% endif %}">
+        {% if sig.bma_better_than_legacy %}BMA wins{% else %}Legacy wins{% endif %}
+      </div>
+      <div class="text-[11px] mt-0.5" style="color:var(--text-muted)">
+        {{ sig.consecutive_days_bma_wins }}d streak
+        {% if sig.consecutive_days_bma_wins >= 14 %}
+          <span class="font-semibold ml-1" style="color:var(--green)">▲ READY TO PROMOTE</span>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Cumulative-Brier chart ─────────────────────────────────────────── -->
+  <div class="card p-4">
+    <div class="flex items-center justify-between mb-3">
+      <h2 class="font-semibold text-sm">Cumulative edge over market — equity-curve view</h2>
+      <span class="text-[11px]" style="color:var(--text-muted)">
+        Going up = source beats market. Slope ≈ daily alpha (Brier units).
+      </span>
+    </div>
+    {% if metrics.by_day %}
+      <div id="edge-chart" style="width:100%;height:360px"></div>
+    {% else %}
+      <div class="px-4 py-12 text-center text-sm" style="color:var(--text-muted)">
+        No settled events in the last {{ days_back }} days. Need at least one
+        resolved event with both a model snapshot and a market snapshot to
+        score the headline numbers.
+      </div>
+    {% endif %}
+  </div>
+
+  <!-- ── Per-city table ─────────────────────────────────────────────────── -->
+  {% if metrics.by_city %}
+  <div class="card overflow-hidden">
+    <div class="px-4 py-3 border-b" style="border-color:var(--border)">
+      <h2 class="font-semibold text-sm">Per-city Brier breakdown</h2>
+    </div>
+    <div class="overflow-x-auto">
+      <table class="w-full text-xs">
+        <thead>
+          <tr class="text-[10px] uppercase tracking-widest" style="color:var(--text-muted);border-bottom:1px solid var(--border)">
+            <th class="px-3 py-2 text-left">City</th>
+            <th class="px-2 py-2 text-right">N</th>
+            <th class="px-2 py-2 text-right">Legacy Brier</th>
+            <th class="px-2 py-2 text-right" style="color:#FBBF24">BMA Brier</th>
+            <th class="px-2 py-2 text-right">Market Brier</th>
+            <th class="px-2 py-2 text-right">Legacy edge</th>
+            <th class="px-2 py-2 text-right" style="color:#FBBF24">BMA edge</th>
+            <th class="px-2 py-2 text-right">BMA − Legacy</th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for slug, row in metrics.by_city.items() %}
+          <tr class="border-b hover:bg-white/5 transition-colors" style="border-color:rgba(26,58,107,0.4)">
+            <td class="px-3 py-2 mono font-semibold">
+              <a href="/city/{{ slug }}" class="hover:underline" style="color:var(--cyan)">{{ slug }}</a>
+            </td>
+            <td class="px-2 py-2 text-right mono" style="color:var(--text-muted)">{{ row.n }}</td>
+            {% if row.below_min_threshold %}
+              <td colspan="6" class="px-2 py-2 text-right text-[11px] italic" style="color:var(--text-muted)">
+                Below min-sample threshold
+              </td>
+            {% else %}
+              <td class="px-2 py-2 text-right mono">{{ "%.4f"|format(row.legacy.brier) if row.legacy.brier is not none else '—' }}</td>
+              <td class="px-2 py-2 text-right mono" style="color:#FBBF24">{{ "%.4f"|format(row.bma.brier) if row.bma.brier is not none else '—' }}</td>
+              <td class="px-2 py-2 text-right mono" style="color:var(--text-muted)">{{ "%.4f"|format(row.market.brier) if row.market.brier is not none else '—' }}</td>
+              <td class="px-2 py-2 text-right mono"
+                  style="color:{% if row.legacy.edge_bps is not none and row.legacy.edge_bps > 0 %}var(--green){% elif row.legacy.edge_bps is not none and row.legacy.edge_bps < 0 %}var(--red){% else %}var(--text-muted){% endif %}">
+                {{ "%+.1f"|format(row.legacy.edge_bps) if row.legacy.edge_bps is not none else '—' }}
+              </td>
+              <td class="px-2 py-2 text-right mono"
+                  style="color:{% if row.bma.edge_bps is not none and row.bma.edge_bps > 0 %}var(--green){% elif row.bma.edge_bps is not none and row.bma.edge_bps < 0 %}var(--red){% else %}var(--text-muted){% endif %}">
+                {{ "%+.1f"|format(row.bma.edge_bps) if row.bma.edge_bps is not none else '—' }}
+              </td>
+              <td class="px-2 py-2 text-right mono">
+                {% if row.bma.edge_bps is not none and row.legacy.edge_bps is not none %}
+                  {% set delta = row.bma.edge_bps - row.legacy.edge_bps %}
+                  <span style="color:{% if delta > 0 %}var(--green){% elif delta < 0 %}var(--red){% else %}var(--text-muted){% endif %}">
+                    {{ "%+.1f"|format(delta) }}
+                  </span>
+                {% else %}—{% endif %}
+              </td>
+            {% endif %}
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- ── Per-regime breakouts ───────────────────────────────────────────── -->
+  {% set reg = metrics.by_regime %}
+  {% if reg.high_disagreement.n or reg.low_disagreement.n %}
+  <div class="card p-4">
+    <h2 class="font-semibold text-sm mb-3">By inter-source disagreement regime</h2>
+    <p class="text-[11px] mb-3" style="color:var(--text-muted)">
+      "High disagreement" = events where BMA's between-source variance share
+      exceeded 50% (panel was multimodal). These are the days where BMA
+      should help the most because the legacy single-Gaussian collapses to
+      consensus while the mixture preserves tail mass.
+    </p>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+      {% for label, key in [("High disagreement (multimodal)", "high_disagreement"), ("Low disagreement (consensus)", "low_disagreement")] %}
+      {% set r = reg[key] %}
+      <div class="panel rounded-lg p-3">
+        <div class="text-[10px] uppercase tracking-widest mb-1" style="color:var(--text-muted)">{{ label }}</div>
+        {% if r.below_min_threshold %}
+          <div class="text-sm" style="color:var(--text-muted)">n={{ r.n }} (below threshold)</div>
+        {% else %}
+          <div class="text-xs mono space-y-0.5">
+            <div class="flex justify-between"><span style="color:var(--text-muted)">N buckets</span><span>{{ r.n if r.n is defined else r.legacy.n }}</span></div>
+            <div class="flex justify-between"><span style="color:var(--text-muted)">Legacy edge</span><span style="color:{% if r.legacy.edge_bps is not none and r.legacy.edge_bps > 0 %}var(--green){% elif r.legacy.edge_bps is not none and r.legacy.edge_bps < 0 %}var(--red){% endif %}">{{ "%+.1f"|format(r.legacy.edge_bps) if r.legacy.edge_bps is not none else '—' }} bps</span></div>
+            <div class="flex justify-between"><span style="color:#FBBF24">BMA edge</span><span style="color:{% if r.bma.edge_bps is not none and r.bma.edge_bps > 0 %}var(--green){% elif r.bma.edge_bps is not none and r.bma.edge_bps < 0 %}var(--red){% endif %}">{{ "%+.1f"|format(r.bma.edge_bps) if r.bma.edge_bps is not none else '—' }} bps</span></div>
+          </div>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- ── Footnote ──────────────────────────────────────────────────────── -->
+  <div class="text-[11px] italic" style="color:var(--text-muted)">
+    Computed: {{ metrics.computed_at }} · Endpoint:
+    <a href="/api/calibration/edge.json?days_back={{ days_back }}" class="hover:underline mono"
+       style="color:var(--cyan)">/api/calibration/edge.json</a>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function() {
+  const data = {{ metrics_json|safe }};
+  const byDay = data.by_day || [];
+  if (!byDay.length || typeof Plotly === 'undefined') return;
+
+  // Equity-curve view: cumulative (market_brier - source_brier).
+  // Going up = source is winning over market.
+  const dates = byDay.map(d => d.date);
+
+  function cumDelta(brierKey) {
+    let cum = 0;
+    return byDay.map(d => {
+      const sb = d[brierKey];
+      const mb = d.market_brier;
+      if (sb !== null && sb !== undefined && mb !== null && mb !== undefined) {
+        cum += (mb - sb) * d.n;  // weight by N to avoid small-day noise
+      }
+      return cum;
+    });
+  }
+
+  const traces = [
+    {
+      x: dates, y: cumDelta('legacy_brier'),
+      mode: 'lines+markers', name: 'Legacy',
+      line: { color: '#22D3EE', width: 2 },
+      marker: { size: 5 },
+    },
+    {
+      x: dates, y: cumDelta('bma_brier'),
+      mode: 'lines+markers', name: 'BMA shadow',
+      line: { color: '#FBBF24', width: 2 },
+      marker: { size: 5 },
+    },
+    {
+      x: dates, y: dates.map(() => 0),
+      mode: 'lines', name: 'Market parity',
+      line: { color: '#6B7280', width: 1, dash: 'dash' },
+      hoverinfo: 'skip', showlegend: false,
+    },
+  ];
+
+  const layout = {
+    paper_bgcolor: 'rgba(0,0,0,0)',
+    plot_bgcolor: 'rgba(0,0,0,0)',
+    font: { color: '#94A3B8', family: 'Inter, system-ui, sans-serif', size: 11 },
+    margin: { l: 50, r: 20, t: 10, b: 40 },
+    xaxis: { gridcolor: 'rgba(148,163,184,0.1)', tickfont: { size: 10 } },
+    yaxis: {
+      title: { text: 'Cumulative Brier delta (× N)', font: { size: 11 } },
+      gridcolor: 'rgba(148,163,184,0.1)',
+      zeroline: true, zerolinecolor: '#6B7280',
+    },
+    legend: { x: 0.02, y: 0.98, bgcolor: 'rgba(0,0,0,0)' },
+    hovermode: 'x unified',
+  };
+
+  Plotly.newPlot('edge-chart', traces, layout, {
+    displayModeBar: false, responsive: true,
+  });
+})();
+</script>
+{% endblock %}

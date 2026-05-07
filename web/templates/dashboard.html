@@ -27,6 +27,25 @@
     <span class="mono text-sm">{{ today_et }}</span>
   </div>
 
+  {# Alpha chip — Section 6 Layer 6. Self-loads from /api/calibration/edge.json
+     on mount so the dashboard route handler doesn't need new vars. Click-through
+     to the full Alpha Dashboard. #}
+  <a href="/calibration/edge"
+     class="flex items-center gap-2 px-2.5 py-1 rounded transition-all hover:opacity-80 ml-auto lg:ml-0 cursor-pointer no-underline"
+     style="background:var(--bg-panel); border:1px solid var(--border)"
+     x-data="alphaChip()" x-init="load()"
+     :title="tooltip">
+    <span class="text-[10px] uppercase tracking-widest font-bold" style="color:var(--text-muted)">Alpha</span>
+    <span class="text-[11px] mono"
+          :style="`color:${legacyColor()}`"
+          x-text="legacyLabel"></span>
+    <span class="opacity-30">·</span>
+    <span class="text-[11px] mono"
+          :style="`color:${bmaColor()}`"
+          x-text="bmaLabel"></span>
+    <span class="text-[10px] mono opacity-60" x-text="streakLabel"></span>
+  </a>
+
   <!-- City quick links -->
   <!-- City navigation bar -->
   <div class="ml-auto w-full lg:w-auto flex flex-wrap items-center gap-2 pt-3 lg:pt-0 border-t lg:border-t-0 mt-3 lg:mt-0" style="border-color:var(--border)">
@@ -246,6 +265,51 @@
 
 {% block scripts %}
 <script>
+// Alpha chip — Section 6 Layer 6. Fetches Brier(model) − Brier(market) and
+// renders a compact summary in the risk bar. Color codes: green = source
+// beats market, red = source loses to market, gray = no data yet.
+function alphaChip() {
+  return {
+    legacyBps: null,
+    bmaBps: null,
+    streak: 0,
+    nEvents: 0,
+    tooltip: 'Alpha Dashboard — loading…',
+    legacyLabel: 'Lgcy —',
+    bmaLabel: 'BMA —',
+    streakLabel: '',
+    legacyColor() { return this._color(this.legacyBps); },
+    bmaColor()    { return this._color(this.bmaBps); },
+    _color(bps) {
+      if (bps === null || bps === undefined) return 'var(--text-muted)';
+      if (bps > 0) return 'var(--green)';
+      if (bps < 0) return 'var(--red)';
+      return 'var(--text-muted)';
+    },
+    async load() {
+      try {
+        const r = await fetch('/api/calibration/edge.json?days_back=30');
+        if (!r.ok) return;
+        const d = await r.json();
+        const sig = d.promotion_signal || {};
+        this.legacyBps = sig.current_edge_legacy_bps;
+        this.bmaBps = sig.current_edge_bma_bps;
+        this.streak = sig.consecutive_days_bma_wins || 0;
+        this.nEvents = d.n_events || 0;
+        this.legacyLabel = (this.legacyBps === null || this.legacyBps === undefined)
+          ? 'Lgcy —' : `Lgcy ${this.legacyBps >= 0 ? '+' : ''}${this.legacyBps.toFixed(1)}`;
+        this.bmaLabel = (this.bmaBps === null || this.bmaBps === undefined)
+          ? 'BMA —' : `BMA ${this.bmaBps >= 0 ? '+' : ''}${this.bmaBps.toFixed(1)}`;
+        this.streakLabel = (this.streak >= 14) ? '▲ READY' : (this.streak > 0 ? `(${this.streak}d)` : '');
+        this.tooltip = `Alpha over market — last 30 days, ${this.nEvents} events.\n` +
+          `Legacy: ${this.legacyBps !== null ? this.legacyBps.toFixed(1) + ' bps' : 'no data'}\n` +
+          `BMA shadow: ${this.bmaBps !== null ? this.bmaBps.toFixed(1) + ' bps' : 'no data'}\n` +
+          `BMA winning streak: ${this.streak} day(s). Click for full dashboard.`;
+      } catch (e) { /* silent — chip stays "—" */ }
+    },
+  };
+}
+
 async function apiCall(path, method='POST', body=null) {
   const tok = getAdminToken() || promptForToken();
   if (!tok) return null;

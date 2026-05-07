@@ -1237,6 +1237,34 @@ async def redemptions_page(request: Request):
     return templates.TemplateResponse("redemptions.html", {"request": request})
 
 
+# ─── Alpha Dashboard (Section 6 Layer 6) ──────────────────────────────────────
+# Brier(model) − Brier(market) over settled events. The only metric that
+# directly measures whether we add value over the market. Drives BMA promotion.
+
+@dashboard_router.get("/calibration/edge", response_class=HTMLResponse)
+async def calibration_edge_page(request: Request, days_back: int = 30):
+    """Alpha dashboard — legacy vs BMA shadow vs market, by Brier."""
+    from backend.modeling.edge_metrics import compute_edge_metrics
+
+    metrics = await compute_edge_metrics(days_back=days_back)
+    return templates.TemplateResponse(
+        "calibration_edge.html",
+        {
+            "request": request,
+            "metrics": metrics,
+            "days_back": days_back,
+            "metrics_json": json.dumps(metrics, default=str),
+        },
+    )
+
+
+@dashboard_router.get("/api/calibration/edge.json")
+async def calibration_edge_json(days_back: int = 30):
+    """JSON API for the alpha dashboard (powers the chip on /)."""
+    from backend.modeling.edge_metrics import compute_edge_metrics
+    return await compute_edge_metrics(days_back=days_back)
+
+
 @dashboard_router.get("/api/positions/{position_id}/exit-events")
 async def position_exit_events(position_id: int):
     """Phase B4 — structured exit-event journal for a position.
@@ -1582,23 +1610,20 @@ async def strategies_page(request: Request):
 async def backtest_page(request: Request):
     """Walk-forward backtester dashboard."""
     from backend.storage.db import get_session
-    from backend.storage.models import BacktestResolvedEvent, BacktestRun, Event
-    from sqlalchemy import select, desc, func
+    from backend.storage.models import BacktestRun
+    from backend.backtesting.engine import (
+        BacktestParams,
+        get_coverage_breakdown,
+    )
+    from sqlalchemy import select, desc
 
     async with get_session() as sess:
-        # Recent runs
         runs_q = select(BacktestRun).order_by(desc(BacktestRun.created_at)).limit(20)
         runs = (await sess.execute(runs_q)).scalars().all()
 
-        # Count resolved events (local Events with known winner)
-        count_q = select(func.count(Event.id)).where(Event.winning_bucket_idx.isnot(None))
-        resolved_count = (await sess.execute(count_q)).scalar() or 0
-
-        # Count enrichment-sourced resolved markets (Gamma)
-        gamma_count = (await sess.execute(
-            select(func.count(BacktestResolvedEvent.id))
-            .where(BacktestResolvedEvent.winning_bucket_idx.isnot(None))
-        )).scalar() or 0
+    # Three-tier coverage report — what the page actually needs to render
+    # honest counts and the empty-state notice.
+    coverage = await get_coverage_breakdown()
 
     arming_state = "DISARMED"
     try:
@@ -1609,7 +1634,6 @@ async def backtest_page(request: Request):
     except Exception:
         pass
 
-    from backend.backtesting.engine import BacktestParams
     from dataclasses import asdict
 
     return templates.TemplateResponse(
@@ -1618,11 +1642,17 @@ async def backtest_page(request: Request):
             "request": request,
             "arming_state": arming_state,
             "runs": runs,
-            "resolved_count": resolved_count,
-            "gamma_resolved_count": gamma_count,
+            "coverage": coverage,
             "default_params": asdict(BacktestParams()),
         },
     )
+
+
+@dashboard_router.get("/api/backtest/coverage")
+async def api_backtest_coverage():
+    """Three-tier coverage report for the /backtest dashboard banner."""
+    from backend.backtesting.engine import get_coverage_breakdown
+    return await get_coverage_breakdown()
 
 
 @dashboard_router.post("/api/backtest/run")
