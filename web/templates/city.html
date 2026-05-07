@@ -446,6 +446,79 @@
       {% endif %}
     </div>
     {% endif %}
+
+    {# M1 Phase 1.5 — BMA shadow row. Read-only side-by-side comparison; legacy μ above is what drives trades. #}
+    {% if model and model.inputs and model.inputs.get('bma_shadow') %}
+    {% set bma = model.inputs.get('bma_shadow') %}
+    <div class="mt-2 pt-2 border-t" style="border-color:var(--border)" x-data="{ showBma: false }">
+      <div class="flex items-center justify-between text-[10px]">
+        <div class="flex items-baseline gap-2">
+          <span class="uppercase tracking-widest" style="color:var(--text-muted)">BMA shadow</span>
+          <span class="mono font-semibold" style="color:#FBBF24">
+            {% if bma.mu is not none %}{{ "%.1f"|format(bma.mu) }}°{{ city.unit|default('F') }}{% else %}—{% endif %}
+            {% if bma.sigma is not none %} ± {{ "%.1f"|format(bma.sigma) }}°{% endif %}
+          </span>
+          {% if bma.between_share is not none %}
+          <span class="text-[10px]" style="color:var(--text-muted)" title="Share of mixture variance from inter-source disagreement; >50% indicates the panel is multimodal and the legacy single-Gaussian summary may understate tail risk.">
+            (between-src {{ "%.0f"|format(bma.between_share * 100) }}%)
+          </span>
+          {% endif %}
+          {% if bma.fallback_used %}
+          <span class="px-1 rounded text-[9px] font-semibold" style="background:rgba(251,191,36,0.15); color:#FBBF24" title="At least one source had n_obs < 30 in SourceLeadTimeSkill, so a 3°F prior σ was used.">prior σ</span>
+          {% endif %}
+        </div>
+        <button @click="showBma = !showBma" @click.outside="showBma = false"
+                class="hover:text-cyan-400 opacity-50 hover:opacity-100 transition-all">ⓘ</button>
+      </div>
+      <div class="text-[10px] mt-1 mono opacity-60" style="color:var(--text-muted)">
+        Δμ vs legacy:
+        <span class="font-semibold">{% if bma.mu_delta_vs_legacy is not none %}{{ "%+.2f"|format(bma.mu_delta_vs_legacy) }}°{% else %}—{% endif %}</span>
+        · Δσ vs raw legacy:
+        <span class="font-semibold">{% if bma.sigma_delta_vs_legacy_raw is not none %}{{ "%+.2f"|format(bma.sigma_delta_vs_legacy_raw) }}°{% else %}—{% endif %}</span>
+        · {{ bma.n_components or 0 }} components
+      </div>
+      <div x-show="showBma" x-cloak
+           x-transition:enter="transition ease-out duration-100"
+           x-transition:enter-start="opacity-0 scale-95"
+           x-transition:enter-end="opacity-100 scale-100"
+           class="mt-2 p-2 rounded-lg border text-[10px] mono"
+           style="background:var(--bg-card); border-color:var(--border);">
+        <div class="font-bold mb-1.5 pb-1 border-b" style="color:#FBBF24; border-color:var(--border)">BMA mixture components</div>
+        {% if bma.components %}
+        <table class="w-full text-[10px]">
+          <thead style="color:var(--text-muted)">
+            <tr>
+              <th class="text-left pb-1">source</th>
+              <th class="text-right pb-1">μ</th>
+              <th class="text-right pb-1">σ</th>
+              <th class="text-right pb-1">w</th>
+              <th class="text-right pb-1">n</th>
+            </tr>
+          </thead>
+          <tbody>
+          {% for c in bma.components %}
+            <tr>
+              <td class="text-left">{{ c.source }}</td>
+              <td class="text-right">{{ "%.1f"|format(c.mu) }}</td>
+              <td class="text-right">{{ "%.2f"|format(c.sigma) }}</td>
+              <td class="text-right">{{ "%.0f"|format(c.weight * 100) }}%</td>
+              <td class="text-right opacity-70">{{ c.n_obs }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        {% endif %}
+        {% if bma.notes %}
+        <div class="mt-2 pt-1 border-t opacity-70" style="border-color:var(--border)">
+          {% for n in bma.notes %}<div>{{ n }}</div>{% endfor %}
+        </div>
+        {% endif %}
+        <div class="mt-2 pt-1 border-t opacity-60 italic" style="border-color:var(--border)">
+          Shadow only — does not drive trades. Legacy μ above is the live signal. Promotion gated on ≥14 days CRPS comparison.
+        </div>
+      </div>
+    </div>
+    {% endif %}
   </div>
 
   <!-- Forecast Sources Summary -->
@@ -1415,7 +1488,17 @@
     <!-- Buckets & Edges Table -->
     <div class="card overflow-hidden">
       <div class="px-4 py-3 border-b flex items-center justify-between gap-2" style="border-color:var(--border)">
-        <h2 class="font-semibold text-sm">Buckets & Edges</h2>
+        <div class="flex items-center gap-2">
+          <h2 class="font-semibold text-sm">Buckets & Edges</h2>
+          {# M1 Phase 1.5 — multimodal chip when source disagreement dominates mixture variance. #}
+          {% if model and model.inputs and model.inputs.get('bma_shadow') and model.inputs.get('bma_shadow').get('between_share') is not none and model.inputs.get('bma_shadow').get('between_share') > 0.5 %}
+          <span class="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold"
+                style="background:rgba(251,191,36,0.15); color:#FBBF24; border:1px solid rgba(251,191,36,0.3)"
+                title="BMA mixture variance is dominated by inter-source disagreement (>50%). The legacy single-Gaussian column may understate tail probabilities.">
+            multimodal
+          </span>
+          {% endif %}
+        </div>
         <div class="flex items-center gap-2">
           {% if event and event.gamma_slug and event.status == 'ok' %}
           <a href="https://polymarket.com/event/{{ event.gamma_slug }}" target="_blank"
@@ -1438,6 +1521,7 @@
               <th class="px-3 py-2 text-left">Range</th>
               <th class="px-2 py-2 text-right">Mkt</th>
               <th class="px-2 py-2 text-right">Model</th>
+              <th class="px-2 py-2 text-right" style="color:#FBBF24" title="M1 BMA shadow probability — Gaussian-mixture predictive over the same per-source forecasts. Read-only; does not affect trade decisions during shadow phase.">BMA</th>
               <th class="px-2 py-2 text-right" style="color:var(--cyan)">EV</th>
               <th class="px-2 py-2 text-right">Kelly</th>
               <th class="px-2 py-2 text-center">▶</th>
@@ -1509,6 +1593,19 @@
               </td>
               <td class="px-2 py-2.5 text-right mono font-medium text-white">
                 {% if b.model_prob is not none %}{{ "%.1f"|format(b.model_prob * 100) }}%{% else %}—{% endif %}
+              </td>
+              <td class="px-2 py-2.5 text-right mono">
+                {% if b.bma_prob is not none %}
+                  <span style="color:#FBBF24">{{ "%.1f"|format(b.bma_prob * 100) }}%</span>
+                  {% if b.model_prob is not none and ((b.bma_prob - b.model_prob)|abs) > 0.05 %}
+                    {% set delta_pp = (b.bma_prob - b.model_prob) * 100 %}
+                    <span class="text-[9px] ml-0.5"
+                          style="color:{% if delta_pp > 0 %}#86EFAC{% else %}#FCA5A5{% endif %}"
+                          title="BMA assigns this much more (or less) probability than the legacy path. Differences > 5pp typically come from BMA pricing tail risk that single-Gaussian summaries collapse.">
+                      {{ "%+.0f"|format(delta_pp) }}
+                    </span>
+                  {% endif %}
+                {% else %}<span style="color:var(--text-muted)">—</span>{% endif %}
               </td>
               <td class="px-2 py-2.5 text-right mono font-bold">
                 {% if b.ev is not none %}

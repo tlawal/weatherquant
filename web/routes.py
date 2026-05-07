@@ -554,6 +554,11 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
             model = await get_latest_model_snapshot(sess, event.id)
             model_inputs = json.loads(model.inputs_json) if model and model.inputs_json else {}
 
+            # M1 Phase 1.5 — pull BMA shadow probs once so the per-bucket loop
+            # below can attach a per-bucket bma_prob without reparsing JSON.
+            bma_shadow = model_inputs.get("bma_shadow") if isinstance(model_inputs, dict) else None
+            bma_probs = (bma_shadow or {}).get("probs") or []
+
             snapshot_id = model.id if model is not None else None
             for bucket in buckets:
                 sig = await get_latest_signal_for_bucket(sess, bucket.id, snapshot_id=snapshot_id)
@@ -563,12 +568,14 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
 
                 probs = json.loads(model.probs_json) if model and model.probs_json else []
                 model_prob = probs[bucket.bucket_idx] if bucket.bucket_idx < len(probs) else None
+                # Per-bucket BMA shadow prob (None when no shadow data or bucket index out of range).
+                bma_prob = bma_probs[bucket.bucket_idx] if bucket.bucket_idx < len(bma_probs) else None
 
                 yes_price = mkt.yes_ask if mkt else None
                 ev = calculate_expected_value(model_prob, yes_price) if model_prob is not None and yes_price else None
                 kelly_f = calculate_kelly_fraction(
-                    model_prob, 
-                    yes_price, 
+                    model_prob,
+                    yes_price,
                     fractional_kelly=Config.KELLY_FRACTION,
                     max_position_size=Config.MAX_POSITION_PCT
                 ) if model_prob is not None and yes_price else None
@@ -581,6 +588,7 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                     "high_f": bucket.high_f,
                     "yes_token_id": bucket.yes_token_id,
                     "model_prob": round(model_prob, 4) if model_prob is not None else None,
+                    "bma_prob": round(bma_prob, 4) if bma_prob is not None else None,
                     "mkt_prob": mkt.yes_mid if mkt else None,
                     "yes_bid": mkt.yes_bid if mkt else None,
                     "yes_ask": mkt.yes_ask if mkt else None,
