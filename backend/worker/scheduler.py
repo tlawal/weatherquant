@@ -99,6 +99,23 @@ async def job_fetch_aiwp_aurora():
     await fetch_aurora()
 
 
+async def job_probe_aiwp_for_new_models():
+    """§20.6 — Probe NOAA AIWP S3 weekly for new model prefixes.
+
+    NOAA periodically adds new AI weather models to the AIWP archive
+    (Aurora landed in 2025; FourCastNet v3 is the highest-leverage
+    candidate to land next). Self-host paths for FCN3 are currently
+    non-viable due to upstream dependency conflicts (see plan §20.x).
+
+    This probe lists S3 top-level prefixes once a week. When a new
+    prefix appears that isn't in our `AIWP_MODELS` registry, it logs
+    a WARNING-level line — easy to tail/alert on. Integration of a
+    newly-listed model is a one-line change to `AIWP_MODELS`.
+    """
+    from backend.ingestion.aiwp_probe import probe_aiwp_for_new_models
+    await probe_aiwp_for_new_models()
+
+
 async def job_fetch_herbie_hrrr():
     from backend.ingestion.herbie_side_channel import fetch_herbie_hrrr
     await fetch_herbie_hrrr()
@@ -483,6 +500,9 @@ def create_scheduler() -> AsyncIOScheduler:
     # §17 — Microsoft Aurora; same NOAA AIWP cadence (00z/12z, ~8h post-init).
     # Hourly poll is cheap when nothing's new (idempotent skip in fetch_aiwp_model).
     add(job_fetch_aiwp_aurora,          seconds=3600, name="fetch_aiwp_aurora")
+    # Weekly probe for new AIWP model prefixes (FCN3 watch). One HTTP
+    # request, no auth, no compute. Sees a candidate → WARNING in logs.
+    add(job_probe_aiwp_for_new_models,  seconds=604800, name="probe_aiwp_new_models")  # 7d
     add(job_fetch_herbie_hrrr,   seconds=900,  name="fetch_herbie_hrrr")   # 15 min — hourly model
     add(job_fetch_herbie_nbm,    seconds=1800, name="fetch_herbie_nbm")    # 30 min
     add(job_fetch_herbie_ifs,    seconds=7200, name="fetch_herbie_ifs")    # 2 h — 4 runs/day

@@ -51,6 +51,120 @@ from backend.tz_utils import city_local_date
 log = logging.getLogger(__name__)
 
 
+# Forecast sources we surface to the LLM. Order matters for human readability
+# in prompt context (physical NWP first, then AI-NWP, then live obs).
+_ENSEMBLE_SOURCES: tuple[str, ...] = (
+    "nws", "hrrr", "nbm", "ecmwf_ifs", "ecmwf_aifs",
+    "gfs_graphcast", "pangu_weather", "fourcastnet_v2", "aurora",
+    "wu_hourly",
+)
+
+
+# Source metadata encyclopedia — included in the system prompt so the LLM
+# reasons about model strengths/weaknesses from first principles instead
+# of decorating output with vague "NBM is good" hand-waves.
+#
+# Each entry deliberately calls out:
+#   - HOW the model is formed (physics? statistical blend? AI architecture?)
+#   - HOW the temperature value is calculated (gridpoint extract, blend, etc.)
+#   - WHEN it's run (cadence + typical post-init availability)
+#   - PROS / CONS in operational use for daily-high prediction
+#
+# When new sources are added (e.g. FCN3 from §20.6 probe), append here.
+MODEL_ENCYCLOPEDIA: dict[str, dict[str, str]] = {
+    "nws": {
+        "full_name": "NWS National Blend of Models gridpoint",
+        "type": "Statistical blend of physics NWP",
+        "calculation": "NOAA's National Blend of Models (NBM) gridpoint forecast queried via api.weather.gov; blends GFS, NAM, HRRR, ECMWF, GEFS, others using decaying-average + quantile mapping postprocess.",
+        "cadence": "Hourly updates; gridpoint refresh ~every 60 min",
+        "typical_age_at_trade_h": "0.5–2",
+        "pros": "US-only but excellent for it; runs continuously so always fresh; bias-corrected against ASOS observations.",
+        "cons": "Not available outside US. Lower spatial resolution than HRRR (~2.5km vs 3km). Lags behind raw HRRR by 30-60min.",
+    },
+    "hrrr": {
+        "full_name": "High-Resolution Rapid Refresh",
+        "type": "Convection-allowing physical NWP",
+        "calculation": "NOAA's 3km CONUS regional model; non-hydrostatic equations, hourly cycling with radar data assimilation. We query via Open-Meteo `gfs_hrrr` blend.",
+        "cadence": "Hourly init; output available ~45-60 min post-init",
+        "typical_age_at_trade_h": "1–3",
+        "pros": "Highest spatial resolution we have for US. Excellent at convective cooling, sea-breeze fronts, urban heat island, terrain effects.",
+        "cons": "US CONUS only. Known cool bias overnight, warm bias in afternoon convective regimes (Glahn/MDL studies). Drifts at lead > 18h.",
+    },
+    "nbm": {
+        "full_name": "NCEP National Blend of Models — full MDL output",
+        "type": "Statistical blend of 50+ physics NWP models",
+        "calculation": "NOAA MDL blends GFS, NAM, HRRR, ECMWF, GEFS, SREF, NAEFS, MOS via dynamic MAE-weighted fusion + quantile mapping for bias. We pull via Open-Meteo `ncep_nbm_conus`.",
+        "cadence": "Hourly init; output ~90 min post-init",
+        "typical_age_at_trade_h": "1.5–3",
+        "pros": "10–20% MAE reduction over raw GFS for temperature (NWS MDL verification). Wisdom-of-crowds via dynamic re-weighting. v4.2+ has wind quantile mapping.",
+        "cons": "US CONUS only. Slightly stale relative to raw HRRR. Less responsive to sudden mesoscale events because it's a blend.",
+    },
+    "ecmwf_ifs": {
+        "full_name": "ECMWF Integrated Forecasting System",
+        "type": "Physical NWP — global gold-standard",
+        "calculation": "ECMWF's flagship model: spectral primitive equations, 9km resolution, TCo1279 grid, full 4D-Var data assimilation. We extract 2m-temperature at city lat/lon via Herbie cfgrib + ECMWF open data.",
+        "cadence": "4 runs/day (00z, 06z, 12z, 18z); IFS available ~6h post-init",
+        "typical_age_at_trade_h": "6–18",
+        "pros": "Globally available. Best long-range deterministic skill in the world (consistently beats GFS at lead > 24h). Strong on synoptic-scale features.",
+        "cons": "Lower resolution than HRRR for fine-scale convection. Latency: ~6h post-init means stalest of our short-range sources at trade time.",
+    },
+    "ecmwf_aifs": {
+        "full_name": "ECMWF AI Forecasting System",
+        "type": "AI-NWP — graph neural network",
+        "calculation": "ECMWF's transformer-based AI model trained on ERA5 + IFS analyses. 0.25° single-level. Same physical IC as IFS. Herbie cfgrib + ECMWF AIFS open data.",
+        "cadence": "4 runs/day matching IFS schedule; ~6h post-init",
+        "typical_age_at_trade_h": "6–18",
+        "pros": "Architecturally diverse from IFS (different inductive bias). Strong on global patterns. Trains on full ERA5 history.",
+        "cons": "Newer than IFS, less validation in operational use. May still inherit IFS biases via training data.",
+    },
+    "gfs_graphcast": {
+        "full_name": "DeepMind GraphCast (GFS-init)",
+        "type": "AI-NWP — graph neural network",
+        "calculation": "DeepMind's GNN trained on ERA5 (Lam et al. 2023, Science 382:1416). 0.25° resolution, autoregressive 6h steps. Open-Meteo blends GFS init + GraphCast forward integration.",
+        "cadence": "4 runs/day on GFS init schedule (00z/06z/12z/18z); ~5h post-init",
+        "typical_age_at_trade_h": "5–17",
+        "pros": "Beats GFS on most lead times in WeatherBench-2. Free via Open-Meteo. Architecturally distinct from FCN.",
+        "cons": "Initialized on GFS analysis (not IFS) → inherits GFS biases at t=0. Lower fidelity on convective events than HRRR.",
+    },
+    "pangu_weather": {
+        "full_name": "Huawei Pangu-Weather",
+        "type": "AI-NWP — 3D Earth-specific transformer",
+        "calculation": "Hierarchical 3D transformer with Earth-specific positional encodings (Bi et al. 2023, Nature 619:533). Trained on ERA5. We pull from NOAA AIWP S3 archive (IFS-initialized, 6h timestep, 10-day horizon).",
+        "cadence": "2 runs/day (00z, 12z) on AIWP cadence; IFS-init ~8h post-init",
+        "typical_age_at_trade_h": "8–20",
+        "pros": "One of the strongest AI-NWP models. IFS analysis as IC = high-fidelity start. 3D Earth-specific transformer captures vertical structure well.",
+        "cons": "6-hour timestep — true peak T may sit between forecast steps (small under-estimation possible). Older than newer FCN3, may be superseded.",
+    },
+    "fourcastnet_v2": {
+        "full_name": "NVIDIA FourCastNet v2-small",
+        "type": "AI-NWP — adaptive Fourier neural operator",
+        "calculation": "NVIDIA's spherical FNO (Pathak et al. 2022, 2024 update). 75M parameters. Operates in spectral domain — fast, naturally handles spherical geometry. We pull from NOAA AIWP S3 (IFS-initialized).",
+        "cadence": "2 runs/day (00z, 12z); IFS-init ~8h post-init",
+        "typical_age_at_trade_h": "8–20",
+        "pros": "Strong on tail events. Very fast inference. Architecturally diverse from transformers (FNO operates in spectral domain).",
+        "cons": "6-hour timestep limitation same as Pangu. Pre-FCN3 generation; less skill than FCN3 would have at long lead.",
+    },
+    "aurora": {
+        "full_name": "Microsoft Aurora",
+        "type": "AI-NWP — Swin transformer foundation model",
+        "calculation": "Microsoft's Swin transformer trained on multi-resolution Earth data (Bodnar et al. 2024). Foundation-model architecture lets it generalize across atmospheric tasks. We pull from NOAA AIWP S3 (IFS-initialized).",
+        "cadence": "2 runs/day (00z, 12z); IFS-init ~8h post-init",
+        "typical_age_at_trade_h": "8–20",
+        "pros": "4th distinct AI inductive bias in our ensemble (alongside FCN's spherical FNO, Pangu's 3D transformer, GraphCast's GNN). Foundation-model approach is cutting-edge.",
+        "cons": "Newest of our AI sources, least operational track record. Same 6h timestep limitation as other AIWP models.",
+    },
+    "wu_hourly": {
+        "full_name": "Weather Underground hourly forecast",
+        "type": "Aggregated commercial blend",
+        "calculation": "WU/IBM blends multiple NWP sources + their proprietary microclimate model. Hourly forecasts scraped from weather.com.",
+        "cadence": "Updates ~30 min; available continuously",
+        "typical_age_at_trade_h": "0.5–1",
+        "pros": "Always fresh. Microclimate-aware (urban vs airport). International coverage when others fail.",
+        "cons": "Black-box methodology. Inconsistent quality across stations. Has historically had 1–3°F bias on summer afternoons.",
+    },
+}
+
+
 class MarketContextBuildError(RuntimeError):
     pass
 
@@ -199,6 +313,16 @@ async def build_market_context_input(city: City, date_et: str) -> MarketContextI
         wu_history = await get_latest_successful_forecast(sess, city.id, "wu_history", date_et)
         hrrr_fc = await get_latest_successful_forecast(sess, city.id, "hrrr", date_et)
         nbm_fc = await get_latest_successful_forecast(sess, city.id, "nbm", date_et)
+        # Surface the full 10-source ensemble to the LLM. Previously only
+        # NWS/HRRR/NBM/WU were visible; the LLM had no way to reason about
+        # IFS/AIFS/GraphCast/Pangu/FCN/Aurora because those names never
+        # appeared in its context.
+        ecmwf_ifs_fc    = await get_latest_successful_forecast(sess, city.id, "ecmwf_ifs", date_et)
+        ecmwf_aifs_fc   = await get_latest_successful_forecast(sess, city.id, "ecmwf_aifs", date_et)
+        gfs_graphcast_fc = await get_latest_successful_forecast(sess, city.id, "gfs_graphcast", date_et)
+        pangu_weather_fc = await get_latest_successful_forecast(sess, city.id, "pangu_weather", date_et)
+        fourcastnet_v2_fc = await get_latest_successful_forecast(sess, city.id, "fourcastnet_v2", date_et)
+        aurora_fc       = await get_latest_successful_forecast(sess, city.id, "aurora", date_et)
         calibration = await get_calibration(sess, city.id)
         recent_events = await get_recent_events_for_city(sess, city.id, before_or_on_date_et=date_et, limit=16)
         avg_peak_timing = await get_avg_peak_timing(sess, city.id, days_back=7, et_tz=city_tz)
@@ -358,27 +482,27 @@ async def build_market_context_input(city: City, date_et: str) -> MarketContextI
             "observation_minutes": observation_minutes,
             "latest_matches_station_pattern": _matches_station_pattern(latest_obs, observation_minutes, city_tz),
         },
-        short_range_models={
-            "stored_sources": sources,
-            "forecast_spread_f": _round_float(model_inputs.get("spread")),
-            "mu_f": _round_float(model.mu),
-            "sigma_f": _round_float(model.sigma),
-            "projected_high_f": _round_float(model_inputs.get("projected_high")),
-            "prob_new_high": _round_float(model_inputs.get("prob_new_high"), 4),
-            "best_recent_source": _best_recent_source(error_summary),
-            "recent_error_summary": error_summary,
-            "hrrr_high_f": _round_float(hrrr_fc.high_f) if hrrr_fc else None,
-            "nbm_high_f": _round_float(nbm_fc.high_f) if nbm_fc else None,
-            "missing_external_models": [
-                m for m, avail in [
-                    ("HRRR", hrrr_fc is not None),
-                    ("NBM", nbm_fc is not None),
-                    ("NAM", False),
-                    ("RAP", False),
-                    ("ECMWF", False),
-                ] if not avail
-            ],
-        },
+        short_range_models=_build_short_range_models(
+            model=model,
+            model_inputs=model_inputs,
+            error_summary=error_summary,
+            sources_legacy=sources,
+            source_forecasts={
+                "nws": primary_fc,
+                "hrrr": hrrr_fc,
+                "nbm": nbm_fc,
+                "ecmwf_ifs": ecmwf_ifs_fc,
+                "ecmwf_aifs": ecmwf_aifs_fc,
+                "gfs_graphcast": gfs_graphcast_fc,
+                "pangu_weather": pangu_weather_fc,
+                "fourcastnet_v2": fourcastnet_v2_fc,
+                "aurora": aurora_fc,
+                "wu_hourly": wu_hourly,
+            },
+            city_unit=city.unit or "F",
+            settlement_at_utc=_settlement_at_utc_for(date_et, city_tz),
+            now_utc=now_utc,
+        ),
         historical_context={
             "avg_peak_time_local_7d": avg_peak_timing,
             "recent_realized_highs": recent_highs["recent_days"],
@@ -388,10 +512,25 @@ async def build_market_context_input(city: City, date_et: str) -> MarketContextI
             "last_settled_date_et": last_settled["date_et"] if last_settled else None,
             "last_settled_realized_high_f": last_settled["realized_high_f"] if last_settled else None,
             "last_settled_errors_f": last_settled["errors"] if last_settled else {},
+            # Calibration biases for the full ensemble — previously only
+            # exposed nws + wu_hourly. Now the LLM can reason about every
+            # source's drift direction (e.g. HRRR running +1.2°F warm in
+            # last 30 days, IFS running −0.4°F cool).
             "calibration_biases_f": {
-                "nws": _round_float(calibration.bias_nws) if calibration else 0.0,
-                "wu_hourly": _round_float(calibration.bias_wu_hourly) if calibration else 0.0,
+                src: (error_summary.get(src) or {}).get("bias_f")
+                for src in _ENSEMBLE_SOURCES
             },
+            "calibration_mae_30d_f": {
+                src: (error_summary.get(src) or {}).get("mae_f")
+                for src in _ENSEMBLE_SOURCES
+            },
+            "calibration_samples_30d": {
+                src: (error_summary.get(src) or {}).get("samples", 0)
+                for src in _ENSEMBLE_SOURCES
+            },
+            "best_recent_source": _best_recent_source(error_summary),
+            "worst_recent_source": _worst_recent_source(error_summary),
+            "calibration_window": error_summary.get("window"),
             "climatology_status": "not_ingested",
             "microclimate_status": "not_ingested",
         },
@@ -460,29 +599,71 @@ async def _generate_market_context_output(
 
 
 def _build_prompts(context: MarketContextInput) -> tuple[str, str]:
+    """Build system + user prompts for the Market Context LLM.
+
+    Major changes from earlier prompt versions:
+      - System prompt now includes the MODEL_ENCYCLOPEDIA so the LLM can
+        reason about each source's formation method, cadence, strengths,
+        and weaknesses from first principles instead of generic phrases.
+      - Source list expanded from {NWS, HRRR, NBM, WU} to the full
+        10-source ensemble (NWS, HRRR, NBM, IFS, AIFS, GraphCast, Pangu,
+        FCN-v2, Aurora, WU). Each source surfaced with model_run_at,
+        age, lead, MAE/bias, and effective weight.
+      - New required section: ADVERSARIAL REASONING — "why might this
+        trade lose? what would invalidate the call?". Forces the LLM
+        to commit to falsifiable predictions instead of decorating
+        the precomputed call.
+      - New required section: TRIGGER CONDITIONS — specific observable
+        events that flip the analysis (e.g. "if 14:00 METAR < 73°F,
+        the call is wrong").
+      - Calibration MAE block surfaced explicitly with per-source
+        rolling 30d MAE/bias.
+      - "Disagreement diagnosis" requires NAMING the specific outlier
+        sources from panel_disagreement.outliers_high/low.
+    """
     system_prompt = (
         "You are an autonomous quantitative weather-derivatives analyst producing a concise, "
         "evidence-dense Market Context report for a Polymarket temperature-bucket prediction. "
-        "Your output drives real capital allocation.\n\n"
-        "Operating principles:\n"
-        "1. ACTIVELY USE YOUR TOOLS. Before writing the report, call fetch_nws_discussion to read "
-        "the NWS Area Forecast Discussion for synoptic context. Call search_academic_climatology "
-        "for relevant peer-reviewed heuristics. Call fetch_nbm_forecast and/or fetch_hrrr_forecast "
-        "for the latest hourly temperature curves. These external sources are CRITICAL.\n"
-        "2. Synthesize ALL available information — DB context, tool-call results, NWS discussions, "
-        "academic heuristics, and your own meteorological knowledge — into a unified analysis.\n"
-        "3. When model forecasts disagree, diagnose WHY using synoptic regime analysis from the "
-        "NWS Area Forecast Discussion, initialization timing, known biases, and academic literature.\n"
-        "4. Apply bias corrections explicitly: state the raw forecast AND the bias-adjusted value.\n"
-        "5. Quantify uncertainty via sigma_f, forecast_spread_f, and tool-derived ensemble spread.\n"
-        "6. The final_selection is a pre-computed baseline from the deterministic algorithm. "
-        "Echo it exactly in the JSON output. However, in your diagnostic_reasoning and "
-        "independent_assessment sections, state whether you AGREE or DISAGREE with it and why. "
-        "If your tool-informed analysis points to a different bucket, explicitly flag the discrepancy "
-        "with reasoning. This independent assessment is extremely valuable for trading decisions.\n"
-        "7. Be terse. Each section: 2-4 sentences max. Total output must fit 1800 tokens.\n"
-        "8. Return ONLY valid JSON with keys `sections` (7 string values) and `final_selection` "
-        "(echo pre-computed values exactly)."
+        "Your output drives real capital allocation. Capital lost to hand-wavy reasoning is "
+        "permanent. Be specific or be silent.\n\n"
+        "OPERATING PRINCIPLES:\n"
+        "1. ACTIVELY USE YOUR TOOLS. Before writing, call fetch_nws_discussion for synoptic context, "
+        "search_academic_climatology for peer-reviewed heuristics, and fetch_nbm_forecast / "
+        "fetch_hrrr_forecast for hourly curves. Tool results are CRITICAL.\n"
+        "2. NAME EVERY SOURCE you reference. Don't say 'the models' — say 'IFS, AIFS, and HRRR'. "
+        "Don't say 'an outlier' — say 'NBM is +2.1°F above panel mean'.\n"
+        "3. CITE QUANTITATIVE FACTS only. If you reference an academic paper, name (year, journal) "
+        "and quote a specific quantitative finding. Vague references waste tokens.\n"
+        "4. APPLY BIAS CORRECTIONS EXPLICITLY. State the raw forecast AND the bias-adjusted value, "
+        "where bias comes from `historical_context.calibration_biases_f`. A source running "
+        "+1.0°F warm in the last 30d should have its forecast adjusted down before fusion.\n"
+        "5. WEIGHT BY FRESHNESS. Older runs lose information. A 24h-stale IFS forecast carries "
+        "less authority than a 2h-fresh HRRR run for tomorrow's high. Surface this explicitly.\n"
+        "6. THE PRECOMPUTED BUCKET is a baseline, not a verdict. In diagnostic_reasoning, "
+        "adversarial_reasoning, and independent_assessment, state whether you AGREE or DISAGREE "
+        "and why. If your tool-informed analysis points to a different bucket, explicitly flag "
+        "the discrepancy with reasoning.\n"
+        "7. Be terse. Each section: 3-5 sentences max. Total output must fit 2400 tokens.\n"
+        "8. Return ONLY valid JSON with keys `sections` (9 string values) and `final_selection` "
+        "(echo pre-computed values exactly).\n\n"
+        "════════════════════════════════════════════════════════════════════════════\n"
+        "ENSEMBLE SOURCE ENCYCLOPEDIA — reason about these models from first principles\n"
+        "════════════════════════════════════════════════════════════════════════════\n"
+    )
+    # Embed the encyclopedia compactly. Each source = one paragraph.
+    for src, meta in MODEL_ENCYCLOPEDIA.items():
+        system_prompt += (
+            f"\n{src.upper()} ({meta['full_name']}): {meta['type']}. "
+            f"Calculation: {meta['calculation']} "
+            f"Run cadence: {meta['cadence']}. Typical age at trade: {meta['typical_age_at_trade_h']}h. "
+            f"PROS: {meta['pros']} CONS: {meta['cons']}\n"
+        )
+    system_prompt += (
+        "\n════════════════════════════════════════════════════════════════════════════\n\n"
+        "Use the encyclopedia to reason ABOUT each source — not just to repeat its forecast value. "
+        "A 6h-timestep AI model (Pangu, FCN, Aurora) cannot resolve true peak temperature between "
+        "steps. A frontal passage day favors physics models (HRRR, IFS) over AI models trained on "
+        "ERA5 climatology. WU has historical 1-3°F summer afternoon bias. Apply these tradeoffs.\n"
     )
 
     avail = context.availability
@@ -496,68 +677,91 @@ def _build_prompts(context: MarketContextInput) -> tuple[str, str]:
         if unavailable else "All configured data sources are available."
     )
 
-    section_keys_extended = list(SECTION_KEYS) + (
-        ["independent_assessment"] if "independent_assessment" not in SECTION_KEYS else []
-    )
+    section_keys_extended = list(SECTION_KEYS)
+    for k in ("independent_assessment", "adversarial_reasoning", "trigger_conditions"):
+        if k not in section_keys_extended:
+            section_keys_extended.append(k)
 
     user_prompt = (
         f"Market Context report: {context.city_display} on {context.date_et}. Return JSON only.\n\n"
-        "IMPORTANT: Before writing your analysis, USE YOUR TOOLS:\n"
-        f"  1. Call fetch_nws_discussion(city_slug='{context.city_slug}') for synoptic analysis\n"
-        f"  2. Call search_academic_climatology with a query relevant to today's weather pattern\n"
-        f"  3. Call fetch_nbm_forecast(city_slug='{context.city_slug}') for the latest NBM hourly curve\n"
-        f"  4. Call fetch_hrrr_forecast(city_slug='{context.city_slug}') for the latest HRRR curve\n"
-        "These tool results should inform every section of your analysis.\n\n"
+        "BEFORE WRITING — USE YOUR TOOLS:\n"
+        f"  1. fetch_nws_discussion(city_slug='{context.city_slug}') for synoptic analysis\n"
+        f"  2. search_academic_climatology with a query relevant to today's regime\n"
+        f"  3. fetch_nbm_forecast(city_slug='{context.city_slug}') for the NBM hourly curve\n"
+        f"  4. fetch_hrrr_forecast(city_slug='{context.city_slug}') for the HRRR hourly curve\n"
+        "Tool results should inform every section.\n\n"
         "STRUCTURE: `sections` must contain exactly these keys: "
-        + ", ".join(section_keys_extended)
-        + "\n"
-        "Each value: a single markdown prose string (2-4 dense sentences). No nested JSON objects or lists.\n\n"
+        + ", ".join(section_keys_extended) + "\n"
+        "Each value: a single markdown prose string (3-5 dense sentences). No nested JSON.\n\n"
         "SECTION REQUIREMENTS:\n\n"
-        "1. current_observations -- State current_temp_f, observed_high_f, resolution_high_f. "
-        "Report dewpoint_spread_f and its implication for remaining heating potential. "
-        "Cite temp_change_1h_f, warming_acceleration_f_per_hr_delta, and cloud_trend to characterize the "
-        "temperature trajectory (accelerating, decelerating, or stalling). Flag if metar_age_s > 1200.\n\n"
-        "2. short_range_model_landscape -- Report mu_f +/- sigma_f as distribution center/width. "
-        "State forecast_spread_f across sources. "
-        "Compare hrrr_high_f vs nbm_high_f; diagnose >1F disagreements using known model biases "
-        "AND the NWS discussion (from your tool call). "
-        "Apply calibration_biases_f to each source to produce bias-adjusted forecasts. "
-        "Name best_recent_source and its MAE from recent_error_summary. Note missing_external_models. "
-        "Reference the HRRR and NBM hourly curves from your tool calls to identify peak timing.\n\n"
-        "3. historical_climatology_perspective -- Report avg_high_7d_f, avg_high_prev_7d_f, trend_delta_f. "
-        "Compare projected_high_f to the 7-day realized average. "
-        "If last_settled_errors_f exist, state which source was most accurate yesterday. "
-        "Quantify calibration_biases_f for NWS, WU daily, WU hourly. "
-        "Reference academic climatology papers (from your tool call) for relevant phenomena "
-        "(cold air damming, urban heat island, lake breeze, transition-season fat tails, etc.).\n\n"
-        "4. market_pricing_analysis -- State model_consensus_bucket vs market_consensus_bucket. "
-        "If they diverge, explain true_edge on the selected bucket. Report consensus_spread_pts. "
-        "Identify top overpriced_buckets and underpriced_buckets by true_edge magnitude. "
-        "State selected bucket calibrated_prob vs market_prob.\n\n"
-        "5. diagnostic_reasoning -- Build a causal chain using BOTH DB context AND tool results: "
+        "1. current_observations -- current_temp_f, observed_high_f, resolution_high_f. Report "
+        "dewpoint_spread_f and its implication for remaining heating potential. Cite "
+        "temp_change_1h_f, warming_acceleration_f_per_hr_delta, cloud_trend. Characterize the "
+        "temperature trajectory: accelerating / decelerating / stalling. Flag metar_age_s > 1200.\n\n"
+        "2. short_range_model_landscape -- Walk through `short_range_models.ensemble_sources` by "
+        "name. For each available source, cite the high_f, age_hours, lead_hours, and bias-adjusted "
+        "value (= high_f − bias_30d_f). Identify panel_disagreement.outliers_high and "
+        "outliers_low BY NAME. Diagnose >2°F disagreements using the encyclopedia + the NWS "
+        "discussion (e.g. 'HRRR is 2.5°F above the panel; HRRR has a known summer-afternoon warm "
+        "bias and the AFD mentions weakening synoptic forcing — discount HRRR'). Note "
+        "panel_disagreement.missing_sources as info gaps.\n\n"
+        "3. calibration_landscape -- This is a NEW required section. Report "
+        "historical_context.calibration_mae_30d_f for each source. State best_recent_source and "
+        "worst_recent_source. Compare each forecast's bias_30d_f to its own MAE — sources with "
+        "|bias|/MAE > 0.5 are systematically biased and need correction, not just averaging. "
+        "Identify which source's forecast you trust MOST today given freshness × MAE × regime. "
+        "Reference the bma_shadow.between_share if available — high values (>0.5) mean the panel "
+        "is multimodal and the legacy single-Gaussian summary may understate tail risk.\n\n"
+        "4. historical_climatology_perspective -- Report avg_high_7d_f, avg_high_prev_7d_f, "
+        "trend_delta_f. Compare projected_high_f to the 7-day realized average. If "
+        "last_settled_errors_f exist, state which source nailed yesterday and which missed. "
+        "Reference academic papers from your search_academic_climatology call by (author, year, "
+        "journal) with a SPECIFIC quantitative finding relevant to today's regime — e.g. cold air "
+        "damming, urban heat island, lake breeze, transition-season fat tails.\n\n"
+        "5. market_pricing_analysis -- model_consensus_bucket vs market_consensus_bucket. If they "
+        "diverge, explain true_edge on the selected bucket. Report consensus_spread_pts. Top "
+        "overpriced_buckets and underpriced_buckets by true_edge magnitude. State selected bucket "
+        "calibrated_prob vs market_prob.\n\n"
+        "6. diagnostic_reasoning -- Build a causal chain using BOTH DB context AND tool results: "
         "(a) peak_already_passed? If yes, anchor on remaining_rise_f and projected_high_f. "
         "(b) kalman_trend_per_hr + regression_r2: is the intraday trend reliable? "
-        "(c) pressure_tendency_inhg_3h + wind_shift_deg_3h: synoptic shift? Reference NWS discussion. "
+        "(c) pressure_tendency_inhg_3h + wind_shift_deg_3h: synoptic shift? Reference NWS AFD. "
         "(d) cloud_trend + resolution_mismatch_f: observational red flags? "
-        "(e) What does the NWS forecaster say about confidence and potential pitfalls? "
+        "(e) What does the NWS forecaster say about confidence and pitfalls? "
         "Synthesize a single verdict: projected high robust or vulnerable, and why.\n\n"
-        "6. final_high_stakes_selection -- Restate the pre-computed bucket label and confidence_pct. "
-        "Decompose confidence via confidence_components (top 2 boosters, top 2 penalties by magnitude). "
-        "State flip_signals verbatim. Declare peak_time and life_or_death_call.\n\n"
-        "7. independent_assessment -- YOUR OWN expert opinion based on tool results. "
-        "State your independent projected high temperature and which bucket you believe is most likely. "
-        "If this AGREES with the pre-computed selection, say so and explain the converging evidence. "
-        "If this DISAGREES, explicitly flag it: state your preferred bucket, your projected high, "
-        "and the key evidence (NWS discussion phrase, NBM peak, HRRR curve shape, academic heuristic) "
-        "that justifies divergence. This section is the most valuable for trading decisions.\n\n"
+        "7. final_high_stakes_selection -- Restate the pre-computed bucket label + confidence_pct. "
+        "Decompose confidence via confidence_components (top 2 boosters, top 2 penalties by "
+        "magnitude). State flip_signals verbatim. Declare peak_time and life_or_death_call.\n\n"
+        "8. adversarial_reasoning -- This is a NEW required section. WHY MIGHT THIS TRADE LOSE? "
+        "Generate the strongest counter-case: which 2-3 things, if they happen, would make the "
+        "precomputed bucket wrong? Be specific (e.g. 'cumulus build by 14:00 caps heating 2°F "
+        "below NBM peak'). What's the historical analog where a setup like today went the OTHER "
+        "way? Don't be polite — your job here is to find the case against the trade.\n\n"
+        "9. trigger_conditions -- This is a NEW required section. List 2-4 SPECIFIC OBSERVABLE "
+        "events between now and resolution that would invalidate or confirm the call. Format: "
+        "'IF <observation> BY <time>, THEN <action>'. Examples: 'IF 14:00 EDT METAR < 73°F, "
+        "the warm-bucket call is wrong — exit'. 'IF wind shifts north > 15° before peak, "
+        "discount HRRR'. Make the LLM commit to falsifiable predictions.\n\n"
+        "10. independent_assessment -- YOUR OWN expert opinion based on tool results + the "
+        "encyclopedia + calibration MAEs. State your independent projected high and which bucket "
+        "you believe is most likely. If this AGREES with the precomputed selection, say so and "
+        "explain converging evidence. If it DISAGREES, explicitly flag: your preferred bucket, "
+        "your projected high, and the key evidence (NWS AFD phrase, specific source values, "
+        "calibration drift, academic heuristic) that justifies divergence. THIS SECTION DRIVES "
+        "TRADING DECISIONS — its value comes from disagreement when warranted, not from "
+        "rubber-stamping the precomputed call.\n\n"
         "CONSISTENCY RULES:\n"
-        "- Probability figures must match context to 1 decimal place. Do not alter calibrated_prob, market_prob, or true_edge.\n"
-        "- final_selection fields bucket_id, bucket_idx, label, confidence_pct: echo EXACTLY as provided.\n"
-        "- In independent_assessment, clearly separate your opinion from the algorithmic baseline.\n\n"
+        "- Probability figures must match context to 1 decimal place. Do NOT alter "
+        "calibrated_prob, market_prob, or true_edge.\n"
+        "- final_selection fields bucket_id, bucket_idx, label, confidence_pct: echo EXACTLY.\n"
+        "- In independent_assessment + adversarial_reasoning, clearly separate your opinion from "
+        "the algorithmic baseline.\n"
+        "- Reference each forecast source by NAME at least once across the report.\n\n"
         f"AVAILABILITY: {availability_note}\n\n"
         "Pre-computed baseline selection (echo exactly in final_selection):\n"
         f"{json.dumps(context.final_selection.model_dump(), indent=2)}\n\n"
-        "Structured backend context:\n"
+        "Structured backend context (includes ensemble_sources with per-model run times, MAE, "
+        "bias, weights; calibration_mae_30d_f; bma_shadow; panel_disagreement):\n"
         f"{json.dumps(context.model_dump(), indent=2)}"
     )
     return system_prompt, user_prompt
@@ -577,6 +781,194 @@ def _validate_authoritative_selection(
         raise MarketContextLLMError("LLM changed authoritative confidence_pct")
 
 
+def _settlement_at_utc_for(date_et: str, city_tz: str) -> Optional[datetime]:
+    """Compute the local-day end-of-settlement timestamp in UTC.
+
+    Polymarket temperature events resolve at 23:59:59 local time on the
+    market's date. We use this for the per-source `lead_hours` calc
+    (time from model_run_at to event end).
+    """
+    try:
+        local_eod = datetime.strptime(date_et, "%Y-%m-%d").replace(
+            hour=23, minute=59, second=59, tzinfo=ZoneInfo(city_tz),
+        )
+        return local_eod.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _worst_recent_source(error_summary: dict) -> Optional[str]:
+    """Highest-MAE source in the last 30 days. Counterpart to
+    `_best_recent_source` so the LLM can frame trustworthiness explicitly:
+    'HRRR has been the most accurate this month; WU has been the worst.'
+    """
+    candidates: list[tuple[str, float]] = []
+    for src in _ENSEMBLE_SOURCES:
+        item = error_summary.get(src) or {}
+        mae = item.get("mae_f")
+        if mae is not None and (item.get("samples") or 0) >= 5:
+            candidates.append((src, float(mae)))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda x: x[1])[0]
+
+
+def _build_short_range_models(
+    *,
+    model,
+    model_inputs: dict,
+    error_summary: dict,
+    sources_legacy: dict,
+    source_forecasts: dict,
+    city_unit: str,
+    settlement_at_utc: Optional[datetime],
+    now_utc: datetime,
+) -> dict:
+    """Build the rich short_range_models payload that the LLM reasons over.
+
+    Centralizes:
+      - The legacy `sources` summary (kept for back-compat with
+        deterministic _select_bucket).
+      - Per-source dict (high, run time, age, lead, MAE, bias, weight,
+        encyclopedia metadata) for the 10-source ensemble.
+      - Mixture σ/μ from the legacy single-Gaussian path.
+      - BMA shadow predictive output if compute_model surfaced it.
+      - Forecast panel disagreement summary so the LLM can call out
+        specific outliers.
+    """
+    # Live per-source weights from compute_model's ensemble_breakdown.
+    ensemble_breakdown = model_inputs.get("ensemble_breakdown") or {}
+    weight_factors = ensemble_breakdown.get("weight_factors") or {}
+
+    per_source = _build_per_source_summary(
+        city_unit=city_unit,
+        source_forecasts=source_forecasts,
+        settlement_at_utc=settlement_at_utc,
+        error_summary_30d=error_summary,
+        weight_factors=weight_factors,
+        now_utc=now_utc,
+    )
+
+    # Panel disagreement: max-min spread + outlier identification. Lets
+    # the LLM call out specific sources by name without re-deriving.
+    highs = [
+        (src, entry["high_f"])
+        for src, entry in per_source.items()
+        if entry.get("high_f") is not None
+    ]
+    spread_f: Optional[float] = None
+    outliers_high: list[str] = []
+    outliers_low: list[str] = []
+    if len(highs) >= 2:
+        vals = [v for _, v in highs]
+        mn, mx = min(vals), max(vals)
+        spread_f = round(mx - mn, 2)
+        # Calls out sources that are >1°F from the panel mean as
+        # outliers — these are what the LLM should diagnose first.
+        mean_high = sum(vals) / len(vals)
+        for src, v in highs:
+            if v - mean_high > 1.0:
+                outliers_high.append(src)
+            elif mean_high - v > 1.0:
+                outliers_low.append(src)
+
+    return {
+        # Legacy fields kept for back-compat with deterministic engine
+        # and any older prompt path.
+        "stored_sources": sources_legacy,
+        "forecast_spread_f": _round_float(model_inputs.get("spread")),
+        "mu_f": _round_float(model.mu),
+        "sigma_f": _round_float(model.sigma),
+        "projected_high_f": _round_float(model_inputs.get("projected_high")),
+        "prob_new_high": _round_float(model_inputs.get("prob_new_high"), 4),
+        "recent_error_summary": error_summary,
+        "best_recent_source": _best_recent_source(error_summary),
+        "worst_recent_source": _worst_recent_source(error_summary),
+        # NEW: full per-source ensemble view with metadata.
+        "ensemble_sources": per_source,
+        "panel_disagreement": {
+            "spread_f": spread_f,
+            "n_active_sources": len(highs),
+            "outliers_high": outliers_high,
+            "outliers_low": outliers_low,
+            # Sources currently MISSING from the panel today (no forecast
+            # row) — operator + LLM should call these out as info gaps.
+            "missing_sources": [
+                src for src, entry in per_source.items()
+                if entry.get("high_f") is None
+            ],
+        },
+        # BMA shadow predictive (M1 Phase 1) — gives LLM the mixture
+        # variance share so it can reason about whether the panel is
+        # multimodal (between-source variance dominates).
+        "bma_shadow": model_inputs.get("bma_shadow"),
+    }
+
+
+def _build_per_source_summary(
+    *,
+    city_unit: str,
+    source_forecasts: dict,
+    settlement_at_utc: Optional[datetime],
+    error_summary_30d: dict,
+    weight_factors: dict,
+    now_utc: datetime,
+) -> dict[str, dict]:
+    """Build the rich per-source dict the LLM reasons over.
+
+    Each source entry includes:
+      - high_f: forecast value (None when source missing today)
+      - model_run_at: ISO timestamp of init time
+      - age_hours: time since init
+      - lead_hours: time from init to event settlement
+      - mae_30d_f: rolling 30-day MAE from settled events
+      - bias_30d_f: rolling 30-day bias (forecast minus realized)
+      - effective_weight: live ensemble weight from compute_model
+      - meta: encyclopedia entry (full_name, type, pros, cons, etc.)
+
+    Sources missing forecast data still appear with `high_f=None` so the
+    LLM can comment on absences (e.g. HRRR didn't run today → discount
+    that signal).
+    """
+    out: dict[str, dict] = {}
+    for src in _ENSEMBLE_SOURCES:
+        fc = source_forecasts.get(src)
+        meta = MODEL_ENCYCLOPEDIA.get(src, {})
+        entry: dict = {
+            "high_f": _round_float(fc.high_f) if fc and fc.high_f is not None else None,
+            "model_run_at": fc.model_run_at.isoformat() if fc and getattr(fc, "model_run_at", None) else None,
+            "fetched_at": fc.fetched_at.isoformat() if fc and getattr(fc, "fetched_at", None) else None,
+            "age_hours": None,
+            "lead_hours": None,
+            "mae_30d_f": None,
+            "bias_30d_f": None,
+            "effective_weight": None,
+            "meta": meta,
+        }
+        if fc and getattr(fc, "model_run_at", None):
+            mr = fc.model_run_at
+            if mr.tzinfo is None:
+                mr = mr.replace(tzinfo=timezone.utc)
+            entry["age_hours"] = round((now_utc - mr).total_seconds() / 3600.0, 2)
+            if settlement_at_utc:
+                entry["lead_hours"] = round(
+                    (settlement_at_utc - mr).total_seconds() / 3600.0, 2,
+                )
+        # Calibration stats from the rolling settled-event window.
+        err = error_summary_30d.get(src) or {}
+        entry["mae_30d_f"] = err.get("mae_f")
+        entry["bias_30d_f"] = err.get("bias_f")
+        entry["n_samples"] = err.get("samples")
+        # Live ensemble weight from compute_model's weight_factors block
+        # (signal_engine writes this into model.inputs.ensemble_breakdown).
+        wf = (weight_factors or {}).get(src) or {}
+        entry["effective_weight"] = wf.get("effective")
+        entry["lead_skill_factor"] = wf.get("lead_factor")
+        entry["freshness_factor"] = wf.get("freshness_factor")
+        out[src] = entry
+    return out
+
+
 async def _compute_recent_error_summary(
     sess,
     *,
@@ -587,7 +979,12 @@ async def _compute_recent_error_summary(
 ) -> tuple[dict[str, Any], Optional[dict[str, Any]]]:
     city_tz = getattr(city, "tz", "America/New_York")
     summary: dict[str, Any] = {}
-    errors_by_source: dict[str, list[float]] = {"nws": [], "wu_hourly": []}
+    # Track signed errors (forecast − realized) per source so we can
+    # report both MAE (mean of |err|) and bias (mean of err) in one pass.
+    # Expanded from {nws, wu_hourly} to the full ensemble — the LLM
+    # needs the same 30-day calibration view for IFS/AIFS/AIWP models
+    # to make trustworthy weighting calls.
+    errors_by_source: dict[str, list[float]] = {s: [] for s in _ENSEMBLE_SOURCES}
     last_settled: Optional[dict[str, Any]] = None
 
     for event in recent_events:
@@ -603,11 +1000,11 @@ async def _compute_recent_error_summary(
             continue
 
         date_errors: dict[str, float] = {}
-        for source in ("nws", "wu_hourly"):
+        for source in _ENSEMBLE_SOURCES:
             fc = await get_latest_successful_forecast(sess, city.id, source, event.date_et)
             if fc and fc.high_f is not None:
                 err = round(fc.high_f - realized_high, 1)
-                errors_by_source[source].append(abs(err))
+                errors_by_source[source].append(err)
                 date_errors[source] = err
 
         if last_settled is None:
@@ -617,15 +1014,28 @@ async def _compute_recent_error_summary(
                 "errors": date_errors,
             }
 
-        if sum(len(v) for v in errors_by_source.values()) >= 6:
+        # Bound walk so we don't scan unbounded history. ~30 settled days
+        # × 8-source coverage ≈ 240 points is plenty for 30d MAE.
+        if sum(len(v) for v in errors_by_source.values()) >= 60:
             break
 
-    for source, values in errors_by_source.items():
+    for source, signed_errors in errors_by_source.items():
+        if not signed_errors:
+            summary[source] = {
+                "mae_f": None, "bias_f": None, "samples": 0,
+            }
+            continue
+        n = len(signed_errors)
+        mae = sum(abs(e) for e in signed_errors) / n
+        bias = sum(signed_errors) / n
         summary[source] = {
-            "avg_abs_error_f": round(sum(values) / len(values), 2) if values else None,
-            "samples": len(values),
+            "mae_f": round(mae, 2),
+            "bias_f": round(bias, 2),
+            "samples": n,
+            # Backward-compat alias; old callers still read this key.
+            "avg_abs_error_f": round(mae, 2),
         }
-    summary["window"] = "last 48h settled sample"
+    summary["window"] = "rolling 30-day settled sample"
     return summary, last_settled
 
 

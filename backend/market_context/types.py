@@ -11,17 +11,37 @@ from pydantic import BaseModel, Field, field_validator
 SECTION_ORDER: list[tuple[str, str]] = [
     ("current_observations", "1. Current Observations:"),
     ("short_range_model_landscape", "2. Short-Range Model Landscape:"),
-    ("historical_climatology_perspective", "3. Historical & Climatology Perspective:"),
-    ("market_pricing_analysis", "4. Market Pricing Analysis:"),
-    ("diagnostic_reasoning", "5. Diagnostic Reasoning:"),
-    ("final_high_stakes_selection", "6. Final, High-Stakes Selection:"),
-    ("independent_assessment", "7. Independent Assessment:"),
+    # NEW: per-source MAE / bias / freshness reasoning. The LLM weights
+    # each source by trustworthiness (drift × freshness × regime) before
+    # synthesizing the call.
+    ("calibration_landscape", "3. Calibration Landscape:"),
+    ("historical_climatology_perspective", "4. Historical & Climatology Perspective:"),
+    ("market_pricing_analysis", "5. Market Pricing Analysis:"),
+    ("diagnostic_reasoning", "6. Diagnostic Reasoning:"),
+    ("final_high_stakes_selection", "7. Final, High-Stakes Selection:"),
+    # NEW: forces explicit counter-case / what-could-make-this-wrong
+    # reasoning. Without this, the LLM defaults to rubber-stamping.
+    ("adversarial_reasoning", "8. Adversarial Reasoning:"),
+    # NEW: falsifiable observable triggers between now and resolution
+    # ('IF X BY Y, THEN Z'). Operationalizes the LLM's analysis.
+    ("trigger_conditions", "9. Trigger Conditions:"),
+    ("independent_assessment", "10. Independent Assessment:"),
 ]
 SECTION_KEYS = [key for key, _ in SECTION_ORDER]
 SECTION_LABELS = {key: label for key, label in SECTION_ORDER}
 
-# Sections that are allowed but not required (for backward compat with older snapshots)
-OPTIONAL_SECTION_KEYS = {"independent_assessment"}
+# Sections that are allowed but not required (for backward compat with
+# older snapshots written before these sections existed). The new
+# sections (calibration_landscape, adversarial_reasoning,
+# trigger_conditions) are also OPTIONAL initially so historical
+# snapshots remain renderable; once we've cycled through one full
+# refresh per city, we can promote them to required.
+OPTIONAL_SECTION_KEYS = {
+    "independent_assessment",
+    "calibration_landscape",
+    "adversarial_reasoning",
+    "trigger_conditions",
+}
 
 
 class MarketContextSelection(BaseModel):
