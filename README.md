@@ -1,6 +1,6 @@
 # WeatherQuant
 
-Quantitative trading system for daily-high-temperature prediction markets on Polymarket. Fuses 8 numerical and AI weather models, a per-minute METAR nowcast, and a Bayesian-mixture predictive distribution into bucket-level edge signals; sizes positions via Kelly; executes through Polymarket CLOB v2 with a tiered exit cascade.
+Quantitative trading system for daily-high-temperature prediction markets on Polymarket. Fuses **10** numerical and AI weather models, a per-minute METAR nowcast, and a Bayesian-mixture predictive distribution (with offline + online EM weight updates) into bucket-level edge signals; sizes positions via Kelly; executes through Polymarket CLOB v2 with a tiered exit cascade. Independent LLM **Market Context Agent** runs alongside with a 10-source encyclopedia + adversarial reasoning. Real-time **alpha-vs-market** dashboard at `/calibration/edge` measures Brier(model) − Brier(market) for promotion decisions.
 
 ---
 
@@ -13,10 +13,10 @@ Quantitative trading system for daily-high-temperature prediction markets on Pol
 │  NWS, WU                 │    │  Per-source bias correction (EWMA)     │
 │  HRRR, NBM (Open-Meteo)  │ ─▶ │  Lead-time skill weighting             │
 │  IFS, AIFS (Herbie)      │    │  Freshness decay on model_run_at       │
-│  GraphCast (Open-Meteo)  │    │  Weighted-mean μ + ensemble-σ          │
-│  Pangu, FCN-v2 (NOAA AIWP│    │  Kalman+regression nowcast (METAR)     │
-│  S3)                     │    │  Diurnal curve fit, ML residual rise   │
-│  METAR, MADIS, TGFTP     │    │  BMA shadow predictive (Phase 1.5)     │
+│  GraphCast (Open-Meteo)  │    │  Weighted-mean μ + ensemble-σ (legacy) │
+│  Pangu, FCN-v2, Aurora   │    │  BMA mixture predictive — Phase 1/2/3  │
+│  (NOAA AIWP S3)          │    │  + offline EM + online EM on settle    │
+│  METAR, MADIS, TGFTP     │    │  Kalman+regression nowcast (METAR)     │
 └──────────────────────────┘    └────────────────────────────────────────┘
                                                  │
                                                  ▼
@@ -24,12 +24,12 @@ Quantitative trading system for daily-high-temperature prediction markets on Pol
 │       Execution          │    │                  UI                    │
 │  ─────────────────────   │    │  ────────────────────────────────────  │
 │  Kelly sizing            │    │  /city/<slug>: legacy + BMA shadow,    │
-│  Quick Flip exits        │ ◀─ │    Buckets & Edges, station predictions│
-│  Ladder scaling          │    │  /backtest: walk-forward harness       │
-│  Emergency cascades      │    │  /redemptions: settled outcomes        │
-│  Night Owl orchestrator  │    │  /admin: audit log, override trades    │
-│  Auto-redeem             │    └────────────────────────────────────────┘
-└──────────────────────────┘
+│  Quick Flip exits        │ ◀─ │    Buckets & Edges, Refresh Skills btn │
+│  Ladder scaling          │    │  /calibration/edge: alpha-vs-market    │
+│  Emergency cascades      │    │  /backtest: walk-forward harness       │
+│  Night Owl orchestrator  │    │  /redemptions: alpha card + outcomes   │
+│  Auto-redeem             │    │  Market Context Agent — 10-source enc. │
+└──────────────────────────┘    └────────────────────────────────────────┘
 ```
 
 Top-level layout:
@@ -50,25 +50,39 @@ Top-level layout:
 
 ## Modeling roadmap (Path 1)
 
-The system's competitive edge is **per-station ensemble post-processing of an 8-model panel for a binary outcome**. We don't try to beat ECMWF at global weather forecasting — we combine their forecasts (and 7 others) optimally for our specific 12 stations and our specific bucket payoff. This is "Path 1" in the project's strategic plan; see `/Users/larry/.claude/plans/here-s-a-rough-draft-ethereal-lark.md` for the full reasoning.
+The system's competitive edge is **per-station ensemble post-processing of a 10-model panel for a binary outcome**. We don't try to beat ECMWF at global weather forecasting — we combine their forecasts (and 9 others) optimally for our specific 12 stations and our specific bucket payoff. This is "Path 1" in the project's strategic plan; see `/Users/larry/.claude/plans/here-s-a-rough-draft-ethereal-lark.md` for the full reasoning.
 
-### Status check
+### Status check (May 2026)
 
 | Stage | What ships | State |
 |---|---|---|
-| Ingestion of 8 models | NWS / WU / HRRR / NBM / IFS / AIFS / GraphCast / Pangu / FCN-v2 | ✓ live |
+| Ingestion of 10 models | NWS / WU / HRRR / NBM / IFS / AIFS / GraphCast / Pangu / FCN-v2 / **Aurora** | ✓ live |
 | Adaptive Kalman | Innovation-covariance-driven Q (Mehra 1972), Joseph-form update | ✓ live |
 | Lead-time σ growth | NOAA-empirical 1.5 + 0.05·L °F added in quadrature | ✓ live |
 | Regime σ inflation | CALM/NORMAL/VOLATILE multiplier ∈ [1.0, 2.0] | ✓ live |
 | Per-regime backtest breakouts | CALM vs VOLATILE Brier/Sharpe split | ✓ live |
 | Manual override (Q8) | `POST /api/trade-override` bypasses gates with audit row | ✓ live |
-| Lead-Time Skill scheduler | `job_refresh_lead_time_skills` populates `SourceLeadTimeSkill` every 6h | ✓ live |
+| Lead-Time Skill scheduler + diagnostic endpoint | `job_refresh_lead_time_skills` (6h) + `POST /api/admin/recompute-lead-time-skills` for on-demand probe | ✓ live |
 | **M1 BMA Phase 1**       | **Mixture predictive computed every minute, persisted in `inputs.bma_shadow`** | **✓ live (shadow)** |
 | **M1 BMA Phase 1.5**     | **Side-by-side BMA vs legacy on city-page UI (Model Forecast box + Buckets column + multimodal chip)** | **✓ live** |
-| M1 BMA Phase 2 | Offline EM weight fitter — replaces legacy weights with BMA-fit `wᵢ` | next (~150 LOC) |
-| M1 BMA Phase 3 | Online-EM updates on settlement (Section 6 Layer 4 of the plan) | queued |
-| M1 BMA promotion | Swap `mu/sigma/probs` to drive trades after ≥14d CRPS comparison | gated on data |
-| Neural EMOS | NN replacement for `build_bma_predictive`, same shadow-mode interface | §10 future |
+| **M1 BMA Phase 2** | **Offline EM weight fitter — `BMAWeights` table populated nightly** | **✓ live** |
+| **M1 BMA Phase 3** | **Online-EM updates on settlement (every newly-resolved event nudges weights with lr=0.05)** | **✓ live** |
+| **Alpha dashboard** | **`/calibration/edge` — Brier(model) − Brier(market), per-city/per-day, plus chip on `/` and card on `/redemptions`** | **✓ live** |
+| **Market Context Agent rewrite** | **10-source encyclopedia, calibration MAE per source, adversarial reasoning + trigger conditions sections** | **✓ live** |
+| **AIWP probe** | **Weekly check of NOAA S3 for new AI weather model prefixes (FCN3 watch). One-line integration when detected.** | **✓ live** |
+| M1 BMA promotion | Swap `mu/sigma/probs` to drive trades after ≥14d CRPS comparison | **gated on data** (need ~14 settled days post-deploy) |
+| **CRPS comparator** | Add CRPS computation alongside Brier in `/calibration/edge` | **next (~150 LOC)** |
+| **M5 — posterior-aware Kelly** | Sample 1000 draws from BMA mixture per bucket, take median Kelly | next (~80 LOC) |
+| **M7 — reliability-driven gate** | Daily-miscalibration kill switch (Bröcker & Smith 2007) | queued — needs 30d data first |
+| **M3 — NIG conjugate σ + bias updates** | Online closed-form Bayesian replaces nightly EWMA | queued (~150 LOC) |
+| **Dynamic exits** | Time-decay, vol-aware sizing, regime-conditional trailing stops, slippage modeling | queued (~150 LOC) |
+| **EMOS as third path** | Linear EMOS predictive (Gneiting 2005) alongside BMA + legacy | queued (~300 LOC) |
+| **MS4 — Optuna nightly hyperparameter search** | Wraps backtester in Optuna; tunes 12 hand-tuned constants | queued (~250 LOC) |
+| **M6 — BOCPD regime change-point detection** | Continuous regime posterior replaces discrete label | queued (~200 LOC) |
+| **Neural EMOS** (Rasp & Lerch 2018) | NN replacement for `build_bma_predictive` | future |
+| **First international city (London/EGLL)** | Foundation phase per international-roadmap design doc | gated on US alpha proving out |
+| **CorrDiff downscaling** | NVIDIA diffusion-based 2km downscaling | future, gated on M1 saturation |
+| **FCN3 self-host** (Modal) | Failed 10-attempt validation in May 2026; AIWP probe watches for NOAA-hosted version | deferred — see plan §20.x |
 
 ### Why BMA matters here
 
