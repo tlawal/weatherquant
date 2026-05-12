@@ -897,7 +897,12 @@
             <td class="text-center py-1 px-1 font-mono {% if skill.bias_f is not none %}{% if skill.bias_f > 0 %}text-red-300{% elif skill.bias_f < 0 %}text-blue-300{% else %}text-gray-400{% endif %}{% endif %}">
               {% if skill.bias_f is not none %}{{ "%+.2f"|format(skill.bias_f) }}°F{% else %}—{% endif %}
             </td>
-            <td class="text-center py-1 px-1" style="color:var(--text-muted)">{{ skill.n_obs }}</td>
+            <td class="text-center py-1 px-1" style="color:var(--text-muted)">
+              {{ skill.n_obs }}
+              {% if skill.n_obs < 30 %}
+                <span class="ml-1 text-[8px] uppercase" style="color:var(--yellow)">prov</span>
+              {% endif %}
+            </td>
           </tr>
           {% endfor %}
         </tbody>
@@ -906,13 +911,13 @@
     {% if lead_time_skills %}
     <p class="mt-2 text-[9px] opacity-50" style="color:var(--text-muted)">
       Computed {{ lead_time_skills[0].computed_at[:10] if lead_time_skills[0].computed_at else "unknown" }}
-      — lower MAE = more accurate; positive bias = overforecasts
+      — lower MAE = more accurate; positive bias = overforecasts; prov = display-only until n≥30
     </p>
     {% endif %}
   {% else %}
     <p class="text-[11px] opacity-70 mb-2" style="color:var(--text-muted)">
       No lead-time skill data yet. Either the 6h scheduler hasn't run, or no
-      (source, lead-bucket) combo has the required ≥5 obs. Click
+      past event has both a settlement high and checkpoint forecast. Click
       <strong>Refresh Skills</strong> to recompute now and see why.
     </p>
     <div class="flex items-center gap-2 flex-wrap" id="lts-refresh-{{ city.city_slug }}">
@@ -2632,7 +2637,7 @@ async function refreshLeadTimeSkills(city_slug) {
     const city = (data.per_city || {})[city_slug] || {};
     const written = city.source_bucket_combos_written || 0;
     if (status) {
-      status.textContent = `wrote ${written} combos · ${city.events_resolved || 0} resolved events · ${city.forecast_obs_with_model_run_at || 0} forecasts with model_run_at`;
+      status.textContent = `wrote ${written} combos · ${city.events_with_settlement || 0} settled events · ${city.forecast_obs_scored || 0} checkpoint forecasts`;
     }
     if (detail) {
       detail.classList.remove('hidden');

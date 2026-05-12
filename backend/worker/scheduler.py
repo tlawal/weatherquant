@@ -299,7 +299,7 @@ async def job_refresh_lead_time_skills():
             result = await compute_source_lead_time_skills(city.id, days_back=90)
             total_combos += len(result)
         except Exception as e:
-            log.warning("refresh_lead_time_skills: city=%s failed: %s", city.slug, e)
+            log.warning("refresh_lead_time_skills: city=%s failed: %s", city.city_slug, e)
     log.info(
         "refresh_lead_time_skills: refreshed %d combos across %d cities",
         total_combos, len(cities),
@@ -368,12 +368,12 @@ async def job_fit_bma_weights():
                     total_fits += 1
                     log.debug(
                         "bma_fit: city=%s lead=%dh n_obs=%d converged=%s ll=%.3f rows=%d",
-                        city.slug, lead, fit.n_obs, fit.converged, fit.log_likelihood, written,
+                        city.city_slug, lead, fit.n_obs, fit.converged, fit.log_likelihood, written,
                     )
             except Exception as e:
                 log.warning(
                     "bma_fit: city=%s lead=%dh failed: %s",
-                    city.slug, lead, e,
+                    city.city_slug, lead, e,
                 )
     log.info(
         "bma_fit: completed %d / %d (city × lead) fits",

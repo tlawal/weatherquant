@@ -13,9 +13,11 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select, desc, func
+from sqlalchemy import extract, select, desc, func
 from backend.storage.db import get_session
-from backend.storage.models import ModelSnapshot, Event, ForecastObs, Bucket, MetarObs, City
+from backend.storage.models import (
+    ModelSnapshot, Event, ForecastObs, Bucket, MetarObs, City, StationProfile,
+)
 from backend.modeling.settlement import canonical_bucket_ranges, find_bucket_idx_for_value
 
 log = logging.getLogger(__name__)
@@ -331,6 +333,20 @@ def remap_probability(prob: float, bins: List[ReliabilityBin]) -> float:
 # ─── Lead-Time Skill Analysis ─────────────────────────────────────────────────
 
 _LEAD_TIME_BUCKETS = [72, 48, 36, 24, 18, 12, 6, 3, 1, 0]
+FORECAST_SKILL_SOURCES = frozenset({
+    "nws",
+    "wu_hourly",
+    "open_meteo",
+    "hrrr",
+    "hrrr_15min",
+    "nbm",
+    "ecmwf_ifs",
+    "ecmwf_aifs",
+    "gfs_graphcast",
+    "pangu_weather",
+    "fourcastnet_v2",
+    "aurora",
+})
 
 
 def _bucket_lead_time(hours: float) -> int:
@@ -341,17 +357,233 @@ def _bucket_lead_time(hours: float) -> int:
     return 0
 
 
+def _as_utc(dt: Optional[datetime]) -> Optional[datetime]:
+    if dt is None:
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
+def _event_end_utc(date_et: str, city_tz: str) -> datetime:
+    tz = ZoneInfo(city_tz or "America/New_York")
+    local = datetime.strptime(date_et, "%Y-%m-%d").replace(
+        hour=23, minute=59, second=59, tzinfo=tz,
+    )
+    return local.astimezone(timezone.utc)
+
+
+async def _station_observation_minutes(
+    sess,
+    station_id: Optional[str],
+) -> Optional[list[int]]:
+    if not station_id:
+        return None
+    row = (
+        await sess.execute(
+            select(StationProfile).where(
+                StationProfile.metar_station == station_id.upper(),
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None or not row.observation_minutes:
+        return None
+    try:
+        vals = json.loads(row.observation_minutes)
+    except Exception:
+        return None
+    out = []
+    for v in vals or []:
+        try:
+            out.append(int(v) % 60)
+        except (TypeError, ValueError):
+            continue
+    return out or None
+
+
+async def _station_high_for_date(
+    sess,
+    *,
+    city_id: int,
+    date_et: str,
+    city_tz: str,
+    station_id: Optional[str],
+    valid_minutes: Optional[list[int]] = None,
+    tolerance: int = 1,
+) -> Optional[float]:
+    if not station_id:
+        return None
+    tz = ZoneInfo(city_tz or "America/New_York")
+    start_dt = datetime.strptime(date_et, "%Y-%m-%d").replace(tzinfo=tz)
+    end_dt = start_dt + timedelta(days=1)
+    stmt = select(func.max(MetarObs.temp_f)).where(
+        MetarObs.city_id == city_id,
+        MetarObs.metar_station == station_id.upper(),
+        MetarObs.temp_f.isnot(None),
+        MetarObs.observed_at >= start_dt,
+        MetarObs.observed_at < end_dt,
+    )
+    if valid_minutes:
+        expanded = {
+            (m + offset) % 60
+            for m in valid_minutes
+            for offset in range(-tolerance, tolerance + 1)
+        }
+        stmt = stmt.where(extract("minute", MetarObs.observed_at).in_(list(expanded)))
+    val = (await sess.execute(stmt)).scalar_one_or_none()
+    return float(val) if val is not None else None
+
+
+async def _wu_history_high_for_date(
+    sess,
+    *,
+    city_id: int,
+    date_et: str,
+) -> Optional[float]:
+    row = (
+        await sess.execute(
+            select(ForecastObs)
+            .where(
+                ForecastObs.city_id == city_id,
+                ForecastObs.source == "wu_history",
+                ForecastObs.date_et == date_et,
+                ForecastObs.high_f.isnot(None),
+            )
+            .order_by(desc(ForecastObs.fetched_at), desc(ForecastObs.id))
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    return float(row.high_f) if row and row.high_f is not None else None
+
+
+async def resolve_canonical_settlement_high(
+    sess,
+    *,
+    city: City,
+    event: Event,
+    validate_polymarket_winner: bool = True,
+) -> dict:
+    """Resolve the continuous high used for source MAE/bias scoring.
+
+    This mirrors market settlement as closely as local data allows: prefer the
+    event's explicit resolution station, respect known station observation
+    minutes, and use WU history only when station data is unavailable. When
+    Polymarket's categorical winner exists, use it as a validation check rather
+    than converting bucket ranges into fake continuous temperatures.
+    """
+    city_tz = getattr(city, "tz", "America/New_York") or "America/New_York"
+    station_id = (
+        getattr(event, "resolution_station_id", None)
+        or getattr(city, "metar_station", None)
+    )
+    station_id = station_id.upper() if station_id else None
+    valid_minutes = await _station_observation_minutes(sess, station_id)
+
+    high_f = None
+    source_used = None
+    if valid_minutes:
+        high_f = await _station_high_for_date(
+            sess,
+            city_id=city.id,
+            date_et=event.date_et,
+            city_tz=city_tz,
+            station_id=station_id,
+            valid_minutes=valid_minutes,
+        )
+        source_used = "resolution_metar" if high_f is not None else None
+
+    if high_f is None and not valid_minutes:
+        high_f = await _station_high_for_date(
+            sess,
+            city_id=city.id,
+            date_et=event.date_et,
+            city_tz=city_tz,
+            station_id=station_id,
+        )
+        source_used = "station_metar" if high_f is not None else None
+
+    if high_f is None:
+        high_f = await _wu_history_high_for_date(
+            sess, city_id=city.id, date_et=event.date_et,
+        )
+        source_used = "wu_history" if high_f is not None else None
+
+    out = {
+        "high_f": high_f,
+        "source_used": source_used,
+        "station_id": station_id,
+        "valid_minutes": valid_minutes,
+        "derived_bucket_idx": None,
+        "winner_bucket_idx": event.winning_bucket_idx,
+        "matches_polymarket_winner": None,
+    }
+    if (
+        high_f is not None
+        and validate_polymarket_winner
+        and event.winning_bucket_idx is not None
+    ):
+        buckets = (
+            await sess.execute(
+                select(Bucket)
+                .where(Bucket.event_id == event.id)
+                .order_by(Bucket.bucket_idx)
+            )
+        ).scalars().all()
+        if buckets:
+            ranges = canonical_bucket_ranges([(b.low_f, b.high_f) for b in buckets])
+            derived_idx = find_bucket_idx_for_value(ranges, float(high_f))
+            out["derived_bucket_idx"] = derived_idx
+            out["matches_polymarket_winner"] = (
+                derived_idx == event.winning_bucket_idx
+            )
+    return out
+
+
+def select_latest_forecasts_by_checkpoint(
+    forecasts: list[ForecastObs],
+    checkpoint_utc: datetime,
+) -> dict[str, ForecastObs]:
+    """Pick one available forecast per source at a fixed decision checkpoint."""
+    checkpoint = _as_utc(checkpoint_utc) or checkpoint_utc
+    selected: dict[str, ForecastObs] = {}
+
+    def sort_key(fc: ForecastObs) -> tuple[datetime, datetime, int]:
+        fetched = (
+            _as_utc(getattr(fc, "fetched_at", None))
+            or datetime.min.replace(tzinfo=timezone.utc)
+        )
+        model_run = (
+            _as_utc(getattr(fc, "model_run_at", None))
+            or datetime.min.replace(tzinfo=timezone.utc)
+        )
+        return (fetched, model_run, int(getattr(fc, "id", 0) or 0))
+
+    for fc in forecasts:
+        if fc.high_f is None or fc.source not in FORECAST_SKILL_SOURCES:
+            continue
+        fetched_at = _as_utc(getattr(fc, "fetched_at", None))
+        model_run_at = _as_utc(getattr(fc, "model_run_at", None))
+        if fetched_at is None or fetched_at > checkpoint:
+            continue
+        if model_run_at is not None and model_run_at > checkpoint:
+            continue
+        prev = selected.get(fc.source)
+        if prev is None or sort_key(fc) > sort_key(prev):
+            selected[fc.source] = fc
+    return selected
+
+
 async def compute_source_lead_time_skills(
     city_id: int,
     days_back: int = 90,
-    min_obs_per_bucket: int = 5,
+    min_obs_per_bucket: int = 1,
     return_diagnostics: bool = False,
 ):
     """Compute MAE and bias per forecast source at each lead-time bucket.
 
-    Joins ForecastObs (with model_run_at) to resolved Event settlement highs.
-    Lead time = hours between model_run_at and the end of the event day (23:59:59
-    local time, approximated as midnight ET + timezone offset).
+    Scores fixed decision checkpoints before settlement. For each
+    (date, checkpoint, source), exactly one forecast is scored: the latest row
+    available by that checkpoint. This keeps frequently refreshed sources
+    valuable live without letting refresh cadence inflate historical sample
+    size.
 
     Args:
         return_diagnostics: when True, returns a dict shaped for the admin
@@ -370,21 +602,22 @@ async def compute_source_lead_time_skills(
           `missing_reasons` (per "<source>:<bucket>" key explaining why empty),
           and `skills` (the same map as the non-diagnostic return).
     """
-    from backend.storage.models import SourceLeadTimeSkill
-    from backend.storage.repos import get_daily_high_metar
-
-    today_et = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=days_back)).strftime("%Y-%m-%d")
-
     # Counters for diagnostic-mode return — incremented as we walk the data.
     diag = {
         "events_resolved": 0,
+        "events_past": 0,
         "events_with_settlement": 0,
+        "events_without_settlement": 0,
+        "events_scored": 0,
+        "settlement_mismatches": 0,
         "forecast_obs_with_model_run_at": 0,
+        "forecast_obs_candidates": 0,
+        "forecast_obs_scored": 0,
         "source_bucket_combos_attempted": 0,
         "source_bucket_combos_below_min_n": 0,
         "source_bucket_combos_written": 0,
         "missing_reasons": {},
+        "settlement_mismatch_details": [],
         "skills": {},
     }
 
@@ -399,95 +632,115 @@ async def compute_source_lead_time_skills(
         return skills_map
 
     async with get_session() as sess:
-        # Get resolved events for this city in the lookback window
+        from backend.storage.models import SourceLeadTimeSkill
+
+        city = await sess.get(City, city_id)
+        if city is None:
+            if return_diagnostics:
+                diag["missing_reasons"]["city"] = "not_found"
+            return _wrap({})
+
+        city_tz = getattr(city, "tz", "America/New_York") or "America/New_York"
+        today_local = datetime.now(ZoneInfo(city_tz)).strftime("%Y-%m-%d")
+        cutoff = (
+            datetime.now(ZoneInfo(city_tz)) - timedelta(days=days_back)
+        ).strftime("%Y-%m-%d")
+
+        diag["events_resolved"] = int((await sess.execute(
+            select(func.count(Event.id)).where(
+                Event.city_id == city_id,
+                Event.date_et < today_local,
+                Event.date_et >= cutoff,
+                Event.winning_bucket_idx.isnot(None),
+            )
+        )).scalar_one() or 0)
+
+        # Past events are scoreable even before Gamma/Polymarket has populated
+        # winning_bucket_idx; the continuous target comes from settlement obs.
         event_stmt = (
             select(Event)
             .where(
                 Event.city_id == city_id,
-                Event.date_et < today_et,
+                Event.date_et < today_local,
                 Event.date_et >= cutoff,
-                Event.winning_bucket_idx.isnot(None),
             )
+            .order_by(Event.date_et.asc())
         )
         events = (await sess.execute(event_stmt)).scalars().all()
-        diag["events_resolved"] = len(events)
+        diag["events_past"] = len(events)
 
         if not events:
-            log.info("lead_time_skill: no resolved events for city_id=%s in last %d days", city_id, days_back)
+            log.info("lead_time_skill: no past events for city_id=%s in last %d days", city_id, days_back)
             return _wrap({})
 
-        # Collect forecast obs for these events that have model_run_at
         results: dict = {}
         for event in events:
-            # Settlement high: try MetarObs first, then wu_history
-            obs_high = await get_daily_high_metar(sess, city_id, event.date_et)
+            settlement = await resolve_canonical_settlement_high(
+                sess, city=city, event=event, validate_polymarket_winner=True,
+            )
+            obs_high = settlement.get("high_f")
             if obs_high is None:
-                # Fallback to wu_history
-                wu_stmt = (
-                    select(ForecastObs)
-                    .where(
-                        ForecastObs.city_id == city_id,
-                        ForecastObs.source == "wu_history",
-                        ForecastObs.date_et == event.date_et,
-                        ForecastObs.high_f.isnot(None),
-                    )
-                    .order_by(desc(ForecastObs.fetched_at))
-                )
-                wu_rec = (await sess.execute(wu_stmt)).scalars().first()
-                obs_high = wu_rec.high_f if wu_rec else None
-
-            if obs_high is None:
+                diag["events_without_settlement"] += 1
                 continue
             diag["events_with_settlement"] += 1
+            if settlement.get("matches_polymarket_winner") is False:
+                diag["settlement_mismatches"] += 1
+                if return_diagnostics:
+                    diag["settlement_mismatch_details"].append({
+                        "date_et": event.date_et,
+                        "high_f": round(float(obs_high), 2),
+                        "derived_bucket_idx": settlement.get("derived_bucket_idx"),
+                        "winner_bucket_idx": settlement.get("winner_bucket_idx"),
+                        "source_used": settlement.get("source_used"),
+                    })
+                continue
 
-            # Get all forecast obs with model_run_at for this event
             fc_stmt = (
                 select(ForecastObs)
                 .where(
                     ForecastObs.city_id == city_id,
                     ForecastObs.date_et == event.date_et,
-                    ForecastObs.model_run_at.isnot(None),
+                    ForecastObs.source.in_(FORECAST_SKILL_SOURCES),
                     ForecastObs.high_f.isnot(None),
                 )
             )
             forecasts = (await sess.execute(fc_stmt)).scalars().all()
-            diag["forecast_obs_with_model_run_at"] += len(forecasts)
+            diag["forecast_obs_candidates"] += len(forecasts)
+            diag["forecast_obs_with_model_run_at"] += sum(
+                1 for fc in forecasts if fc.model_run_at is not None
+            )
+            if not forecasts:
+                continue
 
-            for fc in forecasts:
-                # Approximate event end time as midnight ET of date_et
-                event_end = datetime.strptime(event.date_et, "%Y-%m-%d").replace(
-                    hour=23, minute=59, second=59, tzinfo=ZoneInfo("America/New_York")
+            event_end_utc = _event_end_utc(event.date_et, city_tz)
+            event_scored = False
+            for bucket in _LEAD_TIME_BUCKETS:
+                checkpoint_utc = event_end_utc - timedelta(hours=bucket)
+                selected = select_latest_forecasts_by_checkpoint(
+                    list(forecasts), checkpoint_utc,
                 )
-                # Ensure model_run_at has timezone info
-                model_run = fc.model_run_at
-                if model_run.tzinfo is None:
-                    model_run = model_run.replace(tzinfo=timezone.utc)
-
-                lead_hours = (event_end - model_run).total_seconds() / 3600
-                if lead_hours < -1:  # Sanity check: model run shouldn't be after event end
-                    continue
-                lead_hours = max(0, lead_hours)
-
-                bucket = _bucket_lead_time(lead_hours)
-                key = (fc.source, bucket)
-
-                if key not in results:
-                    results[key] = {"errors": [], "n": 0}
-
-                error = fc.high_f - obs_high
-                results[key]["errors"].append(error)
-                results[key]["n"] += 1
+                for source, fc in selected.items():
+                    key = (source, bucket)
+                    if key not in results:
+                        results[key] = {"errors": [], "dates": set()}
+                    results[key]["errors"].append(float(fc.high_f) - float(obs_high))
+                    results[key]["dates"].add(event.date_et)
+                    diag["forecast_obs_scored"] += 1
+                    event_scored = True
+            if event_scored:
+                diag["events_scored"] += 1
 
         diag["source_bucket_combos_attempted"] = len(results)
 
         # Compute MAE and bias per bucket
         skills = {}
         for (source, bucket), data in results.items():
-            if data["n"] < min_obs_per_bucket:
+            n_obs = len(data["dates"])
+            if n_obs < min_obs_per_bucket:
                 diag["source_bucket_combos_below_min_n"] += 1
                 if return_diagnostics:
                     diag["missing_reasons"][f"{source}:{bucket}h"] = (
-                        f"n={data['n']}<{min_obs_per_bucket}"
+                        f"n={n_obs}<{min_obs_per_bucket}"
                     )
                 continue
             errors = data["errors"]
@@ -498,7 +751,7 @@ async def compute_source_lead_time_skills(
                 "lead_time_bucket_hours": bucket,
                 "mae_f": round(mae, 2),
                 "bias_f": round(bias, 2),
-                "n_obs": data["n"],
+                "n_obs": n_obs,
             }
 
             # Upsert to database
@@ -514,7 +767,7 @@ async def compute_source_lead_time_skills(
             if existing:
                 existing.mae_f = round(mae, 2)
                 existing.bias_f = round(bias, 2)
-                existing.n_obs = data["n"]
+                existing.n_obs = n_obs
                 existing.computed_at = datetime.now(timezone.utc)
             else:
                 skill = SourceLeadTimeSkill(
@@ -523,7 +776,7 @@ async def compute_source_lead_time_skills(
                     lead_time_bucket_hours=bucket,
                     mae_f=round(mae, 2),
                     bias_f=round(bias, 2),
-                    n_obs=data["n"],
+                    n_obs=n_obs,
                 )
                 sess.add(skill)
 
@@ -532,8 +785,7 @@ async def compute_source_lead_time_skills(
         await sess.commit()
 
         log.info(
-            "lead_time_skill: city_id=%s computed %d source/bucket combos from %d events",
+            "lead_time_skill: city_id=%s computed %d source/bucket combos from %d past events",
             city_id, len(skills), len(events),
         )
         return _wrap(skills)
-

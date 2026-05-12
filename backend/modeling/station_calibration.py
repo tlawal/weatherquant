@@ -20,6 +20,7 @@ from sqlalchemy import select, func, distinct
 from backend.storage.db import get_session
 from backend.storage.models import (
     City, Event, ForecastObs, MetarObs, ModelSnapshot, Order, Bucket, Position,
+    SourceLeadTimeSkill,
 )
 
 log = logging.getLogger(__name__)
@@ -132,6 +133,34 @@ async def _get_model_snapshot_highs(
     return result
 
 
+async def _get_lead_normalized_source_mae(
+    city_id: int,
+    *,
+    lead_bucket_hours: int = 24,
+) -> dict[str, float]:
+    """Return source MAE at a fixed lead checkpoint when available.
+
+    This avoids presenting frequently refreshed sources as "best" just because
+    station calibration looked at their latest same-day forecast. Rows may be
+    provisional; the Lead-Time Skill table shows each source's n_obs.
+    """
+    async with get_session() as sess:
+        rows = (
+            await sess.execute(
+                select(SourceLeadTimeSkill).where(
+                    SourceLeadTimeSkill.city_id == city_id,
+                    SourceLeadTimeSkill.lead_time_bucket_hours == lead_bucket_hours,
+                    SourceLeadTimeSkill.mae_f.isnot(None),
+                )
+            )
+        ).scalars().all()
+    return {
+        r.source: float(r.mae_f)
+        for r in rows
+        if r.mae_f is not None and r.mae_f > 0
+    }
+
+
 async def _get_pct_days_traded(
     city_id: int,
     dates: list[str],
@@ -214,6 +243,7 @@ async def compute_station_calibration(
         # AI-NWP foundation models (experimental — flagged in
         # EXPERIMENTAL_FORECAST_SOURCES in backend/ingestion/forecasts.py)
         "ecmwf_aifs", "gfs_graphcast", "pangu_weather", "fourcastnet_v2",
+        "aurora",
     ]
     fc_highs = await _get_forecast_highs(city.id, dates, sources)
 
@@ -263,15 +293,23 @@ async def compute_station_calibration(
         if errs:
             source_mae[src] = round(sum(abs(e) for e in errs) / len(errs), 2)
 
-    best_source = min(source_mae, key=source_mae.get, default=None) if source_mae else None
-    best_source_mae = source_mae.get(best_source) if best_source else None
+    lead_normalized_mae = await _get_lead_normalized_source_mae(
+        city.id, lead_bucket_hours=24,
+    )
+    comparison_mae = lead_normalized_mae or source_mae
+
+    best_source = (
+        min(comparison_mae, key=comparison_mae.get, default=None)
+        if comparison_mae else None
+    )
+    best_source_mae = comparison_mae.get(best_source) if best_source else None
 
     # Per-model MAE for 5-way comparison (ECMWF vs GFS+HRRR vs NWS vs WU vs NBM)
-    mae_ecmwf = source_mae.get("ecmwf_ifs")
-    mae_gfs_hrrr = source_mae.get("hrrr")     # hrrr = GFS+HRRR blend via Open-Meteo
-    mae_nws = source_mae.get("nws")            # NWS WFO human-adjusted forecast
-    mae_wu_hourly = source_mae.get("wu_hourly")  # Weather Underground Hourly
-    mae_nbm = source_mae.get("nbm")              # NCEP National Blend of Models
+    mae_ecmwf = comparison_mae.get("ecmwf_ifs")
+    mae_gfs_hrrr = comparison_mae.get("hrrr")     # hrrr = GFS+HRRR blend via Open-Meteo
+    mae_nws = comparison_mae.get("nws")            # NWS WFO human-adjusted forecast
+    mae_wu_hourly = comparison_mae.get("wu_hourly")  # Weather Underground Hourly
+    mae_nbm = comparison_mae.get("nbm")              # NCEP National Blend of Models
 
     # Determine 5-way winner (lowest MAE; TIE if within 0.05°F)
     candidates: dict[str, float] = {}
@@ -313,7 +351,7 @@ async def compute_station_calibration(
         "tradeability": tradeability,
         "best_source": best_source,
         "best_source_mae": best_source_mae,
-        "source_mae_json": json.dumps(source_mae) if source_mae else None,
+        "source_mae_json": json.dumps(comparison_mae) if comparison_mae else None,
         "mae_ecmwf_f": mae_ecmwf,
         "mae_gfs_hrrr_f": mae_gfs_hrrr,
         "mae_nws_f": mae_nws,

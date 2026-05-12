@@ -22,12 +22,13 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
 
-from sqlalchemy import delete, desc, select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.modeling.bma import BMAFitResult
-from backend.storage.models import BMAWeights, Event, ForecastObs
+from backend.modeling.bma import BMAFitResult, BMA_MIN_N_FOR_SIGMA
+from backend.storage.models import BMAWeights, City, Event, ForecastObs
 
 log = logging.getLogger(__name__)
 
@@ -105,40 +106,38 @@ async def upsert_bma_weights(
 _LEAD_BUCKETS = (72, 48, 36, 24, 18, 12, 6, 3, 1, 0)
 
 
-def _bucket_lead(hours: float) -> int:
-    """Round lead time down to the nearest standard bucket boundary."""
-    for bucket in _LEAD_BUCKETS:
-        if hours >= bucket:
-            return bucket
-    return 0
-
-
 async def _settlement_high_for_event(
     sess: AsyncSession, city_id: int, date_et: str
 ) -> Optional[float]:
-    """Resolve the realized daily-high for a settled event.
+    """Resolve the continuous settlement high used for BMA training.
 
-    Priority: MetarObs daily-high (preferred ground truth), then wu_history
-    fallback. Mirrors compute_source_lead_time_skills' priority order.
+    Delegates to the lead-skill settlement oracle so BMA σ/weights and
+    SourceLeadTimeSkill are trained against the same target. A Polymarket
+    winner mismatch returns None so disputed dates do not nudge continuous
+    temperature weights.
     """
-    from backend.storage.repos import get_daily_high_metar
-    obs_high = await get_daily_high_metar(sess, city_id, date_et)
-    if obs_high is not None:
-        return float(obs_high)
-    wu = (
+    from backend.modeling.calibration_engine import resolve_canonical_settlement_high
+
+    city = await sess.get(City, city_id)
+    if city is None:
+        return None
+    event = (
         await sess.execute(
-            select(ForecastObs)
-            .where(
-                ForecastObs.city_id == city_id,
-                ForecastObs.source == "wu_history",
-                ForecastObs.date_et == date_et,
-                ForecastObs.high_f.isnot(None),
+            select(Event).where(
+                Event.city_id == city_id,
+                Event.date_et == date_et,
             )
-            .order_by(desc(ForecastObs.fetched_at))
-            .limit(1)
         )
     ).scalar_one_or_none()
-    return float(wu.high_f) if wu and wu.high_f is not None else None
+    if event is None:
+        return None
+    result = await resolve_canonical_settlement_high(
+        sess, city=city, event=event, validate_polymarket_winner=True,
+    )
+    if result.get("matches_polymarket_winner") is False:
+        return None
+    high = result.get("high_f")
+    return float(high) if high is not None else None
 
 
 async def load_training_data_for_city(
@@ -149,20 +148,26 @@ async def load_training_data_for_city(
 ) -> list[tuple[dict[str, float], float]]:
     """Build (forecasts_dict, observed_y) tuples for EM fitting.
 
-    For each settled event in the lookback window:
-      1. Compute the settlement high (MetarObs → wu_history fallback).
-      2. Pull all ForecastObs with `model_run_at` for that event.
-      3. Bucket each by lead time = (event_end_utc − model_run_at).
-      4. Keep forecasts whose bucket matches `lead_bucket_hours`.
+    For each past event in the lookback window:
+      1. Compute the canonical settlement high.
+      2. Compute the fixed decision checkpoint for `lead_bucket_hours`.
+      3. Keep one forecast per source: latest row available by that checkpoint.
 
-    Multiple model runs per source within the same bucket → keep the latest
-    (model_run_at closest to event end), matching what the live signal engine
-    sees at trade time.
+    This mirrors SourceLeadTimeSkill so BMA fitting does not treat frequent
+    refresh cadence as extra independent evidence.
     """
-    from zoneinfo import ZoneInfo
+    from backend.modeling.calibration_engine import (
+        FORECAST_SKILL_SOURCES,
+        select_latest_forecasts_by_checkpoint,
+    )
 
-    today_et = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=days_back)).strftime("%Y-%m-%d")
+    city = await sess.get(City, city_id)
+    if city is None:
+        return []
+    city_tz = getattr(city, "tz", "America/New_York") or "America/New_York"
+    now_local = datetime.now(ZoneInfo(city_tz))
+    today_et = now_local.strftime("%Y-%m-%d")
+    cutoff = (now_local - timedelta(days=days_back)).strftime("%Y-%m-%d")
 
     events = (
         await sess.execute(
@@ -170,12 +175,10 @@ async def load_training_data_for_city(
                 Event.city_id == city_id,
                 Event.date_et < today_et,
                 Event.date_et >= cutoff,
-                Event.winning_bucket_idx.isnot(None),
             )
         )
     ).scalars().all()
 
-    et = ZoneInfo("America/New_York")
     training: list[tuple[dict[str, float], float]] = []
 
     for event in events:
@@ -183,37 +186,27 @@ async def load_training_data_for_city(
         if observed_y is None:
             continue
 
-        # End-of-day in ET → UTC for lead computation.
         event_end_local = datetime.strptime(event.date_et, "%Y-%m-%d").replace(
-            hour=23, minute=59, second=59, tzinfo=et,
+            hour=23, minute=59, second=59,
+            tzinfo=ZoneInfo(city_tz),
         )
         event_end_utc = event_end_local.astimezone(timezone.utc)
+        checkpoint_utc = event_end_utc - timedelta(hours=lead_bucket_hours)
 
         forecasts = (
             await sess.execute(
                 select(ForecastObs).where(
                     ForecastObs.city_id == city_id,
                     ForecastObs.date_et == event.date_et,
-                    ForecastObs.model_run_at.isnot(None),
+                    ForecastObs.source.in_(FORECAST_SKILL_SOURCES),
                     ForecastObs.high_f.isnot(None),
                 )
             )
         ).scalars().all()
 
-        # Pick the latest forecast per source within this lead bucket.
-        per_source_latest: dict[str, ForecastObs] = {}
-        for fc in forecasts:
-            mr = fc.model_run_at
-            if mr.tzinfo is None:
-                mr = mr.replace(tzinfo=timezone.utc)
-            lead_h = max(0.0, (event_end_utc - mr).total_seconds() / 3600.0)
-            if _bucket_lead(lead_h) != lead_bucket_hours:
-                continue
-            existing = per_source_latest.get(fc.source)
-            if existing is None or (
-                existing.model_run_at and mr > (existing.model_run_at if existing.model_run_at.tzinfo else existing.model_run_at.replace(tzinfo=timezone.utc))
-            ):
-                per_source_latest[fc.source] = fc
+        per_source_latest = select_latest_forecasts_by_checkpoint(
+            list(forecasts), checkpoint_utc,
+        )
 
         if not per_source_latest:
             continue
@@ -248,8 +241,11 @@ async def apply_online_em_for_event(
     BMAWeights.
     """
     from backend.modeling.bma import online_em_step
+    from backend.modeling.calibration_engine import (
+        FORECAST_SKILL_SOURCES,
+        select_latest_forecasts_by_checkpoint,
+    )
     from backend.storage.models import BMAWeights, ForecastObs, Event
-    from zoneinfo import ZoneInfo
 
     # Settlement high (same priority as Phase 2 loader).
     observed_y = await _settlement_high_for_event(sess, city_id, date_et)
@@ -260,37 +256,38 @@ async def apply_online_em_for_event(
     if event is None:
         return {}
 
-    et = ZoneInfo("America/New_York")
+    city = await sess.get(City, city_id)
+    city_tz = getattr(city, "tz", "America/New_York") if city else "America/New_York"
     event_end_local = datetime.strptime(date_et, "%Y-%m-%d").replace(
-        hour=23, minute=59, second=59, tzinfo=et,
+        hour=23, minute=59, second=59,
+        tzinfo=ZoneInfo(city_tz or "America/New_York"),
     )
     event_end_utc = event_end_local.astimezone(timezone.utc)
 
-    # Per-source forecast at its actual lead bucket (latest run wins).
     forecasts = (
         await sess.execute(
             select(ForecastObs).where(
                 ForecastObs.city_id == city_id,
                 ForecastObs.date_et == date_et,
-                ForecastObs.model_run_at.isnot(None),
+                ForecastObs.source.in_(FORECAST_SKILL_SOURCES),
                 ForecastObs.high_f.isnot(None),
             )
         )
     ).scalars().all()
 
-    # Group: {lead_bucket: {source: μ_ik}}.
+    # Group: {lead_bucket: {source: μ_ik}} using fixed decision checkpoints.
     by_bucket: dict[int, dict[str, float]] = {}
-    for fc in forecasts:
-        mr = fc.model_run_at
-        if mr.tzinfo is None:
-            mr = mr.replace(tzinfo=timezone.utc)
-        lead_h = max(0.0, (event_end_utc - mr).total_seconds() / 3600.0)
-        bucket = _bucket_lead(lead_h)
-        per_src = by_bucket.setdefault(bucket, {})
-        # Keep the latest run per (source, bucket) — same as Phase 2.
-        existing_mr = getattr(per_src.get(f"_mr_{fc.source}", None), "value", None)
-        if fc.source not in per_src or (existing_mr is None or mr > existing_mr):
-            per_src[fc.source] = float(fc.high_f)
+    for bucket in _LEAD_BUCKETS:
+        checkpoint_utc = event_end_utc - timedelta(hours=bucket)
+        selected = select_latest_forecasts_by_checkpoint(
+            list(forecasts), checkpoint_utc,
+        )
+        if selected:
+            by_bucket[bucket] = {
+                src: float(fc.high_f)
+                for src, fc in selected.items()
+                if fc.high_f is not None
+            }
 
     summary: dict[int, int] = {}
     for lead_bucket, forecasts_dict in by_bucket.items():
@@ -359,5 +356,9 @@ async def load_sigma_by_source_for_city(
     return {
         r.source: float(r.mae_f)
         for r in rows
-        if r.mae_f is not None and r.mae_f > 0
+        if (
+            r.mae_f is not None
+            and r.mae_f > 0
+            and int(r.n_obs or 0) >= BMA_MIN_N_FOR_SIGMA
+        )
     }
