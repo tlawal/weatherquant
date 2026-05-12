@@ -123,6 +123,137 @@ def humanize_age(seconds):
 
 templates.env.filters["humanize_age"] = humanize_age
 
+CURRENT_TEMP_MAX_AGE_S = 2 * 60 * 60
+
+
+def _age_seconds(dt, now: datetime) -> int | None:
+    if not dt:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int((now - dt).total_seconds())
+
+
+def _fresh_current_temp_row(row, *, now: datetime, max_age_s: int = CURRENT_TEMP_MAX_AGE_S):
+    """Return row only when it is fresh enough for live current-temp display."""
+    age_s = _age_seconds(getattr(row, "observed_at", None), now) if row else None
+    if age_s is None or age_s < 0 or age_s > max_age_s:
+        return None
+    return row
+
+
+def _select_freshest_current_temp(
+    rows,
+    *,
+    now: datetime,
+    max_age_s: int = CURRENT_TEMP_MAX_AGE_S,
+):
+    fresh = [
+        row for row in rows
+        if _fresh_current_temp_row(row, now=now, max_age_s=max_age_s) is not None
+    ]
+    if not fresh:
+        return None
+    def _observed_at_utc(row):
+        dt = getattr(row, "observed_at", None)
+        if not dt:
+            return datetime.min.replace(tzinfo=timezone.utc)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+
+    return max(fresh, key=_observed_at_utc)
+
+
+async def _fetch_live_current_temp_for_station(city, station_id: str) -> str | None:
+    """Fetch and persist a fresh current observation for a station.
+
+    Weather.gov is preferred for the NWS API side; AviationWeather is a fallback.
+    Returns the source written, or None when both upstreams fail.
+    """
+    import aiohttp
+    from backend.ingestion.metar import (
+        _insert_or_merge_metar_observation,
+        _parse_nws_obs_time,
+        _parse_nws_temp,
+        _parse_obs_time,
+        _parse_temp,
+        parse_aviationweather_extended,
+        parse_nws_extended,
+    )
+
+    station = (station_id or "").upper()
+    if not station:
+        return None
+
+    timeout = aiohttp.ClientTimeout(total=8)
+
+    try:
+        headers = {"User-Agent": "WeatherQuant/1.0", "Accept": "application/geo+json"}
+        url = f"https://api.weather.gov/stations/{station}/observations/latest"
+        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as http:
+            async with http.get(url) as resp:
+                if resp.status == 200:
+                    data = await resp.json(content_type=None)
+                    props = data.get("properties", {})
+                    temp = _parse_nws_temp(props)
+                    if temp is not None:
+                        temp_c, temp_f = temp
+                        obs_time = _parse_nws_obs_time(props)
+                        await _insert_or_merge_metar_observation(
+                            city=city,
+                            station_id=station,
+                            observed_at=obs_time,
+                            report_at=obs_time,
+                            temp_c=temp_c,
+                            temp_f=temp_f,
+                            raw_text=props.get("rawMessage"),
+                            raw_json=json.dumps({"source": "nws_obs", **props}, default=str),
+                            ext_data=parse_nws_extended(props),
+                            source="nws_api",
+                        )
+                        return "nws_api"
+                else:
+                    log.debug("current_temp: weather.gov HTTP %d for %s", resp.status, station)
+    except Exception as e:
+        log.info("current_temp: weather.gov failed for %s: %s", station, e)
+
+    try:
+        headers = {"User-Agent": "WeatherQuant/1.0"}
+        url = f"https://aviationweather.gov/api/data/metar?ids={station}&format=json&latest=1"
+        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as http:
+            async with http.get(url) as resp:
+                if resp.status != 200:
+                    log.debug("current_temp: aviationweather HTTP %d for %s", resp.status, station)
+                    return None
+                data = await resp.json(content_type=None)
+
+        if not isinstance(data, list) or not data:
+            return None
+        obs = data[0]
+        temp = _parse_temp(obs)
+        if temp is None:
+            return None
+        temp_c, temp_f = temp
+        obs_time = _parse_obs_time(obs)
+        report_at = _parse_obs_time({"obsTime": obs.get("reportTime")}) if obs.get("reportTime") else obs_time
+        await _insert_or_merge_metar_observation(
+            city=city,
+            station_id=station,
+            observed_at=obs_time,
+            report_at=report_at,
+            temp_c=temp_c,
+            temp_f=temp_f,
+            raw_text=obs.get("rawOb"),
+            raw_json=json.dumps(obs, default=str),
+            ext_data=parse_aviationweather_extended(obs, temp_c=temp_c),
+            source="aviation",
+        )
+        return "aviation"
+    except Exception as e:
+        log.info("current_temp: aviationweather failed for %s: %s", station, e)
+        return None
+
 
 def _format_current_temp_dual(
     madis_metar,
@@ -133,6 +264,7 @@ def _format_current_temp_dual(
     target_date_et=None,
     real_today_et=None,
     now=None,
+    active_station: str | None = None,
 ) -> dict | None:
     """Build dual-source (MADIS + NWS) Current Temp payload for US cities.
 
@@ -176,6 +308,7 @@ def _format_current_temp_dual(
         "temp_f": None, "obs_time_local": None, "age_s": None,
         "station": None, "raw_text": None,
         "source_url": None, "source_label": "MADIS HFMETAR",
+        "status": None,
     }
     if madis_metar:
         madis_side["temp_f"] = madis_metar.temp_f
@@ -184,6 +317,9 @@ def _format_current_temp_dual(
         madis_side["station"] = madis_metar.metar_station
         # netCDF payload has no raw METAR string; rendered as — in template.
         madis_side["raw_text"] = getattr(madis_metar, "raw_text", None)
+    elif active_station:
+        madis_side["station"] = active_station.upper()
+        madis_side["status"] = "No fresh MADIS row"
     # source_file lives on the legacy MadisObs row — still useful for the link.
     source_file = getattr(madis_obs, "source_file", None) if madis_obs else None
     if source_file:
@@ -201,6 +337,7 @@ def _format_current_temp_dual(
         "temp_f": None, "obs_time_local": None, "age_s": None,
         "station": None, "raw_text": None,
         "source_url": None, "source_label": "NWS API",
+        "status": None,
     }
     if nws_metar:
         nws_side["temp_f"] = nws_metar.temp_f
@@ -208,11 +345,22 @@ def _format_current_temp_dual(
         nws_side["age_s"] = _age(nws_metar.observed_at)
         nws_side["station"] = nws_metar.metar_station
         nws_side["raw_text"] = getattr(nws_metar, "raw_text", None)
-        if nws_metar.metar_station:
+        nws_source = getattr(nws_metar, "source", None)
+        if nws_source == "aviation":
+            nws_side["source_label"] = "AviationWeather"
+        if nws_metar.metar_station and nws_source == "aviation":
+            nws_side["source_url"] = (
+                f"https://aviationweather.gov/api/data/metar?ids={nws_metar.metar_station}"
+                "&format=json&latest=1"
+            )
+        elif nws_metar.metar_station:
             nws_side["source_url"] = (
                 f"https://api.weather.gov/stations/{nws_metar.metar_station}"
                 "/observations/latest"
             )
+    elif active_station:
+        nws_side["station"] = active_station.upper()
+        nws_side["status"] = "No fresh NWS/API row"
 
     # Neither side has data — caller treats this like non-US (no panel).
     if madis_side["age_s"] is None and nws_side["age_s"] is None:
@@ -451,22 +599,34 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
         date_query = select(distinct(Event.date_et)).where(Event.city_id == city.id).order_by(Event.date_et.desc())
         available_dates = (await sess.execute(date_query)).scalars().all()
 
+        current_temp_station = (city.metar_station or "").upper() if city.metar_station else None
         metar = await get_latest_metar(sess, city.id)
         # Dual-source Current Temp: latest-per-source MetarObs rows for US cities.
-        # MADIS writes MetarObs(source="madis") + MetarObsExtended; NWS writes
-        # MetarObs(source="aviation"). Both flow through get_latest_metar (fresher wins),
-        # but the Current Temp card also shows them side-by-side.
+        # MADIS writes source="madis"; Weather.gov writes source="nws_api";
+        # AviationWeather fallback writes source="aviation".
         madis_obs = None  # legacy MadisObs row — still used for source_file URL
         madis_metar = None  # MetarObs(source="madis")
-        nws_metar = None  # MetarObs(source="aviation")
+        nws_api_metar = None  # MetarObs(source="nws_api")
+        aviation_metar = None  # MetarObs(source="aviation")
+        nws_metar = None  # Freshest NWS/API-side row
         if city.is_us:
             from backend.storage.repos import (
                 get_latest_madis_obs,
                 get_latest_metar_by_source,
             )
             madis_obs = await get_latest_madis_obs(sess, city.id)
-            madis_metar = await get_latest_metar_by_source(sess, city.id, "madis")
-            nws_metar = await get_latest_metar_by_source(sess, city.id, "aviation")
+            madis_metar = await get_latest_metar_by_source(
+                sess, city.id, "madis", current_temp_station
+            )
+            nws_api_metar = await get_latest_metar_by_source(
+                sess, city.id, "nws_api", current_temp_station
+            )
+            aviation_metar = await get_latest_metar_by_source(
+                sess, city.id, "aviation", current_temp_station
+            )
+            nws_metar = _select_freshest_current_temp(
+                [nws_api_metar, aviation_metar], now=datetime.now(timezone.utc)
+            )
         # For the selected date, we also want the official high observed by METAR
         obs_high_f = await get_daily_high_metar(sess, city.id, target_date_et, city_tz=getattr(city, "tz", "America/New_York"))
         avg_peak_timing = await get_avg_peak_timing(sess, city.id, days_back=3, et_tz=et_tz)
@@ -546,6 +706,40 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                 _sh_obs_time_local = _sh_obs_time.astimezone(city_tz_obj).strftime("%-I:%M %p %Z")
             except Exception:
                 pass
+
+    if city.is_us and current_temp_station and target_date_et == real_today_et:
+        now_utc = datetime.now(timezone.utc)
+        madis_metar = _fresh_current_temp_row(madis_metar, now=now_utc)
+        nws_metar = _select_freshest_current_temp(
+            [nws_api_metar, aviation_metar], now=now_utc
+        )
+
+        if nws_metar is None:
+            await _fetch_live_current_temp_for_station(city, current_temp_station)
+            async with get_session() as sess:
+                from backend.storage.repos import (
+                    get_latest_madis_obs,
+                    get_latest_metar,
+                    get_latest_metar_by_source,
+                )
+
+                metar = await get_latest_metar(sess, city.id)
+                madis_obs = await get_latest_madis_obs(sess, city.id)
+                madis_metar = _fresh_current_temp_row(
+                    await get_latest_metar_by_source(
+                        sess, city.id, "madis", current_temp_station
+                    ),
+                    now=datetime.now(timezone.utc),
+                )
+                nws_api_metar = await get_latest_metar_by_source(
+                    sess, city.id, "nws_api", current_temp_station
+                )
+                aviation_metar = await get_latest_metar_by_source(
+                    sess, city.id, "aviation", current_temp_station
+                )
+                nws_metar = _select_freshest_current_temp(
+                    [nws_api_metar, aviation_metar], now=datetime.now(timezone.utc)
+                )
 
     model = None
     buckets_with_signals = []
@@ -943,6 +1137,7 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                 madis_metar, nws_metar, madis_obs, city,
                 target_date_et=target_date_et,
                 real_today_et=real_today_et,
+                active_station=current_temp_station,
             ) if city.is_us else None,
             "forecasts": {
                 "primary": {

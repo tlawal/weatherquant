@@ -458,11 +458,14 @@ async def _insert_or_merge_metar_observation(
     raw_text: Optional[str],
     raw_json: str,
     ext_data: dict,
+    source: str = "aviation",
 ) -> None:
     today_local = city_local_date(city)
 
     async with get_session() as sess:
-        metar_row = await get_metar_obs_by_key(sess, city.id, station_id, observed_at)
+        metar_row = await get_metar_obs_by_key(
+            sess, city.id, station_id, observed_at, source=source
+        )
         if metar_row is None:
             prev_high = await get_daily_high_metar(
                 sess,
@@ -482,7 +485,7 @@ async def _insert_or_merge_metar_observation(
                 daily_high_f=daily_high,
                 raw_text=raw_text,
                 raw_json=raw_json,
-                source="aviation",
+                source=source,
             )
 
         if ext_data:
@@ -650,6 +653,7 @@ async def _fetch_us_metars(cities: list[City], extra_pairs: Optional[list[tuple[
             raw_text=raw_text,
             raw_json=raw_str,
             ext_data=ext_data,
+            source="aviation",
         )
 
     await _mark_heartbeat_success()
@@ -686,6 +690,7 @@ async def _fetch_nws_observations(cities: list[City]) -> None:
                     raw_text=props.get("rawMessage"),
                     raw_json=json.dumps({"source": "nws_obs", **props}, default=str),
                     ext_data=parse_nws_extended(props),
+                    source="nws_api",
                 )
                 await asyncio.sleep(0.3)  # rate limit courtesy
             except Exception as e:

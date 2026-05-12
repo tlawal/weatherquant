@@ -198,13 +198,17 @@ async def get_metar_obs_by_key(
     city_id: int,
     metar_station: str,
     observed_at: datetime,
+    source: Optional[str] = None,
 ) -> Optional[MetarObs]:
+    conditions = [
+        MetarObs.city_id == city_id,
+        MetarObs.metar_station == metar_station,
+        MetarObs.observed_at == observed_at,
+    ]
+    if source is not None:
+        conditions.append(MetarObs.source == source)
     result = await session.execute(
-        select(MetarObs).where(
-            MetarObs.city_id == city_id,
-            MetarObs.metar_station == metar_station,
-            MetarObs.observed_at == observed_at,
-        ).limit(1)
+        select(MetarObs).where(*conditions).limit(1)
     )
     return result.scalar_one_or_none()
 
@@ -300,12 +304,18 @@ async def get_latest_metar(
 
 
 async def get_latest_metar_by_source(
-    session: AsyncSession, city_id: int, source: str
+    session: AsyncSession,
+    city_id: int,
+    source: str,
+    metar_station: Optional[str] = None,
 ) -> Optional[MetarObs]:
     """Latest MetarObs for a city filtered by source (e.g. 'tgftp', 'aviation')."""
+    conditions = [MetarObs.city_id == city_id, MetarObs.source == source]
+    if metar_station:
+        conditions.append(MetarObs.metar_station == metar_station.upper())
     result = await session.execute(
         select(MetarObs)
-        .where(MetarObs.city_id == city_id, MetarObs.source == source)
+        .where(*conditions)
         .order_by(desc(MetarObs.observed_at))
         .limit(1)
     )

@@ -362,3 +362,59 @@ def test_backfill_recent_nws_extended_is_idempotent(tmp_path, monkeypatch):
     assert ext is not None
     assert ext.condition == "Rain"
     _run(engine.dispose())
+
+
+def test_source_distinct_rows_can_share_station_and_observed_at(tmp_path, monkeypatch):
+    engine, session_factory = _run(_setup_test_db(tmp_path, monkeypatch))
+    city = _run(_create_city(session_factory, slug="source-distinct"))
+    observed_at = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+
+    async def scenario():
+        await metar_ingestion._insert_or_merge_metar_observation(
+            city=city,
+            station_id=city.metar_station,
+            observed_at=observed_at,
+            report_at=observed_at,
+            temp_c=17.3,
+            temp_f=63.1,
+            raw_text="KBKF NWS",
+            raw_json=json.dumps({"source": "nws_obs"}),
+            ext_data={},
+            source="nws_api",
+        )
+        await metar_ingestion._insert_or_merge_metar_observation(
+            city=city,
+            station_id=city.metar_station,
+            observed_at=observed_at,
+            report_at=observed_at,
+            temp_c=17.3,
+            temp_f=63.1,
+            raw_text="KBKF AVIATION",
+            raw_json=json.dumps({"source": "aviationweather"}),
+            ext_data={},
+            source="aviation",
+        )
+        await metar_ingestion._insert_or_merge_metar_observation(
+            city=city,
+            station_id=city.metar_station,
+            observed_at=observed_at,
+            report_at=observed_at,
+            temp_c=17.3,
+            temp_f=63.1,
+            raw_text=None,
+            raw_json=json.dumps({"source": "madis"}),
+            ext_data={},
+            source="madis",
+        )
+
+        async with session_factory() as session:
+            rows = (
+                await session.execute(
+                    select(MetarObs).where(MetarObs.city_id == city.id)
+                )
+            ).scalars().all()
+            return sorted(row.source for row in rows)
+
+    assert _run(scenario()) == ["aviation", "madis", "nws_api"]
+    assert _run(_count_metar_rows(session_factory)) == 3
+    _run(engine.dispose())

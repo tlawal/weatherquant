@@ -6,12 +6,17 @@ no DB) using SimpleNamespace stand-ins for the ORM rows. Time is frozen via the
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
 
-from web.routes import _format_current_temp_dual, humanize_age
+from web.routes import (
+    _format_current_temp_dual,
+    _fresh_current_temp_row,
+    _select_freshest_current_temp,
+    humanize_age,
+)
 
 
 # ── humanize_age ────────────────────────────────────────────────────────────
@@ -44,12 +49,13 @@ _NOW = datetime(2026, 4, 18, 22, 30, 0, tzinfo=timezone.utc)
 _TODAY_ET = "2026-04-18"
 
 
-def _metar(temp_f, obs_at, station="KATL", raw_text=None):
+def _metar(temp_f, obs_at, station="KATL", raw_text=None, source="nws_api"):
     return SimpleNamespace(
         temp_f=temp_f,
         observed_at=obs_at,
         metar_station=station,
         raw_text=raw_text,
+        source=source,
     )
 
 
@@ -141,6 +147,7 @@ def test_dual_only_nws_present_marks_nws_primary_and_nulls_madis_side():
     assert result["delta_s"] is None
     assert result["madis"]["temp_f"] is None
     assert result["madis"]["age_s"] is None
+    assert result["madis"]["status"] is None
     assert result["nws"]["age_s"] == 300
 
 
@@ -167,3 +174,49 @@ def test_dual_equal_ages_ties_break_to_madis():
     )
     assert result["primary"] == "madis"
     assert result["delta_s"] == 0
+
+
+def test_fresh_current_temp_row_rejects_stale_rows():
+    stale = _metar(32.9, _NOW - timedelta(hours=139))
+    fresh = _metar(63.1, _NOW - timedelta(minutes=15))
+
+    assert _fresh_current_temp_row(stale, now=_NOW) is None
+    assert _fresh_current_temp_row(fresh, now=_NOW) is fresh
+
+
+def test_select_freshest_ignores_stale_rows_and_keeps_kbkf():
+    stale = _metar(32.9, _NOW - timedelta(hours=139), station="KBKF", source="nws_api")
+    fresh = _metar(63.1, _NOW - timedelta(minutes=10), station="KBKF", source="aviation")
+
+    selected = _select_freshest_current_temp([stale, fresh], now=_NOW)
+
+    assert selected is fresh
+    assert selected.metar_station == "KBKF"
+
+
+def test_dual_missing_madis_has_explicit_status_with_active_station():
+    nws = _metar(63.1, _NOW - timedelta(minutes=10), station="KBKF")
+    result = _format_current_temp_dual(
+        None, nws, None, _city(tz="America/Denver"),
+        target_date_et=_TODAY_ET, real_today_et=_TODAY_ET, now=_NOW,
+        active_station="KBKF",
+    )
+
+    assert result["primary"] == "nws"
+    assert result["madis"]["station"] == "KBKF"
+    assert result["madis"]["status"] == "No fresh MADIS row"
+
+
+def test_dual_aviation_fallback_labels_source():
+    aviation = _metar(
+        63.1, _NOW - timedelta(minutes=10),
+        station="KBKF", raw_text="KBKF ...", source="aviation",
+    )
+    result = _format_current_temp_dual(
+        None, aviation, None, _city(tz="America/Denver"),
+        target_date_et=_TODAY_ET, real_today_et=_TODAY_ET, now=_NOW,
+        active_station="KBKF",
+    )
+
+    assert result["nws"]["source_label"] == "AviationWeather"
+    assert "aviationweather.gov" in result["nws"]["source_url"]

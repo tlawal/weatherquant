@@ -203,7 +203,9 @@ async def fetch_tgftp_all() -> None:
                 today_local = city_local_date(city)
                 async with get_session() as sess:
                     # Dedupe: skip if we already have this (station, observed_at)
-                    existing = await get_metar_obs_by_key(sess, city.id, station, obs_time)
+                    existing = await get_metar_obs_by_key(
+                        sess, city.id, station, obs_time, source="tgftp"
+                    )
                     if existing is not None:
                         continue
 

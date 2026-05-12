@@ -415,7 +415,7 @@ async def fetch_madis_latest() -> None:
                     # Dedupe: same (city, station, observed_at) already present
                     # in metar_obs — skip both MetarObs and MadisObs writes.
                     existing_metar = await get_metar_obs_by_key(
-                        sess, city.id, station, obs_dt
+                        sess, city.id, station, obs_dt, source="madis"
                     )
                     existing_madis = await get_madis_obs_by_key(sess, station, obs_dt)
 

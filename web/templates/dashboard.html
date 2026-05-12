@@ -38,11 +38,11 @@
     <span class="text-[10px] uppercase tracking-widest font-bold" style="color:var(--text-muted)">Alpha</span>
     <span class="text-[11px] mono"
           :style="`color:${legacyColor()}`"
-          x-text="legacyLabel"></span>
+          x-text="legacyLabel">Lgcy no data</span>
     <span class="opacity-30">·</span>
     <span class="text-[11px] mono"
           :style="`color:${bmaColor()}`"
-          x-text="bmaLabel"></span>
+          x-text="bmaLabel">BMA no data</span>
     <span class="text-[10px] mono opacity-60" x-text="streakLabel"></span>
   </a>
 
@@ -275,8 +275,8 @@ function alphaChip() {
     streak: 0,
     nEvents: 0,
     tooltip: 'Alpha Dashboard — loading…',
-    legacyLabel: 'Lgcy —',
-    bmaLabel: 'BMA —',
+    legacyLabel: 'Lgcy no data',
+    bmaLabel: 'BMA no data',
     streakLabel: '',
     legacyColor() { return this._color(this.legacyBps); },
     bmaColor()    { return this._color(this.bmaBps); },
@@ -296,10 +296,17 @@ function alphaChip() {
         this.bmaBps = sig.current_edge_bma_bps;
         this.streak = sig.consecutive_days_bma_wins || 0;
         this.nEvents = d.n_events || 0;
+        if (this.nEvents === 0) {
+          this.legacyLabel = 'Lgcy no data';
+          this.bmaLabel = 'BMA no data';
+          this.streakLabel = '';
+          this.tooltip = `Alpha over market — no settled events in the last ${d.lookback_days || 30} days.`;
+          return;
+        }
         this.legacyLabel = (this.legacyBps === null || this.legacyBps === undefined)
-          ? 'Lgcy —' : `Lgcy ${this.legacyBps >= 0 ? '+' : ''}${this.legacyBps.toFixed(1)}`;
+          ? 'Lgcy no data' : `Lgcy ${this.legacyBps >= 0 ? '+' : ''}${this.legacyBps.toFixed(1)}`;
         this.bmaLabel = (this.bmaBps === null || this.bmaBps === undefined)
-          ? 'BMA —' : `BMA ${this.bmaBps >= 0 ? '+' : ''}${this.bmaBps.toFixed(1)}`;
+          ? 'BMA no data' : `BMA ${this.bmaBps >= 0 ? '+' : ''}${this.bmaBps.toFixed(1)}`;
         this.streakLabel = (this.streak >= 14) ? '▲ READY' : (this.streak > 0 ? `(${this.streak}d)` : '');
         this.tooltip = `Alpha over market — last 30 days, ${this.nEvents} events.\n` +
           `Legacy: ${this.legacyBps !== null ? this.legacyBps.toFixed(1) + ' bps' : 'no data'}\n` +
