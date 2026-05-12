@@ -423,7 +423,9 @@ async def dashboard(request: Request):
         # Filter to "rows from the latest model snapshot per event" so a
         # half-finished signal-engine pass can never leave stale signals
         # alongside the freshly-written ones for the same bucket.
-        raw_signals = await get_signals_for_latest_snapshot(sess, limit=200)
+        raw_signals = await get_signals_for_latest_snapshot(
+            sess, limit=200, date_et=today_et
+        )
 
         log.info("dashboard: data fetched: cities=%d, arming=%s, pnl=%.2f", len(cities), arming.state, daily_pnl)
 
@@ -564,10 +566,10 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
         get_buckets_for_event,
         get_latest_metar,
         get_latest_forecast,
-        get_latest_successful_forecast,
+        get_latest_successful_forecasts_bulk,
         get_latest_model_snapshot,
-        get_latest_signal_for_bucket,
-        get_latest_market_snapshot,
+        get_latest_signals_for_buckets,
+        get_latest_market_snapshots_bulk,
         get_daily_high_metar,
         get_market_context_snapshot,
         get_station_profile,
@@ -639,20 +641,28 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
             obs_minutes_list = json.loads(station_profile.observation_minutes)
             resolution_high_f = await get_resolution_high_metar(sess, city.id, target_date_et, obs_minutes_list, city_tz=getattr(city, "tz", "America/New_York"))
 
-        wu_h = await get_latest_successful_forecast(sess, city.id, "wu_hourly", target_date_et)
-        wu_history = await get_latest_successful_forecast(sess, city.id, "wu_history", target_date_et)
-        hrrr_fc = await get_latest_successful_forecast(sess, city.id, "hrrr", target_date_et)
-        hrrr_15min_fc = await get_latest_successful_forecast(sess, city.id, "hrrr_15min", target_date_et)
-        nbm_fc = await get_latest_successful_forecast(sess, city.id, "nbm", target_date_et)
-        ecmwf_ifs_fc = await get_latest_successful_forecast(sess, city.id, "ecmwf_ifs", target_date_et)
-        ecmwf_aifs_fc = await get_latest_successful_forecast(sess, city.id, "ecmwf_aifs", target_date_et)
+        forecast_sources = [
+            "wu_hourly", "wu_history", "hrrr", "hrrr_15min", "nbm",
+            "ecmwf_ifs", "ecmwf_aifs", "gfs_graphcast", "pangu_weather",
+            "fourcastnet_v2", "aurora",
+        ]
+        forecasts_by_source = await get_latest_successful_forecasts_bulk(
+            sess, city.id, forecast_sources, target_date_et,
+        )
+        wu_h = forecasts_by_source.get("wu_hourly")
+        wu_history = forecasts_by_source.get("wu_history")
+        hrrr_fc = forecasts_by_source.get("hrrr")
+        hrrr_15min_fc = forecasts_by_source.get("hrrr_15min")
+        nbm_fc = forecasts_by_source.get("nbm")
+        ecmwf_ifs_fc = forecasts_by_source.get("ecmwf_ifs")
+        ecmwf_aifs_fc = forecasts_by_source.get("ecmwf_aifs")
         # Bayesian-upgrade Q3/U3 — additional AI-NWP foundation models (experimental).
-        gfs_graphcast_fc = await get_latest_successful_forecast(sess, city.id, "gfs_graphcast", target_date_et)
+        gfs_graphcast_fc = forecasts_by_source.get("gfs_graphcast")
         # §13 — NOAA AIWP-sourced AI members (Pangu-Weather, FourCastNetv2-small).
-        pangu_weather_fc = await get_latest_successful_forecast(sess, city.id, "pangu_weather", target_date_et)
-        fourcastnet_v2_fc = await get_latest_successful_forecast(sess, city.id, "fourcastnet_v2", target_date_et)
+        pangu_weather_fc = forecasts_by_source.get("pangu_weather")
+        fourcastnet_v2_fc = forecasts_by_source.get("fourcastnet_v2")
         # §17 — Microsoft Aurora (Swin transformer) via NOAA AIWP.
-        aurora_fc = await get_latest_successful_forecast(sess, city.id, "aurora", target_date_et)
+        aurora_fc = forecasts_by_source.get("aurora")
         # Per-source skill (dynamic weight, MAE, bias, yesterday's error) for tooltips.
         try:
             from backend.modeling.station_weights import load_source_skill_summary
@@ -756,11 +766,16 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
             bma_probs = (bma_shadow or {}).get("probs") or []
 
             snapshot_id = model.id if model is not None else None
+            bucket_ids = [bucket.id for bucket in buckets]
+            signals_by_bucket = await get_latest_signals_for_buckets(
+                sess, bucket_ids, snapshot_id=snapshot_id,
+            )
+            markets_by_bucket = await get_latest_market_snapshots_bulk(sess, bucket_ids)
             for bucket in buckets:
-                sig = await get_latest_signal_for_bucket(sess, bucket.id, snapshot_id=snapshot_id)
+                sig = signals_by_bucket.get(bucket.id)
                 if model and sig and sig.computed_at < model.computed_at:
                     sig = None
-                mkt = await get_latest_market_snapshot(sess, bucket.id)
+                mkt = markets_by_bucket.get(bucket.id)
 
                 probs = json.loads(model.probs_json) if model and model.probs_json else []
                 model_prob = probs[bucket.bucket_idx] if bucket.bucket_idx < len(probs) else None
@@ -1365,7 +1380,9 @@ async def htmx_signals_table(request: Request):
     # seconds, so the cumulative leak rate was the main driver of the
     # `dialect.connect()` exhaustion 500s.
     async with get_session() as sess:
-        raw_signals = await get_signals_for_latest_snapshot(sess, limit=200)
+        raw_signals = await get_signals_for_latest_snapshot(
+            sess, limit=200, date_et=today_et,
+        )
 
         rows = []
         seen = {}
@@ -1672,7 +1689,9 @@ async def strategies_page(request: Request):
 
     async with get_session() as sess:
         arming = await get_arming_state(sess)
-        raw_signals = await get_signals_for_latest_snapshot(sess, limit=200)
+        raw_signals = await get_signals_for_latest_snapshot(
+            sess, limit=200, date_et=today_et,
+        )
         cities = await get_all_cities(sess)
 
         bucket_ids = {sig.bucket_id for sig in raw_signals}

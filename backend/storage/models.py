@@ -75,7 +75,10 @@ class City(Base):
 class Event(Base):
     """One Polymarket event per city per ET calendar day."""
     __tablename__ = "events"
-    __table_args__ = (UniqueConstraint("city_id", "date_et", name="uq_event_city_date"),)
+    __table_args__ = (
+        UniqueConstraint("city_id", "date_et", name="uq_event_city_date"),
+        Index("ix_events_date_et", "date_et"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     city_id: Mapped[int] = mapped_column(Integer, ForeignKey("cities.id"), nullable=False)
@@ -233,6 +236,7 @@ class ForecastObs(Base):
     __tablename__ = "forecast_obs"
     __table_args__ = (
         Index("ix_forecast_city_source_ts", "city_id", "source", "fetched_at"),
+        Index("ix_forecast_city_date_source_ts", "city_id", "date_et", "source", "fetched_at"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -277,7 +281,10 @@ class MarketSnapshot(Base):
 class ModelSnapshot(Base):
     """Temperature distribution model output for one event at one point in time."""
     __tablename__ = "model_snapshots"
-    __table_args__ = (Index("ix_modelsnap_event_ts", "event_id", "computed_at"),)
+    __table_args__ = (
+        Index("ix_modelsnap_event_ts", "event_id", "computed_at"),
+        Index("ix_modelsnap_event_id", "event_id", "id"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     event_id: Mapped[int] = mapped_column(Integer, ForeignKey("events.id"), nullable=False)

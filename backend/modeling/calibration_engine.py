@@ -69,12 +69,16 @@ async def get_reliability_metrics(city_id: int, days_back: int = 90) -> List[Rel
         except Exception:
             tz = ZoneInfo("America/New_York")
 
-        # Latest ModelSnapshot per event.
+        # Latest ModelSnapshot per event for this city's lookback window only.
         latest_snap_sub = (
             select(
                 ModelSnapshot.event_id,
                 func.max(ModelSnapshot.id).label("max_snap_id"),
             )
+            .join(Event, Event.id == ModelSnapshot.event_id)
+            .where(Event.city_id == city_id)
+            .where(Event.date_et < today_et)
+            .where(Event.date_et >= cutoff)
             .group_by(ModelSnapshot.event_id)
             .subquery()
         )
@@ -92,12 +96,18 @@ async def get_reliability_metrics(city_id: int, days_back: int = 90) -> List[Rel
         )
         results = (await sess.execute(query)).all()
 
-        # Pre-fetch buckets for each event (avoid N+1 if possible — simple loop ok for ≤200).
         event_ids = list({r[1] for r in results})
         event_buckets: Dict[int, list] = {}
-        for eid in event_ids:
-            b_query = select(Bucket).where(Bucket.event_id == eid).order_by(Bucket.bucket_idx)
-            event_buckets[eid] = (await sess.execute(b_query)).scalars().all()
+        if event_ids:
+            b_rows = (
+                await sess.execute(
+                    select(Bucket)
+                    .where(Bucket.event_id.in_(event_ids))
+                    .order_by(Bucket.event_id, Bucket.bucket_idx)
+                )
+            ).scalars().all()
+            for bucket in b_rows:
+                event_buckets.setdefault(bucket.event_id, []).append(bucket)
 
         async def _resolved_high(date_et: str) -> Optional[float]:
             """METAR daily max (primary) or wu_history (fallback)."""

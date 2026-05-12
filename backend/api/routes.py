@@ -574,7 +574,9 @@ async def get_all_signals():
     async with get_session() as sess:
         # Filter to "rows from the latest model snapshot per event" so a
         # mid-rerun pass can never expose stale signals alongside fresh ones.
-        raw_signals = await get_signals_for_latest_snapshot(sess, limit=200)
+        raw_signals = await get_signals_for_latest_snapshot(
+            sess, limit=200, date_et=et_today(),
+        )
 
     out = []
     for sig in raw_signals:

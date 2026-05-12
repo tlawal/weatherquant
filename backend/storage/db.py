@@ -221,6 +221,7 @@ async def init_db() -> None:
     await _run_ddl("ALTER TABLE forecast_obs ADD COLUMN raw_json TEXT")
     await _run_ddl("ALTER TABLE forecast_obs ADD COLUMN parse_error TEXT")
     await _run_ddl("ALTER TABLE forecast_obs ADD COLUMN raw_payload_hash VARCHAR(64)")
+    await _run_ddl("CREATE INDEX IF NOT EXISTS ix_forecast_city_date_source_ts ON forecast_obs (city_id, date_et, source, fetched_at)")
 
     # orders
     await _run_ddl("ALTER TABLE orders ADD COLUMN signal_id INTEGER")
@@ -248,6 +249,8 @@ async def init_db() -> None:
     # signals — generation tag to filter to "latest snapshot only"
     await _run_ddl("ALTER TABLE signals ADD COLUMN model_snapshot_id INTEGER")
     await _run_ddl("CREATE INDEX IF NOT EXISTS ix_signal_snapshot ON signals (model_snapshot_id)")
+    await _run_ddl("CREATE INDEX IF NOT EXISTS ix_events_date_et ON events (date_et)")
+    await _run_ddl("CREATE INDEX IF NOT EXISTS ix_modelsnap_event_id ON model_snapshots (event_id, id)")
 
     # calibration_params — HRRR/GFS support
     await _run_ddl("ALTER TABLE calibration_params ADD COLUMN bias_hrrr FLOAT DEFAULT 0.0")

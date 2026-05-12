@@ -683,6 +683,46 @@ async def get_latest_successful_forecast(
     return result.scalar_one_or_none()
 
 
+async def get_latest_successful_forecasts_bulk(
+    session: AsyncSession,
+    city_id: int,
+    sources: list[str],
+    date_et: str,
+) -> dict[str, ForecastObs]:
+    """Fetch the latest successful ForecastObs for each source in one query."""
+    if not sources:
+        return {}
+    sub = (
+        select(
+            ForecastObs.source.label("source"),
+            func.max(ForecastObs.fetched_at).label("max_ts"),
+        )
+        .where(
+            ForecastObs.city_id == city_id,
+            ForecastObs.date_et == date_et,
+            ForecastObs.source.in_(sources),
+            ForecastObs.high_f.isnot(None),
+        )
+        .group_by(ForecastObs.source)
+        .subquery()
+    )
+    result = await session.execute(
+        select(ForecastObs)
+        .join(
+            sub,
+            (ForecastObs.source == sub.c.source)
+            & (ForecastObs.fetched_at == sub.c.max_ts),
+        )
+        .where(
+            ForecastObs.city_id == city_id,
+            ForecastObs.date_et == date_et,
+            ForecastObs.source.in_(sources),
+            ForecastObs.high_f.isnot(None),
+        )
+    )
+    return {row.source: row for row in result.scalars().all()}
+
+
 async def get_recent_successful_forecasts(
     session: AsyncSession,
     city_id: int,
@@ -903,7 +943,7 @@ async def get_latest_signals(
 
 
 async def get_signals_for_latest_snapshot(
-    session: AsyncSession, limit: int = 200
+    session: AsyncSession, limit: int = 200, date_et: str | None = None
 ) -> list[Signal]:
     """Return Signal rows belonging to the **latest model_snapshot per event**.
 
@@ -919,27 +959,34 @@ async def get_signals_for_latest_snapshot(
     dashboard never goes blank during the rollout window.
     """
     # Subquery: latest snapshot id per event
-    latest_per_event = (
-        select(
-            ModelSnapshot.event_id.label("event_id"),
-            func.max(ModelSnapshot.id).label("max_id"),
-        )
-        .group_by(ModelSnapshot.event_id)
-        .subquery()
+    latest_stmt = select(
+        ModelSnapshot.event_id.label("event_id"),
+        func.max(ModelSnapshot.id).label("max_id"),
     )
+    if date_et:
+        latest_stmt = (
+            latest_stmt
+            .join(Event, Event.id == ModelSnapshot.event_id)
+            .where(Event.date_et == date_et)
+        )
+    latest_per_event = latest_stmt.group_by(ModelSnapshot.event_id).subquery()
 
-    # Join Signal -> Bucket -> Event so we can match snapshots by event
+    conditions = [
+        (Signal.model_snapshot_id == latest_per_event.c.max_id)
+        | (Signal.model_snapshot_id.is_(None))
+    ]
+    if date_et:
+        conditions.append(Event.date_et == date_et)
+
     stmt = (
         select(Signal)
         .join(Bucket, Bucket.id == Signal.bucket_id)
+        .join(Event, Event.id == Bucket.event_id)
         .join(
             latest_per_event,
             latest_per_event.c.event_id == Bucket.event_id,
         )
-        .where(
-            (Signal.model_snapshot_id == latest_per_event.c.max_id)
-            | (Signal.model_snapshot_id.is_(None))
-        )
+        .where(*conditions)
         .order_by(desc(Signal.computed_at))
         .limit(limit)
     )
@@ -980,6 +1027,48 @@ async def get_latest_signal_for_bucket(
         .limit(1)
     )
     return result.scalar_one_or_none()
+
+
+async def get_latest_signals_for_buckets(
+    session: AsyncSession,
+    bucket_ids: list[int],
+    snapshot_id: Optional[int] = None,
+) -> dict[int, Signal]:
+    """Fetch latest Signal rows for bucket_ids, optionally pinned to one snapshot."""
+    if not bucket_ids:
+        return {}
+
+    async def _fetch(snapshot_filter: Optional[int], ids: list[int]) -> dict[int, Signal]:
+        if not ids:
+            return {}
+        filters = [Signal.bucket_id.in_(ids)]
+        if snapshot_filter is not None:
+            filters.append(Signal.model_snapshot_id == snapshot_filter)
+        sub = (
+            select(
+                Signal.bucket_id.label("bucket_id"),
+                func.max(Signal.computed_at).label("max_ts"),
+            )
+            .where(*filters)
+            .group_by(Signal.bucket_id)
+            .subquery()
+        )
+        result = await session.execute(
+            select(Signal)
+            .join(
+                sub,
+                (Signal.bucket_id == sub.c.bucket_id)
+                & (Signal.computed_at == sub.c.max_ts),
+            )
+            .where(*filters)
+        )
+        return {row.bucket_id: row for row in result.scalars().all()}
+
+    signals = await _fetch(snapshot_id, bucket_ids)
+    if snapshot_id is not None:
+        missing = [bucket_id for bucket_id in bucket_ids if bucket_id not in signals]
+        signals.update(await _fetch(None, missing))
+    return signals
 
 
 # ─── Orders & Fills ───────────────────────────────────────────────────────────
