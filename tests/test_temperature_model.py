@@ -99,6 +99,27 @@ def test_compute_model_locks_current_bucket_after_peak(monkeypatch):
     assert classify_city_state(model.prob_hotter_bucket) == "resolved"
 
 
+def test_compute_model_includes_hrrr_15min_source(monkeypatch):
+    monkeypatch.setattr(temperature_model, "datetime", _MorningDateTime)
+
+    model = compute_model(
+        nws_high=None,
+        wu_hourly_peak=None,
+        daily_high_metar=None,
+        current_temp_f=60.0,
+        calibration=None,
+        buckets=[(64.0, 65.0), (66.0, None)],
+        forecast_quality="ok",
+        unit="F",
+        city_tz="America/New_York",
+        hrrr_15min_high=66.0,
+    )
+
+    assert model is not None
+    assert model.inputs["hrrr_15min_high"] == 66.0
+    assert model.inputs["sources_used"] == ["hrrr_15min"]
+
+
 def test_lock_falls_back_when_adaptive_lags(monkeypatch):
     """Atlanta regression: at 19:17 ET the observed daily high was 78.8°F but
     adaptive.peak_already_passed hadn't flipped yet. The lock regime must

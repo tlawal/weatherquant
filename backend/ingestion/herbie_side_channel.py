@@ -191,6 +191,15 @@ async def _run_source(source: str) -> None:
                     run=run, lead_hours=lead_hours),
         )
         if result is None:
+            log.warning(
+                "herbie %s: no sample city=%s model=%s run=%s fxx=%d import_error=%s",
+                source,
+                city.city_slug,
+                model,
+                run.isoformat(),
+                lead_hours,
+                _HERBIE_IMPORT_ERROR,
+            )
             continue
         try:
             await _record(city=city, source=source, result=result, om_source=om_source)

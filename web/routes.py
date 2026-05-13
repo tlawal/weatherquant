@@ -725,31 +725,10 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
         )
 
         if nws_metar is None:
-            await _fetch_live_current_temp_for_station(city, current_temp_station)
-            async with get_session() as sess:
-                from backend.storage.repos import (
-                    get_latest_madis_obs,
-                    get_latest_metar,
-                    get_latest_metar_by_source,
-                )
-
-                metar = await get_latest_metar(sess, city.id)
-                madis_obs = await get_latest_madis_obs(sess, city.id)
-                madis_metar = _fresh_current_temp_row(
-                    await get_latest_metar_by_source(
-                        sess, city.id, "madis", current_temp_station
-                    ),
-                    now=datetime.now(timezone.utc),
-                )
-                nws_api_metar = await get_latest_metar_by_source(
-                    sess, city.id, "nws_api", current_temp_station
-                )
-                aviation_metar = await get_latest_metar_by_source(
-                    sess, city.id, "aviation", current_temp_station
-                )
-                nws_metar = _select_freshest_current_temp(
-                    [nws_api_metar, aviation_metar], now=datetime.now(timezone.utc)
-                )
+            log.debug(
+                "city_detail: no fresh NWS current temp for %s; using cached observations",
+                current_temp_station,
+            )
 
     model = None
     buckets_with_signals = []
@@ -1373,7 +1352,6 @@ async def htmx_signals_table(request: Request):
     from backend.storage.repos import get_signals_for_latest_snapshot
     from backend.storage.models import Bucket, Event, City
 
-    today_et = et_today()
     # Single session for the whole HTMX poll — was opening N+1 sessions
     # (1 outer + 1 per signal) which leaked aiosqlite daemon threads under
     # SQLite + NullPool. The HTMX poller hits this endpoint every few
@@ -1381,7 +1359,7 @@ async def htmx_signals_table(request: Request):
     # `dialect.connect()` exhaustion 500s.
     async with get_session() as sess:
         raw_signals = await get_signals_for_latest_snapshot(
-            sess, limit=200, date_et=today_et,
+            sess, limit=1000, date_et=None,
         )
 
         rows = []
@@ -1391,11 +1369,13 @@ async def htmx_signals_table(request: Request):
             if not b:
                 continue
             ev = await sess.get(Event, b.event_id)
-            if not ev or ev.date_et != today_et:
+            if not ev:
                 continue
             c = await sess.get(City, ev.city_id)
+            if not c or ev.date_et != city_local_date(c):
+                continue
 
-            key = (c.city_slug if c else "", b.bucket_idx)
+            key = (c.city_slug, b.bucket_idx)
             if key in seen:
                 continue
             seen[key] = True
@@ -1405,11 +1385,11 @@ async def htmx_signals_table(request: Request):
             if reason.get("city_state") == "resolved":
                 continue
 
-            slug = c.city_slug if c else ""
+            slug = c.city_slug
             rows.append({
                 "city_slug": slug,
-                "city_display": c.display_name if c else "",
-                "unit": c.unit if c else "F",
+                "city_display": c.display_name,
+                "unit": c.unit,
                 "bucket_idx": b.bucket_idx,
                 "label": b.label or f"Bucket {b.bucket_idx}",
                 "low_f": b.low_f,
@@ -1685,12 +1665,10 @@ async def strategies_page(request: Request):
     from backend.storage.models import Bucket, Event
     from sqlalchemy import select
 
-    today_et = et_today()
-
     async with get_session() as sess:
         arming = await get_arming_state(sess)
         raw_signals = await get_signals_for_latest_snapshot(
-            sess, limit=200, date_et=today_et,
+            sess, limit=1000, date_et=None,
         )
         cities = await get_all_cities(sess)
 
@@ -1721,10 +1699,10 @@ async def strategies_page(request: Request):
         if not bucket:
             continue
         event = event_map.get(bucket.event_id)
-        if not event or event.date_et != today_et:
+        if not event:
             continue
         city = city_map.get(event.city_id)
-        if not city:
+        if not city or event.date_et != city_local_date(city):
             continue
         slug = city.city_slug
         if slug not in heatmap_data:

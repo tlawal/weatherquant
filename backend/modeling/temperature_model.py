@@ -138,6 +138,7 @@ def _metar_weight(hour_local: int) -> float:
 # model_run_at, so its TAU is set high — caller passes 1.0 (no decay) instead.
 _FRESHNESS_TAU_HOURS = {
     "hrrr": 6.0,
+    "hrrr_15min": 6.0,
     "ncep_hrrr_conus_15min": 6.0,
     "nbm": 8.0,
     "gfs": 12.0,
@@ -563,6 +564,7 @@ def compute_model(
     adaptive=None,
     latest_weather: Optional[dict] = None,
     hrrr_high: Optional[float] = None,
+    hrrr_15min_high: Optional[float] = None,
     nbm_high: Optional[float] = None,
     ecmwf_ifs_high: Optional[float] = None,
     ecmwf_aifs_high: Optional[float] = None,
@@ -645,6 +647,11 @@ def compute_model(
         )
     if hrrr_high is not None:
         calibrated["hrrr"] = (_debias("hrrr", hrrr_high), _weight("hrrr", 0.5))
+    if hrrr_15min_high is not None:
+        calibrated["hrrr_15min"] = (
+            _debias("hrrr_15min", hrrr_15min_high),
+            _weight("hrrr_15min", 0.35),
+        )
     if nbm_high is not None:
         calibrated["nbm"] = (_debias("nbm", nbm_high), _weight("nbm", 0.2))
     if ecmwf_ifs_high is not None:
@@ -1092,6 +1099,7 @@ def compute_model(
         "nws_high": nws_high,
         "wu_hourly_peak": wu_hourly_peak,
         "hrrr_high": hrrr_high,
+        "hrrr_15min_high": hrrr_15min_high,
         "nbm_high": nbm_high,
         "ecmwf_ifs_high": ecmwf_ifs_high,
         "ecmwf_aifs_high": ecmwf_aifs_high,

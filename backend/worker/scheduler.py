@@ -427,17 +427,16 @@ async def job_online_em_updates():
                     event_id=event.id,
                     date_et=event.date_et,
                 )
-                # Mark the event processed regardless of whether any bucket
-                # was updated — empty summary means "no fitted weights at any
-                # active lead yet", which we record so we don't keep
-                # re-trying the same event each hour.
                 event_in_sess = (
                     await sess.execute(
                         select(Event).where(Event.id == event.id)
                     )
                 ).scalar_one()
-                event_in_sess.bma_online_processed_at = datetime.now(timezone.utc)
-                await sess.commit()
+                if summary:
+                    event_in_sess.bma_online_processed_at = datetime.now(timezone.utc)
+                    await sess.commit()
+                else:
+                    await sess.rollback()
             if summary:
                 n_processed += 1
                 total_lead_buckets += len(summary)

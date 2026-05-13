@@ -513,7 +513,7 @@ def test_notify_trade_filled_returns_send_result(monkeypatch):
     assert calls and "atlanta" in calls[0][0]
 
 
-def test_redemptions_overlays_api_position_without_admin_sync(tmp_path, monkeypatch):
+def test_redemptions_can_include_api_position_without_admin_sync(tmp_path, monkeypatch):
     engine, session_factory = _run(_setup_test_db(tmp_path, monkeypatch))
     city = _run(_create_city(session_factory))
 
@@ -577,7 +577,7 @@ def test_redemptions_overlays_api_position_without_admin_sync(tmp_path, monkeypa
     monkeypatch.setattr(api_routes, "_fetch_wallet_api_positions", fake_fetch_wallet_api_positions)
     monkeypatch.setattr("aiohttp.ClientSession", FakeSession)
 
-    res = _run(api_routes.redemptions_list())
+    res = _run(api_routes.redemptions_list(onchain=True))
     bucket = res["events"][0]["buckets"][0]
     assert bucket["net_qty"] == 3
     assert bucket["avg_cost"] == 0.25

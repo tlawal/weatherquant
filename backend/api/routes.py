@@ -1191,8 +1191,8 @@ async def _fetch_wallet_api_positions(timeout_s: float = 6.0) -> tuple[list[dict
 
 
 @router.get("/api/redemptions")
-async def redemptions_list():
-    """All events that have positions, with resolution and on-chain status."""
+async def redemptions_list(onchain: bool = False):
+    """All events that have positions, with optional on-chain determination checks."""
     import aiohttp
 
     NEG_RISK_ADAPTER = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"
@@ -1210,7 +1210,8 @@ async def redemptions_list():
     all_events = {e.id: e for e in unresolved + unredeemed + redeemed}
     events = sorted(all_events.values(), key=lambda e: e.date_et, reverse=True)
 
-    # Batch check on-chain determination for all condition_ids
+    # Optionally batch check on-chain determination for all condition_ids.
+    # This can be slow, so the default endpoint stays on DB/API-backed data.
     condition_ids = set()
     for evt in events:
         for b in evt.buckets:
@@ -1219,7 +1220,7 @@ async def redemptions_list():
 
     determined_map = {}
     cid_to_market_id = {}
-    if condition_ids:
+    if onchain and POLYGON_RPC and condition_ids:
         timeout = aiohttp.ClientTimeout(total=4)
         async with aiohttp.ClientSession(timeout=timeout) as http:
             # Step 1: fetch negRiskMarketID for each event from Gamma API (or default to condition ID if not NegRisk)
@@ -1420,15 +1421,16 @@ async def redemptions_list():
             if not b.get("label") or b.get("label", "").startswith("Bucket"):
                 b["label"] = f"{api_pos.get('outcome', 'YES')} — {api_pos.get('title', '')}"
 
-    # ── Fetch on-chain positions from Polymarket data API (catches manual trades) ──
+    # ── Add wallet positions missing from the DB (catches manual trades) ──
     db_condition_ids = set()
     for r in rows:
         for b in r["buckets"]:
             if b["condition_id"] and b.get("net_qty", 0) > 0:
                 db_condition_ids.add(b["condition_id"])
 
-    # Use API positions list already fetched above
-    if addr and api_positions_list:
+    # Add DB-missing wallet positions only on explicit on-chain refresh. The
+    # standard page path already overlays API positions onto known DB markets.
+    if onchain and addr and api_positions_list:
         try:
             timeout = aiohttp.ClientTimeout(total=10)
             async with aiohttp.ClientSession(timeout=timeout) as http:
@@ -1442,35 +1444,37 @@ async def redemptions_list():
 
                     # Check on-chain determination — getDetermined takes negRiskMarketID
                     determined = None
-                    try:
-                        # Fetch Market ID from Event mapping
-                        mid = cid_to_market_id.get(cid)
-                        # If not in DB mapping, try to fetch directly from Gamma API
-                        gamma_event_id = pos.get("eventId")
-                        if not mid and gamma_event_id:
-                            url = f"https://gamma-api.polymarket.com/events/{gamma_event_id}"
-                            async with http.get(url) as resp:
-                                if resp.status == 200:
-                                    data = await resp.json()
-                                    if isinstance(data, list) and len(data) > 0:
-                                        data = data[0]
-                                    mid = data.get("negRiskMarketID")
-                        
-                        # Fallback to condition id if it's not NegRisk
-                        mid = mid or cid
+                    if onchain and POLYGON_RPC:
+                        try:
+                            # Fetch Market ID from Event mapping
+                            mid = cid_to_market_id.get(cid)
+                            # If not in DB mapping, try to fetch directly from Gamma API
+                            gamma_event_id = pos.get("eventId")
+                            if not mid and gamma_event_id:
+                                url = f"https://gamma-api.polymarket.com/events/{gamma_event_id}"
+                                async with http.get(url) as resp:
+                                    if resp.status == 200:
+                                        data = await resp.json()
+                                        if isinstance(data, list) and len(data) > 0:
+                                            data = data[0]
+                                        mid = data.get("negRiskMarketID")
 
-                        if mid:
-                            mid_hex = mid.replace("0x", "")
-                            call_data = f"0x{GET_DETERMINED_SEL}{mid_hex.zfill(64)}"
-                            rpc_resp = await (await http.post(POLYGON_RPC, json={
-                                "jsonrpc": "2.0", "id": 1, "method": "eth_call",
-                                "params": [{"to": NEG_RISK_ADAPTER, "data": call_data}, "latest"],
-                            })).json()
-                            if "result" in rpc_resp:
-                                determined = int(rpc_resp["result"], 16) != 0
-                    except Exception:
-                        pass
+                            # Fallback to condition id if it's not NegRisk
+                            mid = mid or cid
 
+                            if mid:
+                                mid_hex = mid.replace("0x", "")
+                                call_data = f"0x{GET_DETERMINED_SEL}{mid_hex.zfill(64)}"
+                                rpc_resp = await (await http.post(POLYGON_RPC, json={
+                                    "jsonrpc": "2.0", "id": 1, "method": "eth_call",
+                                    "params": [{"to": NEG_RISK_ADAPTER, "data": call_data}, "latest"],
+                                })).json()
+                                if "result" in rpc_resp:
+                                    determined = int(rpc_resp["result"], 16) != 0
+                        except Exception:
+                            pass
+                    elif onchain and not POLYGON_RPC:
+                        log.warning("redemptions: onchain=true but POLYGON_RPC_URL is not configured")
                     redeemable_api = pos.get("redeemable", False)
                     if redeemable_api and determined:
                         status = "redeemable"

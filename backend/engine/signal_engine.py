@@ -277,6 +277,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         wu_hourly_obs = await get_latest_forecast(sess, city.id, "wu_hourly", today_et)
         wu_history_obs = await get_latest_forecast(sess, city.id, "wu_history", today_et)
         hrrr_obs = await get_latest_forecast(sess, city.id, "hrrr", today_et)
+        hrrr_15min_obs = await get_latest_forecast(sess, city.id, "hrrr_15min", today_et)
         nbm_obs = await get_latest_forecast(sess, city.id, "nbm", today_et)
         ecmwf_ifs_obs = await get_latest_forecast(sess, city.id, "ecmwf_ifs", today_et)
         ecmwf_aifs_obs = await get_latest_forecast(sess, city.id, "ecmwf_aifs", today_et)
@@ -416,7 +417,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
     try:
         from backend.modeling.station_weights import load_station_source_weights
         station_weights, station_biases = await load_station_source_weights(
-            getattr(city, "metar_station", None)
+            active_station_id
         )
         if station_weights:
             if cal_dict is None:
@@ -536,7 +537,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
 
     _src_to_obs = {
         "nws": nws_obs, "wu_hourly": wu_hourly_obs, "hrrr": hrrr_obs,
-        "nbm": nbm_obs, "ecmwf_ifs": ecmwf_ifs_obs,
+        "hrrr_15min": hrrr_15min_obs, "nbm": nbm_obs, "ecmwf_ifs": ecmwf_ifs_obs,
         "ecmwf_aifs": ecmwf_aifs_obs,
         "gfs_graphcast": gfs_graphcast_obs,
         "pangu_weather": pangu_weather_obs,
@@ -624,6 +625,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         nws_high=nws_obs.high_f if nws_obs else None,
         wu_hourly_peak=wu_hourly_obs.high_f if wu_hourly_obs else None,
         hrrr_high=hrrr_obs.high_f if hrrr_obs else None,
+        hrrr_15min_high=hrrr_15min_obs.high_f if hrrr_15min_obs else None,
         nbm_high=nbm_obs.high_f if nbm_obs else None,
         ecmwf_ifs_high=ecmwf_ifs_obs.high_f if ecmwf_ifs_obs else None,
         ecmwf_aifs_high=ecmwf_aifs_obs.high_f if ecmwf_aifs_obs else None,

@@ -43,15 +43,26 @@ GLOBAL_MSE_PRIOR = 9.0  # ≈ 3°F RMSE, typical day-ahead NWP error
 # Clamp bounds on final normalized weight so no source dominates or zeros
 WEIGHT_FLOOR = 0.05
 WEIGHT_CAP = 0.60
-# Forecast sources participating in the ensemble
-ENSEMBLE_SOURCES = ("nws", "wu_hourly", "hrrr", "nbm", "ecmwf_ifs")
+# Forecast sources participating in the live ensemble. Keep this aligned with
+# station_calibration.py and signal_engine.py so every traded source can receive
+# per-station bias/weight corrections once it has errors.
+ENSEMBLE_SOURCES = (
+    "nws", "wu_hourly", "hrrr", "hrrr_15min", "nbm", "ecmwf_ifs",
+    "ecmwf_aifs", "gfs_graphcast", "pangu_weather", "fourcastnet_v2", "aurora",
+)
 # Default fallback weights (match prior hardcoded defaults in temperature_model.py)
 DEFAULT_WEIGHTS: dict[str, float] = {
     "nws": 0.5,
     "wu_hourly": 0.5,
     "hrrr": 0.5,
+    "hrrr_15min": 0.35,
     "nbm": 0.2,
     "ecmwf_ifs": 0.5,
+    "ecmwf_aifs": 0.4,
+    "gfs_graphcast": 0.4,
+    "pangu_weather": 0.35,
+    "fourcastnet_v2": 0.35,
+    "aurora": 0.35,
 }
 
 
