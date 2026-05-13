@@ -19,7 +19,7 @@ from backend.modeling.temperature_model import (
     _lead_skill_factors,
     compute_model,
 )
-from backend.engine.signal_engine import _build_source_timing_metadata
+from backend.engine.signal_engine import _build_source_timing_metadata, _trusted_pre_model_spread
 from backend.storage.models import ForecastObs, SourceLeadTimeSkill
 
 
@@ -191,6 +191,24 @@ def test_wu_hourly_uses_fetched_at_for_lead_skill_and_bma_sigma_note():
     bma_notes = model.inputs["bma_shadow"]["notes"]
     assert "wu_hourly: no SourceLeadTimeSkill row, σ=prior" not in bma_notes
     assert "wu_hourly: n=5<30, σ=prior" in bma_notes
+
+
+def test_pre_model_regime_spread_uses_trusted_sources_not_ai_outlier():
+    obs_by_source = {
+        "nws": ForecastObs(city_id=1, source="nws", date_et="2026-05-13", high_f=81.0),
+        "wu_hourly": ForecastObs(city_id=1, source="wu_hourly", date_et="2026-05-13", high_f=79.0),
+        "hrrr": ForecastObs(city_id=1, source="hrrr", date_et="2026-05-13", high_f=79.9),
+        "hrrr_15min": ForecastObs(city_id=1, source="hrrr_15min", date_et="2026-05-13", high_f=79.9),
+        "nbm": ForecastObs(city_id=1, source="nbm", date_et="2026-05-13", high_f=79.4),
+        "ecmwf_ifs": ForecastObs(city_id=1, source="ecmwf_ifs", date_et="2026-05-13", high_f=80.2),
+        "ecmwf_aifs": ForecastObs(city_id=1, source="ecmwf_aifs", date_et="2026-05-13", high_f=48.0),
+    }
+
+    trusted_spread, raw_spread, gates = _trusted_pre_model_spread(obs_by_source)
+
+    assert raw_spread >= 30.0
+    assert trusted_spread <= 2.5
+    assert gates["ecmwf_aifs"]["reason"] == "outlier_vs_trusted_median"
 
 
 # ── compute_model end-to-end shape checks ───────────────────────────────

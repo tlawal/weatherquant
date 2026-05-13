@@ -208,6 +208,124 @@ def test_stale_unproven_ai_sources_do_not_create_cold_tail(monkeypatch):
     assert {"pangu_weather", "fourcastnet_v2", "aurora"} <= bma_sources
 
 
+def test_same_day_ai_outlier_is_quarantined_from_spread_and_probabilities(monkeypatch):
+    """Atlanta regression: one bad AIFS 48°F member must not inflate spread/sigma
+    when the operational panel is tightly clustered near 80°F."""
+    class _AtlantaLateMorning(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            fixed = cls(2026, 5, 13, 11, 2, tzinfo=ZoneInfo("America/New_York"))
+            return fixed.astimezone(tz) if tz else fixed
+
+    monkeypatch.setattr(temperature_model, "datetime", _AtlantaLateMorning)
+    local_tz = ZoneInfo("America/New_York")
+    now_utc = datetime(2026, 5, 13, 15, 2, tzinfo=timezone.utc)
+    fresh = now_utc - timedelta(hours=2)
+    event_settlement_utc = datetime(2026, 5, 14, 3, 59, tzinfo=timezone.utc)
+    adaptive = AdaptiveResult(
+        kalman=KalmanState(
+            smoothed_temp=71.9,
+            temp_trend_per_min=0.006,
+            uncertainty=0.55,
+            n_observations=136,
+            process_noise_factor=1.0,
+        ),
+        regression_slope=0.006,
+        regression_r2=0.7,
+        regression_features_used=["time"],
+        station_predictions=[
+            StationTimePrediction(
+                obs_time=datetime(2026, 5, 13, 13, 52, tzinfo=local_tz),
+                predicted_temp=73.5,
+                uncertainty=0.8,
+                minutes_ahead=170.0,
+                is_past=False,
+                trend_per_hour=0.4,
+            ),
+        ],
+        predicted_daily_high=73.5,
+        predicted_high_time=datetime(2026, 5, 13, 13, 52, tzinfo=local_tz),
+        sigma_adjustment=1.0,
+        peak_already_passed=False,
+        composite_peak_timing="1:52 PM",
+        peak_timing_source="kalman_trend",
+    )
+
+    model = compute_model(
+        nws_high=81.0,
+        wu_hourly_peak=79.0,
+        daily_high_metar=69.1,
+        current_temp_f=69.1,
+        calibration={
+            "station_source_weights": {
+                "nws": 0.16,
+                "wu_hourly": 0.12,
+                "hrrr": 0.22,
+                "hrrr_15min": 0.20,
+                "nbm": 0.15,
+                "ecmwf_ifs": 0.15,
+            },
+            "station_source_biases": {},
+        },
+        buckets=[
+            (None, 75.0),
+            (76.0, 77.0),
+            (78.0, 79.0),
+            (80.0, 81.0),
+            (82.0, 83.0),
+            (84.0, 85.0),
+            (86.0, 87.0),
+            (88.0, 89.0),
+            (90.0, 91.0),
+            (92.0, 93.0),
+            (94.0, None),
+        ],
+        forecast_quality="ok",
+        unit="F",
+        city_tz="America/New_York",
+        observed_high=69.1,
+        ml_features={
+            "temp_slope_3h": 0.2,
+            "avg_peak_timing_mins": 832.0,
+            "day_of_year": 133,
+        },
+        adaptive=adaptive,
+        latest_weather=None,
+        hrrr_high=79.9,
+        hrrr_15min_high=79.9,
+        nbm_high=79.4,
+        ecmwf_ifs_high=80.2,
+        ecmwf_aifs_high=48.0,
+        gfs_graphcast_high=80.9,
+        model_run_at_by_source={
+            "nws": fresh,
+            "wu_hourly": fresh,
+            "hrrr": fresh,
+            "hrrr_15min": fresh,
+            "nbm": fresh,
+            "ecmwf_ifs": fresh,
+            "ecmwf_aifs": fresh,
+            "gfs_graphcast": fresh,
+        },
+        now_utc=now_utc,
+        event_settlement_utc=event_settlement_utc,
+        regime_label="normal",
+    )
+
+    assert model is not None
+    assert model.inputs["raw_spread"] >= 30.0
+    assert model.inputs["trusted_spread"] <= 2.5
+    assert model.probs[0] < 0.10
+    assert "ecmwf_aifs" not in model.inputs["sources_used"]
+    assert model.inputs["excluded_sources"]["ecmwf_aifs"] == "outlier_vs_trusted_median"
+    assert (
+        model.inputs["source_quality_gates"]["ecmwf_aifs"]["reason"]
+        == "outlier_vs_trusted_median"
+    )
+    assert model.inputs["metar_projection_gate"] == "below_consensus"
+    assert model.inputs["same_day_sigma_cap_applied"] is True
+
+
 def test_lock_falls_back_when_adaptive_lags(monkeypatch):
     """Atlanta regression: at 19:17 ET the observed daily high was 78.8°F but
     adaptive.peak_already_passed hadn't flipped yet. The lock regime must

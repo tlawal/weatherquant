@@ -171,6 +171,21 @@ _STALE_AI_LIVE_EXCLUDE_SOURCES = frozenset({
 })
 _STALE_AI_LIVE_EXCLUDE_HOURS = 24.0
 _UNPROVEN_AI_WEIGHT_CAP = 0.05
+_TRUSTED_REFERENCE_SOURCES = frozenset({
+    "nws",
+    "wu_hourly",
+    "hrrr",
+    "hrrr_15min",
+    "nbm",
+    "ecmwf_ifs",
+})
+_GENERAL_OUTLIER_THRESHOLD_F = 10.0
+_AI_OUTLIER_THRESHOLD_F = 6.0
+_AI_OUTLIER_MIN_STATION_SAMPLES = 30
+_AI_OUTLIER_MAX_STATION_MAE_F = 4.0
+_SAME_DAY_TIGHT_SPREAD_CAP_F = 2.5
+_SAME_DAY_TIGHT_SIGMA_CAP_F = 2.75
+_SAME_DAY_TIGHT_CAP_MAX_HOURS = 18.0
 # Hard cap on lead-skill weight swing — protects against thin-data buckets.
 _LEAD_SKILL_CLAMP = (0.7, 1.3)
 # Floor on freshness factor so a stale source still contributes something.
@@ -214,6 +229,98 @@ def _lead_time_sigma_growth(
     if median_lead <= 72.0:
         sigma_f = min(sigma_f, 3.5)
     return sigma_f * unit_mult
+
+
+def _spread_or_none(values) -> Optional[float]:
+    vals = [float(v) for v in values if v is not None]
+    if len(vals) < 2:
+        return None
+    return max(vals) - min(vals)
+
+
+def _station_source_has_good_evidence(
+    src: str,
+    station_source_meta: Optional[dict[str, dict]],
+) -> bool:
+    meta = (station_source_meta or {}).get(src) or {}
+    try:
+        n_samples = int(meta.get("n_samples") or 0)
+    except (TypeError, ValueError):
+        n_samples = 0
+    mae = meta.get("mae_7d")
+    if mae is None:
+        mae = meta.get("mae_30d")
+    try:
+        mae_f = float(mae)
+    except (TypeError, ValueError):
+        mae_f = None
+    return (
+        n_samples >= _AI_OUTLIER_MIN_STATION_SAMPLES
+        and mae_f is not None
+        and mae_f <= _AI_OUTLIER_MAX_STATION_MAE_F
+    )
+
+
+def apply_forecast_source_quality_gates(
+    source_values: dict[str, float],
+    *,
+    station_source_meta: Optional[dict[str, dict]] = None,
+    unit_mult: float = 1.0,
+) -> dict:
+    """Quarantine physically implausible source members before live fusion.
+
+    The trusted reference is the median of operational/non-experimental sources.
+    Experimental AI members need local station evidence before they are allowed
+    to deviate as much as the operational panel.
+    """
+    clean_values = {
+        src: float(val)
+        for src, val in source_values.items()
+        if val is not None
+    }
+    raw_spread = _spread_or_none(clean_values.values())
+    trusted_refs = [
+        val for src, val in clean_values.items()
+        if src in _TRUSTED_REFERENCE_SOURCES
+    ]
+    if len(trusted_refs) < 3:
+        return {
+            "live_values": clean_values,
+            "raw_spread": raw_spread,
+            "trusted_spread": raw_spread,
+            "trusted_reference_median": None,
+            "source_quality_gates": {},
+        }
+
+    ref = float(statistics.median(trusted_refs))
+    gates: dict[str, dict] = {}
+    live_values: dict[str, float] = {}
+    for src, val in clean_values.items():
+        threshold = _GENERAL_OUTLIER_THRESHOLD_F * unit_mult
+        if (
+            src in _AI_FORECAST_SOURCES
+            and not _station_source_has_good_evidence(src, station_source_meta)
+        ):
+            threshold = _AI_OUTLIER_THRESHOLD_F * unit_mult
+        delta = abs(val - ref)
+        if delta > threshold:
+            gates[src] = {
+                "reason": "outlier_vs_trusted_median",
+                "value": round(val, 2),
+                "reference": round(ref, 2),
+                "delta": round(delta, 2),
+                "threshold": round(threshold, 2),
+            }
+            continue
+        live_values[src] = val
+
+    return {
+        "live_values": live_values,
+        "raw_spread": raw_spread,
+        "trusted_spread": _spread_or_none(live_values.values()),
+        "trusted_reference_median": ref,
+        "source_quality_gates": gates,
+    }
 
 
 def _ensemble_sigma(
@@ -604,6 +711,7 @@ def compute_model(
     # Bayesian-upgrade Q6: regime-aware σ inflation multiplier (1.0 = calm,
     # up to 2.0 = volatile). None = behave exactly as pre-Q6 (no inflation).
     regime_sigma_multiplier: Optional[float] = None,
+    regime_label: Optional[str] = None,
     # M1 Phase 2: EM-fit BMA mixing weights from BMAWeights (per (city, lead)).
     # Caller supplies {source: weight} when a fit exists for the operative
     # lead bucket; build_bma_predictive uses these instead of the legacy
@@ -637,6 +745,7 @@ def compute_model(
     # city-level calibration for any source that has enough samples.
     station_w: dict = cal.get("station_source_weights") or {}
     station_b: dict = cal.get("station_source_biases") or {}
+    station_source_meta: dict = cal.get("station_source_meta") or {}
 
     def _debias(src: str, raw: float, legacy_default: float = 0.0) -> float:
         # Station bias is EWMA(forecast - observed), so subtract it.
@@ -653,6 +762,8 @@ def compute_model(
     local_tz = ZoneInfo(city_tz)
     now_local = datetime.now(local_tz)
     hour_local = now_local.hour
+    # Scale factor for Celsius
+    unit_mult = 5.0 / 9.0 if unit == "C" else 1.0
 
     calibrated = {}
     if nws_high is not None:
@@ -714,6 +825,26 @@ def compute_model(
         log.warning("model: no forecast sources available — cannot compute model")
         return None
 
+    excluded_sources: dict[str, str] = {}
+    raw_calibrated = dict(calibrated)
+    source_quality = apply_forecast_source_quality_gates(
+        {src: val for src, (val, _) in calibrated.items()},
+        station_source_meta=station_source_meta,
+        unit_mult=unit_mult,
+    )
+    source_quality_gates = source_quality["source_quality_gates"]
+    if source_quality_gates:
+        for src, gate in source_quality_gates.items():
+            excluded_sources[src] = gate["reason"]
+        calibrated = {
+            src: calibrated[src]
+            for src in source_quality["live_values"]
+            if src in calibrated
+        }
+        if not calibrated:
+            log.warning("model: all forecast sources excluded by source quality gates")
+            return None
+
     # ── Phase B1+B2: lead-skill + freshness adjustments ───────────────────
     # Multiply each source's base weight by its lead-time skill factor (clamped
     # ±30%) and by an exp-decay freshness factor on model_run_at age. Sources
@@ -726,7 +857,6 @@ def compute_model(
     mra = model_run_at_by_source or {}
     weight_factors: dict[str, dict] = {}
     bma_calibrated: dict[str, tuple[float, float]] = {}
-    excluded_sources: dict[str, str] = {}
     for src in list(calibrated.keys()):
         mu_val, base_w = calibrated[src]
         lf = lead_factors.get(src, 1.0)
@@ -770,6 +900,21 @@ def compute_model(
             "live_gate": live_gate,
         }
 
+    for src, gate in source_quality_gates.items():
+        if src in weight_factors or src not in raw_calibrated:
+            continue
+        _raw_val, base_w = raw_calibrated[src]
+        weight_factors[src] = {
+            "base": round(base_w, 4),
+            "lead_factor": 1.0,
+            "freshness_factor": 1.0,
+            "age_hours": None,
+            "diagnostic_effective": round(base_w, 4),
+            "effective": 0.0,
+            "live_gate": gate["reason"],
+            "source_quality_gate": gate,
+        }
+
     if not calibrated:
         log.warning("model: all forecast sources excluded by live gates")
         return None
@@ -804,6 +949,8 @@ def compute_model(
 
     vals = [v for v, _ in calibrated.values()]
     spread = (max(vals) - min(vals)) if len(vals) >= 2 else 0.0
+    raw_spread = source_quality.get("raw_spread")
+    trusted_spread = spread if len(vals) >= 2 else 0.0
 
     # ── Multi-model + dynamic Kalman blend ─────────────────────────────────
     # Kalman is a short-horizon nowcast, not a forecast. It earns weight
@@ -863,8 +1010,6 @@ def compute_model(
         "weight_factors": weight_factors,
     }
 
-    # Scale factor for Celsius
-    unit_mult = 5.0 / 9.0 if unit == "C" else 1.0
     canonical_buckets = canonical_bucket_ranges(buckets)
 
     # Uncertainty from disagreement (Phase B5).
@@ -883,8 +1028,12 @@ def compute_model(
     # quadrature to the ensemble disagreement. This fixes the prior
     # under-confidence at L > 24h: a 48h forecast carries ~3.9°F of lead
     # noise that the inter-source spread alone systematically misses.
+    live_model_run_at_by_source = {
+        src: ts for src, ts in (model_run_at_by_source or {}).items()
+        if src in calibrated
+    }
     sigma_lead = _lead_time_sigma_growth(
-        model_run_at_by_source, event_settlement_utc, unit_mult,
+        live_model_run_at_by_source, event_settlement_utc, unit_mult,
     )
     if sigma_lead > 0.0:
         sigma_raw = math.sqrt(sigma_raw * sigma_raw + sigma_lead * sigma_lead)
@@ -1059,8 +1208,31 @@ def compute_model(
                 n_obs, density_factor, w_metar,
             )
 
+    metar_projection_gate: Optional[str] = None
+    projected_high_for_blend = projected_high
+    fallback_peak_hour_local = None
+    try:
+        fallback_peak_hour_local = float(_ml.get("avg_peak_timing_mins", 960.0)) / 60.0
+    except (TypeError, ValueError):
+        fallback_peak_hour_local = None
+    gate_peak_hour_local = (
+        peak_hour_local if peak_hour_local is not None else fallback_peak_hour_local
+    )
+    before_peak = (
+        gate_peak_hour_local is not None
+        and hour_local_fractional < gate_peak_hour_local
+        and not (adaptive is not None and adaptive.peak_already_passed)
+    )
+    if (
+        before_peak
+        and not kalman_nowcast_active
+        and projected_high < mu_forecast - 3.0 * unit_mult
+    ):
+        metar_projection_gate = "below_consensus"
+        projected_high_for_blend = mu_forecast
+
     # Weighted combination
-    mu_final = (1.0 - w_metar) * mu_forecast + w_metar * projected_high
+    mu_final = (1.0 - w_metar) * mu_forecast + w_metar * projected_high_for_blend
 
     # As METAR observations accumulate through the day (w_metar rises),
     # forecast spread becomes less relevant because ground truth dominates.
@@ -1095,6 +1267,34 @@ def compute_model(
         )
 
     sigma_final = max(1.0 * unit_mult, sigma_final)
+
+    time_to_settlement_h: Optional[float] = None
+    if event_settlement_utc is not None:
+        _settle = event_settlement_utc
+        if _settle.tzinfo is None:
+            _settle = _settle.replace(tzinfo=timezone.utc)
+        _now_for_settlement = now_ts
+        if _now_for_settlement.tzinfo is None:
+            _now_for_settlement = _now_for_settlement.replace(tzinfo=timezone.utc)
+        time_to_settlement_h = max(
+            0.0,
+            (
+                _settle.astimezone(timezone.utc)
+                - _now_for_settlement.astimezone(timezone.utc)
+            ).total_seconds() / 3600.0,
+        )
+    same_day_sigma_cap_applied = False
+    regime_is_volatile = str(regime_label or "").lower() == "volatile"
+    if (
+        time_to_settlement_h is not None
+        and time_to_settlement_h <= _SAME_DAY_TIGHT_CAP_MAX_HOURS
+        and trusted_spread <= _SAME_DAY_TIGHT_SPREAD_CAP_F * unit_mult
+        and not regime_is_volatile
+    ):
+        sigma_cap = _SAME_DAY_TIGHT_SIGMA_CAP_F * unit_mult
+        if sigma_final > sigma_cap:
+            sigma_final = sigma_cap
+            same_day_sigma_cap_applied = True
 
     # ── Compute bucket probabilities ───────────────────────────────────────────
     if not canonical_buckets:
@@ -1153,6 +1353,10 @@ def compute_model(
         "nbm_high": nbm_high,
         "ecmwf_ifs_high": ecmwf_ifs_high,
         "ecmwf_aifs_high": ecmwf_aifs_high,
+        "gfs_graphcast_high": gfs_graphcast_high,
+        "pangu_weather_high": pangu_weather_high,
+        "fourcastnet_v2_high": fourcastnet_v2_high,
+        "aurora_high": aurora_high,
         "daily_high_metar": daily_high_metar,
         "current_temp_f": current_temp_f,
         "mu_forecast": float(mu_forecast),
@@ -1162,14 +1366,28 @@ def compute_model(
         "kalman_weight": round(kalman_w, 3),
         "kalman_divergence_f": round(kalman_divergence, 2) if kalman_divergence is not None else None,
         "projected_high": float(projected_high),
+        "projected_high_for_blend": float(projected_high_for_blend),
         "projected_high_capped": projected_high_capped,
+        "metar_projection_gate": metar_projection_gate,
         "metar_forecast_divergence_f": round(divergence_f, 2),
         "w_metar": float(w_metar),
         "w_metar_base": float(_metar_weight(hour_local)),
         "remaining_rise": remaining_rise,
         "hour_local": hour_local,
-        "spread": float(max(vals) - min(vals)) if len(vals) >= 2 else 0.0,
+        "spread": float(trusted_spread),
+        "raw_spread": float(raw_spread) if raw_spread is not None else None,
+        "trusted_spread": float(trusted_spread),
+        "trusted_reference_median": source_quality.get("trusted_reference_median"),
+        "source_quality_gates": source_quality_gates,
         "sigma_raw": float(sigma_raw),
+        "same_day_sigma_cap_applied": same_day_sigma_cap_applied,
+        "same_day_sigma_cap_f": _SAME_DAY_TIGHT_SIGMA_CAP_F * unit_mult,
+        "time_to_settlement_h": (
+            round(time_to_settlement_h, 2)
+            if time_to_settlement_h is not None
+            else None
+        ),
+        "regime_label": regime_label,
         "sources_used": list(calibrated.keys()),
         "excluded_sources": excluded_sources,
         "forecast_quality": forecast_quality,

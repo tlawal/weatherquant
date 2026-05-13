@@ -20,7 +20,11 @@ from backend.config import Config
 from backend.tz_utils import active_dates_for_city, city_local_date, city_local_now
 from backend.modeling.distribution import edge as compute_edge
 from backend.modeling.settlement import bucket_upper_bound, canonical_bucket_ranges
-from backend.modeling.temperature_model import compute_model, ModelResult
+from backend.modeling.temperature_model import (
+    apply_forecast_source_quality_gates,
+    compute_model,
+    ModelResult,
+)
 from backend.modeling.calibration import get_calibration_async
 from backend.modeling.calibration_engine import get_reliability_metrics, remap_probability
 from backend.modeling.adaptive import run_adaptive
@@ -39,7 +43,7 @@ from backend.storage.repos import (
     get_calibration,
     get_daily_high_metar,
     get_event,
-    get_latest_forecast,
+    get_latest_successful_forecast,
     get_latest_market_snapshot,
     get_latest_metar,
     get_latest_model_snapshot,
@@ -114,6 +118,30 @@ def _build_source_timing_metadata(
         lead_skill_mae_by_source,
         lead_skill_n_obs_by_source,
         lead_bucket_by_source,
+    )
+
+
+def _trusted_pre_model_spread(
+    src_to_obs: dict[str, object],
+    *,
+    station_source_meta: Optional[dict[str, dict]] = None,
+    unit_mult: float = 1.0,
+) -> tuple[Optional[float], Optional[float], dict]:
+    """Return (trusted_spread, raw_spread, gates) for pre-model regime detection."""
+    source_values: dict[str, float] = {}
+    for src, obs in src_to_obs.items():
+        if obs is None or getattr(obs, "high_f", None) is None:
+            continue
+        source_values[src] = float(getattr(obs, "high_f"))
+    quality = apply_forecast_source_quality_gates(
+        source_values,
+        station_source_meta=station_source_meta,
+        unit_mult=unit_mult,
+    )
+    return (
+        quality.get("trusted_spread"),
+        quality.get("raw_spread"),
+        quality.get("source_quality_gates") or {},
     )
 
 
@@ -273,21 +301,21 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
             if is_today else None
         )
 
-        nws_obs = await get_latest_forecast(sess, city.id, "nws", today_et)
-        wu_hourly_obs = await get_latest_forecast(sess, city.id, "wu_hourly", today_et)
-        wu_history_obs = await get_latest_forecast(sess, city.id, "wu_history", today_et)
-        hrrr_obs = await get_latest_forecast(sess, city.id, "hrrr", today_et)
-        hrrr_15min_obs = await get_latest_forecast(sess, city.id, "hrrr_15min", today_et)
-        nbm_obs = await get_latest_forecast(sess, city.id, "nbm", today_et)
-        ecmwf_ifs_obs = await get_latest_forecast(sess, city.id, "ecmwf_ifs", today_et)
-        ecmwf_aifs_obs = await get_latest_forecast(sess, city.id, "ecmwf_aifs", today_et)
+        nws_obs = await get_latest_successful_forecast(sess, city.id, "nws", today_et)
+        wu_hourly_obs = await get_latest_successful_forecast(sess, city.id, "wu_hourly", today_et)
+        wu_history_obs = await get_latest_successful_forecast(sess, city.id, "wu_history", today_et)
+        hrrr_obs = await get_latest_successful_forecast(sess, city.id, "hrrr", today_et)
+        hrrr_15min_obs = await get_latest_successful_forecast(sess, city.id, "hrrr_15min", today_et)
+        nbm_obs = await get_latest_successful_forecast(sess, city.id, "nbm", today_et)
+        ecmwf_ifs_obs = await get_latest_successful_forecast(sess, city.id, "ecmwf_ifs", today_et)
+        ecmwf_aifs_obs = await get_latest_successful_forecast(sess, city.id, "ecmwf_aifs", today_et)
         # Bayesian-upgrade Q3 — additional AI-NWP foundation models (experimental).
-        gfs_graphcast_obs = await get_latest_forecast(sess, city.id, "gfs_graphcast", today_et)
+        gfs_graphcast_obs = await get_latest_successful_forecast(sess, city.id, "gfs_graphcast", today_et)
         # §13 — NOAA AIWP-sourced AI members.
-        pangu_weather_obs = await get_latest_forecast(sess, city.id, "pangu_weather", today_et)
-        fourcastnet_v2_obs = await get_latest_forecast(sess, city.id, "fourcastnet_v2", today_et)
+        pangu_weather_obs = await get_latest_successful_forecast(sess, city.id, "pangu_weather", today_et)
+        fourcastnet_v2_obs = await get_latest_successful_forecast(sess, city.id, "fourcastnet_v2", today_et)
         # §17 — Microsoft Aurora (Swin transformer) via NOAA AIWP.
-        aurora_obs = await get_latest_forecast(sess, city.id, "aurora", today_et)
+        aurora_obs = await get_latest_successful_forecast(sess, city.id, "aurora", today_et)
 
         cal = await get_calibration(sess, city.id)
         # Phase B1: lead-time skill table for ensemble weight adjustment.
@@ -414,16 +442,22 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
     # Overlay dynamic per-station weights + biases learned from forecast skill.
     # Station-level values (when available) replace the city-level calibration
     # for that source; compute_model falls back to cal_dict / defaults otherwise.
+    station_source_meta: dict = {}
     try:
-        from backend.modeling.station_weights import load_station_source_weights
+        from backend.modeling.station_weights import (
+            load_source_skill_summary,
+            load_station_source_weights,
+        )
         station_weights, station_biases = await load_station_source_weights(
             active_station_id
         )
-        if station_weights:
+        station_source_meta = await load_source_skill_summary(active_station_id)
+        if station_weights or station_biases or station_source_meta:
             if cal_dict is None:
                 cal_dict = {}
             cal_dict["station_source_weights"] = station_weights
             cal_dict["station_source_biases"] = station_biases
+            cal_dict["station_source_meta"] = station_source_meta
     except Exception:
         log.exception("signal: %s — station weight load failed", city.city_slug)
 
@@ -579,24 +613,21 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
 
     # ── Q6: regime detection BEFORE compute_model so σ inflation can flow ──
     # The pre-Q6 path detected regime AFTER the model and used the result
-    # only for Kelly sizing. Now we detect early using the raw ensemble
-    # spread (close to the post-debias spread), so volatile regimes widen
-    # σ in the model output itself.
+    # only for Kelly sizing. Detect early using the trusted-source spread so
+    # a quarantined forecast member cannot falsely mark the day volatile.
     _pre_regime: Optional["RegimeResult"] = None
     try:
-        _pre_highs: list[float] = []
-        for _po in _src_to_obs.values():
-            if _po is not None and getattr(_po, "high_f", None) is not None:
-                _pre_highs.append(float(_po.high_f))
-        _pre_spread = (
-            (max(_pre_highs) - min(_pre_highs)) if len(_pre_highs) >= 2 else None
+        _pre_spread, _pre_raw_spread, _pre_quality_gates = _trusted_pre_model_spread(
+            _src_to_obs,
+            station_source_meta=station_source_meta,
+            unit_mult=5.0 / 9.0 if getattr(city, "unit", "F") == "C" else 1.0,
         )
         _recent_snaps_pre = await get_recent_model_snapshots(sess, event.id, limit=4)
         _pre_hist_spreads: list[float] = []
         for _s in _recent_snaps_pre:
             try:
                 _ij = json.loads(_s.inputs_json) if _s.inputs_json else {}
-                _sp = _ij.get("spread")
+                _sp = _ij.get("trusted_spread", _ij.get("spread"))
                 if _sp is not None:
                     _pre_hist_spreads.append(float(_sp))
             except Exception:
@@ -639,6 +670,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         event_settlement_utc=_settlement_utc,
         # Q6 — regime-aware σ inflation (1.0 calm → 2.0 volatile).
         regime_sigma_multiplier=_regime_sigma_mult,
+        regime_label=_pre_regime.label.value if _pre_regime else None,
         lead_skill_mae_by_source=lead_skill_mae_by_source or None,
         lead_skill_n_obs_by_source=lead_skill_n_obs_by_source or None,
         # M1 Phase 2 — EM-fit BMA mixing weights (None when no fit yet).

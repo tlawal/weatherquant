@@ -310,6 +310,64 @@ _OM_MODELS = {
 EXPERIMENTAL_FORECAST_SOURCES: frozenset[str] = frozenset(
     {"ecmwf_aifs", "gfs_graphcast", "pangu_weather", "fourcastnet_v2", "aurora"}
 )
+_OPEN_METEO_OUTLIER_SOURCES = frozenset({"ecmwf_aifs", "gfs_graphcast"})
+_OPEN_METEO_REFERENCE_SOURCES = (
+    "nws",
+    "wu_hourly",
+    "hrrr",
+    "hrrr_15min",
+    "nbm",
+    "ecmwf_ifs",
+)
+_OPEN_METEO_OUTLIER_THRESHOLD_F = 12.0
+
+
+def _apply_open_meteo_outlier_gate(
+    *,
+    source_key: str,
+    high_f: Optional[float],
+    reference_median: Optional[float],
+    unit: str = "F",
+) -> tuple[Optional[float], Optional[str], Optional[dict]]:
+    """Return storage high/parse_error/gate metadata for Open-Meteo AI outliers."""
+    if (
+        source_key not in _OPEN_METEO_OUTLIER_SOURCES
+        or high_f is None
+        or reference_median is None
+    ):
+        return high_f, None if high_f is not None else "parse_failed", None
+
+    unit_mult = 5.0 / 9.0 if unit == "C" else 1.0
+    threshold = _OPEN_METEO_OUTLIER_THRESHOLD_F * unit_mult
+    delta = abs(float(high_f) - float(reference_median))
+    if delta <= threshold:
+        return high_f, None, None
+    return (
+        None,
+        "outlier_vs_reference",
+        {
+            "reference_median": round(float(reference_median), 2),
+            "raw_high_f": round(float(high_f), 2),
+            "delta": round(delta, 2),
+            "threshold": round(threshold, 2),
+        },
+    )
+
+
+async def _open_meteo_trusted_reference_median(city: City, date_et: str) -> Optional[float]:
+    refs: list[float] = []
+    async with get_session() as sess:
+        for source in _OPEN_METEO_REFERENCE_SOURCES:
+            obs = await get_latest_successful_forecast(sess, city.id, source, date_et)
+            if obs is not None and obs.high_f is not None:
+                refs.append(float(obs.high_f))
+    if len(refs) < 3:
+        return None
+    refs.sort()
+    mid = len(refs) // 2
+    if len(refs) % 2:
+        return refs[mid]
+    return (refs[mid - 1] + refs[mid]) / 2.0
 
 
 async def fetch_open_meteo_models_all(source_filter: Optional[set[str]] = None) -> None:
@@ -360,13 +418,27 @@ async def fetch_open_meteo_models_all(source_filter: Optional[set[str]] = None) 
 
             for active_date in active_dates:
                 high_f, hourly_data = data_by_date.get(active_date, (None, None))
+                reference_median = None
+                if source_key in _OPEN_METEO_OUTLIER_SOURCES and high_f is not None:
+                    reference_median = await _open_meteo_trusted_reference_median(
+                        city, active_date
+                    )
+                store_high_f, parse_error, outlier_gate = _apply_open_meteo_outlier_gate(
+                    source_key=source_key,
+                    high_f=high_f,
+                    reference_median=reference_median,
+                    unit=getattr(city, "unit", "F"),
+                )
 
                 async with get_session() as sess:
                     raw = json.dumps({
                         "source": source_key, "model": om_model,
-                        "high_f": high_f, "hourly": hourly_data,
+                        "high_f": store_high_f,
+                        "raw_high_f": high_f,
+                        "hourly": hourly_data,
                         "model_run_at": model_run_at.isoformat() if model_run_at else None,
                         "openmeteo_metadata": meta,
+                        "outlier_gate": outlier_gate,
                     })
                     await insert_forecast_obs(
                         sess,
@@ -374,19 +446,24 @@ async def fetch_open_meteo_models_all(source_filter: Optional[set[str]] = None) 
                         source=source_key,
                         date_et=active_date,
                         model_run_at=model_run_at,
-                        high_f=high_f,
+                        high_f=store_high_f,
                         raw_payload_hash=hashlib.md5(raw.encode()).hexdigest(),
                         raw_json=raw,
-                        parse_error=None if high_f is not None else "parse_failed",
+                        parse_error=parse_error,
                     )
-                if high_f is not None:
+                if store_high_f is not None:
                     # Phase A5 — log ingestion latency per Open-Meteo model run
                     age_s = None
                     if model_run_at is not None:
                         age_s = int((datetime.now(timezone.utc) - model_run_at).total_seconds())
                     log.info(
                         "ingest: src=%s city=%s date=%s high_f=%s model_run_age_s=%s",
-                        source_key, city.city_slug, active_date, high_f, age_s,
+                        source_key, city.city_slug, active_date, store_high_f, age_s,
+                    )
+                elif parse_error == "outlier_vs_reference":
+                    log.warning(
+                        "ingest: src=%s city=%s date=%s outlier high_f=%s ref=%s",
+                        source_key, city.city_slug, active_date, high_f, reference_median,
                     )
 
     async with get_session() as sess:
