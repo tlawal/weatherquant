@@ -527,6 +527,42 @@
     {% endif %}
   </div>
 
+  {% set excluded_sources = model.inputs.excluded_sources if model and model.inputs and model.inputs.excluded_sources else {} %}
+  {% set source_quality_gates = model.inputs.source_quality_gates if model and model.inputs and model.inputs.source_quality_gates else {} %}
+
+  {% if excluded_sources or source_quality_gates %}
+  <div class="card p-3 mb-4 border-l-4" style="border-left-color:#FBBF24;background:rgba(234,179,8,0.08)">
+    <div class="flex items-center justify-between gap-2 mb-2">
+      <div class="flex items-center gap-2">
+        <span class="text-[10px] uppercase tracking-widest font-bold" style="color:#FBBF24">Forecast Source Excluded</span>
+        <span class="text-[10px]" style="color:var(--text-muted)">not used in live probabilities</span>
+      </div>
+      {% if model.inputs.trusted_reference_median is not none %}
+      <span class="mono text-[10px]" style="color:var(--text-muted)">trusted median {{ "%.1f"|format(model.inputs.trusted_reference_median) }}°{{ city.unit|default('F') }}</span>
+      {% endif %}
+    </div>
+    <div class="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+      {% for src, reason in excluded_sources.items() %}
+      {% set gate = source_quality_gates.get(src) if source_quality_gates else none %}
+      <div class="panel rounded p-2 text-[11px]">
+        <div class="flex items-center justify-between gap-2">
+          <span class="font-semibold">{{ src.replace('_', ' ')|title }}</span>
+          <span class="text-[9px] uppercase tracking-widest px-1.5 py-0.5 rounded" style="background:rgba(234,179,8,0.14);color:#FDE047;border:1px solid rgba(234,179,8,0.28)">{{ reason }}</span>
+        </div>
+        {% if gate %}
+        <div class="mt-1 grid grid-cols-2 gap-x-3 gap-y-0.5 mono text-[10px]" style="color:var(--text-muted)">
+          {% if gate.value is not none %}<span>value {{ "%.1f"|format(gate.value) }}°</span>{% endif %}
+          {% if gate.reference is not none %}<span>ref {{ "%.1f"|format(gate.reference) }}°</span>{% endif %}
+          {% if gate.delta is not none %}<span>Δ {{ "%.1f"|format(gate.delta) }}°</span>{% endif %}
+          {% if gate.threshold is not none %}<span>limit {{ "%.1f"|format(gate.threshold) }}°</span>{% endif %}
+        </div>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
   <!-- Forecast Sources Summary -->
   <div class="card p-4">
     <div class="text-[10px] uppercase tracking-widest mb-3" style="color:var(--text-muted)">Forecast Sources</div>
@@ -552,6 +588,11 @@
           {% endif %}
         </div>
       </div>
+      {% endif %}
+    {% endmacro %}
+    {% macro excluded_badge(src) %}
+      {% if excluded_sources and excluded_sources.get(src) %}
+      <span class="text-[8px] uppercase tracking-widest px-1.5 py-0.5 rounded" title="Excluded from live probabilities: {{ excluded_sources.get(src) }}" style="background:rgba(234,179,8,0.14);color:#FDE047;border:1px solid rgba(234,179,8,0.28)">Excluded</span>
       {% endif %}
     {% endmacro %}
     <div class="space-y-2 text-[11px]">
@@ -700,9 +741,10 @@
 
       <!-- ECMWF AIFS (Open-Meteo / European Centre AI model) — experimental -->
       {% if forecasts.ecmwf_aifs and forecasts.ecmwf_aifs.high_f is not none %}
-      <div class="group relative flex justify-between items-center cursor-pointer hover:bg-white/5 p-1 -mx-1 rounded transition-colors" x-data="{ showMeta: false }">
+      <div class="group relative flex justify-between items-center cursor-pointer hover:bg-white/5 p-1 -mx-1 rounded transition-colors {% if excluded_sources.get('ecmwf_aifs') %}opacity-55{% endif %}" x-data="{ showMeta: false }">
         <div class="flex items-center gap-1.5" @click="showMeta = !showMeta" @click.outside="showMeta = false">
           <span style="color:var(--text-muted)">ECMWF AIFS<sup style="color:var(--cyan)">*</sup></span>
+          {{ excluded_badge('ecmwf_aifs') }}
           <button class="hover:text-cyan-400 opacity-30 group-hover:opacity-100 transition-all">ⓘ</button>
         </div>
         <span class="mono font-medium text-white">{{ "%.1f"|format(forecasts.ecmwf_aifs.high_f) }}°{{ city.unit|default('F') }}</span>
@@ -727,9 +769,10 @@
 
       <!-- DeepMind GraphCast (Open-Meteo) — experimental AI-NWP foundation model (Q3/U3) -->
       {% if forecasts.gfs_graphcast and forecasts.gfs_graphcast.high_f is not none %}
-      <div class="group relative flex justify-between items-center cursor-pointer hover:bg-white/5 p-1 -mx-1 rounded transition-colors" x-data="{ showMeta: false }">
+      <div class="group relative flex justify-between items-center cursor-pointer hover:bg-white/5 p-1 -mx-1 rounded transition-colors {% if excluded_sources.get('gfs_graphcast') %}opacity-55{% endif %}" x-data="{ showMeta: false }">
         <div class="flex items-center gap-1.5" @click="showMeta = !showMeta" @click.outside="showMeta = false">
           <span style="color:var(--text-muted)">GraphCast<sup style="color:var(--cyan)">*</sup></span>
+          {{ excluded_badge('gfs_graphcast') }}
           <button class="hover:text-cyan-400 opacity-30 group-hover:opacity-100 transition-all">ⓘ</button>
         </div>
         <span class="mono font-medium text-white">{{ "%.1f"|format(forecasts.gfs_graphcast.high_f) }}°{{ city.unit|default('F') }}</span>
@@ -754,9 +797,10 @@
 
       <!-- Huawei Pangu-Weather (NOAA AIWP S3 archive) — experimental AI-NWP foundation model (Q3/§13) -->
       {% if forecasts.pangu_weather and forecasts.pangu_weather.high_f is not none %}
-      <div class="group relative flex justify-between items-center cursor-pointer hover:bg-white/5 p-1 -mx-1 rounded transition-colors" x-data="{ showMeta: false }">
+      <div class="group relative flex justify-between items-center cursor-pointer hover:bg-white/5 p-1 -mx-1 rounded transition-colors {% if excluded_sources.get('pangu_weather') %}opacity-55{% endif %}" x-data="{ showMeta: false }">
         <div class="flex items-center gap-1.5" @click="showMeta = !showMeta" @click.outside="showMeta = false">
           <span style="color:var(--text-muted)">Pangu-Weather<sup style="color:var(--cyan)">*</sup></span>
+          {{ excluded_badge('pangu_weather') }}
           <button class="hover:text-cyan-400 opacity-30 group-hover:opacity-100 transition-all">ⓘ</button>
         </div>
         <span class="mono font-medium text-white">{{ "%.1f"|format(forecasts.pangu_weather.high_f) }}°{{ city.unit|default('F') }}</span>
@@ -781,9 +825,10 @@
 
       <!-- NVIDIA FourCastNet v2-small (NOAA AIWP S3 archive) — experimental AI-NWP foundation model (Q3/§13) -->
       {% if forecasts.fourcastnet_v2 and forecasts.fourcastnet_v2.high_f is not none %}
-      <div class="group relative flex justify-between items-center cursor-pointer hover:bg-white/5 p-1 -mx-1 rounded transition-colors" x-data="{ showMeta: false }">
+      <div class="group relative flex justify-between items-center cursor-pointer hover:bg-white/5 p-1 -mx-1 rounded transition-colors {% if excluded_sources.get('fourcastnet_v2') %}opacity-55{% endif %}" x-data="{ showMeta: false }">
         <div class="flex items-center gap-1.5" @click="showMeta = !showMeta" @click.outside="showMeta = false">
           <span style="color:var(--text-muted)">FourCastNet v2<sup style="color:var(--cyan)">*</sup></span>
+          {{ excluded_badge('fourcastnet_v2') }}
           <button class="hover:text-cyan-400 opacity-30 group-hover:opacity-100 transition-all">ⓘ</button>
         </div>
         <span class="mono font-medium text-white">{{ "%.1f"|format(forecasts.fourcastnet_v2.high_f) }}°{{ city.unit|default('F') }}</span>
@@ -808,9 +853,10 @@
 
       <!-- Microsoft Aurora (NOAA AIWP S3 archive) — experimental AI-NWP foundation model (§17) -->
       {% if forecasts.aurora and forecasts.aurora.high_f is not none %}
-      <div class="group relative flex justify-between items-center cursor-pointer hover:bg-white/5 p-1 -mx-1 rounded transition-colors" x-data="{ showMeta: false }">
+      <div class="group relative flex justify-between items-center cursor-pointer hover:bg-white/5 p-1 -mx-1 rounded transition-colors {% if excluded_sources.get('aurora') %}opacity-55{% endif %}" x-data="{ showMeta: false }">
         <div class="flex items-center gap-1.5" @click="showMeta = !showMeta" @click.outside="showMeta = false">
           <span style="color:var(--text-muted)">Aurora<sup style="color:var(--cyan)">*</sup></span>
+          {{ excluded_badge('aurora') }}
           <button class="hover:text-cyan-400 opacity-30 group-hover:opacity-100 transition-all">ⓘ</button>
         </div>
         <span class="mono font-medium text-white">{{ "%.1f"|format(forecasts.aurora.high_f) }}°{{ city.unit|default('F') }}</span>
@@ -1429,13 +1475,17 @@
           <div class="mono font-semibold">
             {% if model.inputs.projected_high %}{{ "%.1f"|format(model.inputs.projected_high) }}°{{ city.unit|default('F') }}{% else %}—{% endif %}
           </div>
+          {% set projected_high_raw_display = model.inputs.projected_high_raw|default(none) %}
+          {% if model.inputs.metar_projection_gate and projected_high_raw_display is not none and projected_high_raw_display != model.inputs.projected_high %}
+          <div class="mono text-[10px]" style="color:#FBBF24">raw {{ "%.1f"|format(projected_high_raw_display) }}° excluded</div>
+          {% endif %}
           <div x-show="showTip" x-cloak
                x-transition:enter="transition ease-out duration-100"
                x-transition:enter-start="opacity-0 scale-95"
                x-transition:enter-end="opacity-100 scale-100"
                class="absolute left-2 right-2 top-14 w-auto p-3 rounded-xl shadow-2xl z-50 border text-[10px] normal-case tracking-tight font-medium sm:left-auto sm:right-0 sm:w-64"
                style="background:var(--bg-card); border-color:var(--border);">
-            <div class="opacity-80 py-1 italic">Best estimate of today's final daily high. Blends forecast consensus with observed temperatures, weighted by time of day. After 5 PM, capped near the observed high since meaningful rises are unlikely after sunset.</div>
+            <div class="opacity-80 py-1 italic">Best estimate of today's final daily high used in the live probability blend. If the intraday METAR projection is far below trusted consensus before physical lock, the raw projection is shown but excluded from the blend.</div>
           </div>
         </div>
         <div class="panel rounded p-2 relative" x-data="{ showMeta: false }">
@@ -1473,14 +1523,20 @@
             <button @click="showTip = !showTip" @click.outside="showTip = false"
                     class="hover:text-cyan-400 opacity-50 hover:opacity-100 transition-all text-[10px]">ⓘ</button>
           </div>
-          <div class="mono font-semibold">{{ "%.1f"|format(model.inputs.spread|default(0)) }}°{{ city.unit|default('F') }}</div>
+          {% set trusted_spread_display = model.inputs.trusted_spread|default(model.inputs.spread|default(0)) %}
+          {% set raw_spread_display = model.inputs.raw_spread|default(none) %}
+          {% if raw_spread_display is not none and raw_spread_display > trusted_spread_display + 0.05 %}
+          <div class="mono font-semibold">{{ "%.1f"|format(trusted_spread_display) }}°{{ city.unit|default('F') }} trusted · <span style="color:var(--text-muted)">{{ "%.1f"|format(raw_spread_display) }}° raw</span></div>
+          {% else %}
+          <div class="mono font-semibold">{{ "%.1f"|format(trusted_spread_display) }}°{{ city.unit|default('F') }}</div>
+          {% endif %}
           <div x-show="showTip" x-cloak
                x-transition:enter="transition ease-out duration-100"
                x-transition:enter-start="opacity-0 scale-95"
                x-transition:enter-end="opacity-100 scale-100"
                class="absolute left-2 right-2 top-14 w-auto p-3 rounded-xl shadow-2xl z-50 border text-[10px] normal-case tracking-tight font-medium sm:left-auto sm:right-0 sm:w-64"
                style="background:var(--bg-card); border-color:var(--border);">
-            <div class="opacity-80 py-1 italic">Range between the highest and lowest forecast source. A small spread means sources agree; a large spread increases model uncertainty (sigma).</div>
+            <div class="opacity-80 py-1 italic">Range between the highest and lowest trusted forecast source used by live probabilities. Raw spread includes excluded members for audit.</div>
           </div>
         </div>
       </div>

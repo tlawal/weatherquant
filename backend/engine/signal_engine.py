@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import statistics
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Optional
@@ -50,6 +51,7 @@ from backend.storage.repos import (
     get_lead_skills_for_city,
     get_recent_model_snapshots,
     get_resolution_high_metar,
+    get_station_calibration,
     get_station_profile,
     get_temp_slope,
     get_avg_peak_timing_mins,
@@ -322,6 +324,10 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         lead_skills_by_key = await get_lead_skills_for_city(sess, city.id)
         # NEW: Reliability metrics for probability remapping
         reliability_bins = await get_reliability_metrics(city.id)
+        station_cal = (
+            await get_station_calibration(sess, active_station_id)
+            if active_station_id else None
+        )
 
         # Station profile for resolution-aware high — keyed on the active
         # station (per-event override > city default).
@@ -438,6 +444,12 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
             "weight_hrrr": v if (v := getattr(cal, "weight_hrrr", None)) is not None else 0.5,
             "weight_nbm": v if (v := getattr(cal, "weight_nbm", None)) is not None else 0.2,
         }
+    if station_cal is not None:
+        if cal_dict is None:
+            cal_dict = {}
+        cal_dict["station_mae_f"] = getattr(station_cal, "mae_f", None)
+        cal_dict["station_rmse_f"] = getattr(station_cal, "rmse_f", None)
+        cal_dict["station_n_samples"] = getattr(station_cal, "n_samples", 0)
 
     # Overlay dynamic per-station weights + biases learned from forecast skill.
     # Station-level values (when available) replace the city-level calibration
@@ -460,6 +472,16 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
             cal_dict["station_source_meta"] = station_source_meta
     except Exception:
         log.exception("signal: %s — station weight load failed", city.city_slug)
+
+    _src_to_obs = {
+        "nws": nws_obs, "wu_hourly": wu_hourly_obs, "hrrr": hrrr_obs,
+        "hrrr_15min": hrrr_15min_obs, "nbm": nbm_obs, "ecmwf_ifs": ecmwf_ifs_obs,
+        "ecmwf_aifs": ecmwf_aifs_obs,
+        "gfs_graphcast": gfs_graphcast_obs,
+        "pangu_weather": pangu_weather_obs,
+        "fourcastnet_v2": fourcastnet_v2_obs,
+        "aurora": aurora_obs,
+    }
 
     # ── Adaptive prediction engine (Kalman + regression) ────────────────────
     city_tz_str = getattr(city, "tz", "America/New_York")
@@ -512,12 +534,28 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
                     pass
             obs_dicts.append(d)
 
-        # Fused forecast high for adaptive remaining-rise cap
-        _fc_highs = [
-            s.high_f for s in [nws_obs, wu_hourly_obs]
-            if s is not None and s.high_f is not None
-        ]
-        adaptive_forecast_high = sum(_fc_highs) / len(_fc_highs) if _fc_highs else None
+        # Trusted same-day consensus for adaptive peak/cap guards. Use the
+        # same source-quality gate as the live probability model so a bad AI
+        # member cannot drag adaptive timing or remaining-rise caps.
+        _adaptive_source_values = {
+            src: float(obs.high_f)
+            for src, obs in _src_to_obs.items()
+            if obs is not None and getattr(obs, "high_f", None) is not None
+        }
+        _adaptive_quality = apply_forecast_source_quality_gates(
+            _adaptive_source_values,
+            station_source_meta=station_source_meta,
+            unit_mult=1.0 if getattr(city, "unit", "F") == "F" else 5.0 / 9.0,
+        )
+        _adaptive_live_values = list((_adaptive_quality.get("live_values") or {}).values())
+        if _adaptive_live_values:
+            adaptive_forecast_high = float(statistics.median(_adaptive_live_values))
+        else:
+            _fc_highs = [
+                s.high_f for s in [nws_obs, wu_hourly_obs]
+                if s is not None and s.high_f is not None
+            ]
+            adaptive_forecast_high = sum(_fc_highs) / len(_fc_highs) if _fc_highs else None
 
         try:
             adaptive_result = run_adaptive(
@@ -861,12 +899,38 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
                 "metar_condition": metar_condition,
             }
 
+            gate_failures: list[str] = []
+            trusted_ref = model.inputs.get("trusted_reference_median")
+            market_sanity_gate = None
+            try:
+                trusted_ref_f = float(trusted_ref) if trusted_ref is not None else None
+            except (TypeError, ValueError):
+                trusted_ref_f = None
+            cold_tail_contradicted = (
+                trusted_ref_f is not None
+                and bucket.high_f is not None
+                and bucket.high_f <= trusted_ref_f - 3.0
+                and (bucket.low_f is None or bucket.low_f < trusted_ref_f - 3.0)
+            )
+            if mkt_prob < 0.02 and model_prob > 0.10 and cold_tail_contradicted:
+                market_sanity_gate = {
+                    "reason": "extreme_market_cold_tail_contradicts_trusted_consensus",
+                    "trusted_reference_median": round(trusted_ref_f, 2),
+                    "bucket_high_f": bucket.high_f,
+                    "model_prob": float(round(model_prob, 4)),
+                    "mkt_prob": float(round(mkt_prob, 4)),
+                }
+                gate_failures.append("market_sanity_tail_disagreement")
+            if market_sanity_gate is not None:
+                reason["market_sanity_gate"] = market_sanity_gate
+
             actionable = (
                 true_edge >= Config.MIN_TRUE_EDGE
                 and 0.02 <= mkt_prob <= 0.98  # avoid extreme markets
                 and ask_depth >= Config.MIN_LIQUIDITY_SHARES
                 and event.forecast_quality == "ok"
                 and city_state != "resolved"
+                and not gate_failures
             )
 
             sig = BucketSignal(
@@ -893,6 +957,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
                 yes_ask_depth=ask_depth,
                 yes_bid_depth=bid_depth,
                 reason=reason,
+                gate_failures=gate_failures,
                 actionable=actionable,
                 prob_new_high=prob_hotter_bucket,
                 prob_hotter_bucket=prob_hotter_bucket,

@@ -185,6 +185,9 @@ _AI_OUTLIER_MIN_STATION_SAMPLES = 30
 _AI_OUTLIER_MAX_STATION_MAE_F = 4.0
 _SAME_DAY_TIGHT_SPREAD_CAP_F = 2.5
 _SAME_DAY_TIGHT_SIGMA_CAP_F = 2.75
+_SAME_DAY_STATION_SIGMA_MIN_SAMPLES = 5
+_SAME_DAY_STATION_SIGMA_MIN_F = 1.5
+_SAME_DAY_STATION_SIGMA_MAX_F = 2.0
 _SAME_DAY_TIGHT_CAP_MAX_HOURS = 18.0
 # Hard cap on lead-skill weight swing — protects against thin-data buckets.
 _LEAD_SKILL_CLAMP = (0.7, 1.3)
@@ -1210,6 +1213,7 @@ def compute_model(
 
     metar_projection_gate: Optional[str] = None
     projected_high_for_blend = projected_high
+    projected_high_raw = projected_high
     fallback_peak_hour_local = None
     try:
         fallback_peak_hour_local = float(_ml.get("avg_peak_timing_mins", 960.0)) / 60.0
@@ -1221,12 +1225,23 @@ def compute_model(
     before_peak = (
         gate_peak_hour_local is not None
         and hour_local_fractional < gate_peak_hour_local
-        and not (adaptive is not None and adaptive.peak_already_passed)
+    )
+    observed_near_consensus = (
+        daily_high_metar is not None
+        and daily_high_metar >= mu_forecast - 2.0 * unit_mult
+    )
+    physically_locked = (
+        (hour_local >= 17 and daily_high_metar is not None)
+        or (
+            adaptive is not None
+            and adaptive.peak_already_passed
+            and observed_near_consensus
+        )
     )
     if (
-        before_peak
-        and not kalman_nowcast_active
+        not kalman_nowcast_active
         and projected_high < mu_forecast - 3.0 * unit_mult
+        and (before_peak or not physically_locked)
     ):
         metar_projection_gate = "below_consensus"
         projected_high_for_blend = mu_forecast
@@ -1240,8 +1255,12 @@ def compute_model(
     observation_sigma = max(1.0, remaining_rise + 0.5) * unit_mult
     # Inflate observation sigma when METAR and forecasts diverge —
     # disagreement means more uncertainty, not less.
-    if divergence_f > 3.0:
-        observation_sigma += divergence * 0.3
+    divergence_for_blend = abs(projected_high_for_blend - mu_forecast)
+    divergence_for_blend_f = (
+        divergence_for_blend / unit_mult if unit_mult else divergence_for_blend
+    )
+    if divergence_for_blend_f > 3.0:
+        observation_sigma += divergence_for_blend * 0.3
     sigma_final = (1.0 - w_metar) * sigma_raw + w_metar * observation_sigma
 
     # Apply adaptive sigma adjustment (tightens when trend data is rich)
@@ -1284,6 +1303,8 @@ def compute_model(
             ).total_seconds() / 3600.0,
         )
     same_day_sigma_cap_applied = False
+    same_day_sigma_cap_source = None
+    same_day_sigma_cap_value = _SAME_DAY_TIGHT_SIGMA_CAP_F * unit_mult
     regime_is_volatile = str(regime_label or "").lower() == "volatile"
     if (
         time_to_settlement_h is not None
@@ -1292,6 +1313,33 @@ def compute_model(
         and not regime_is_volatile
     ):
         sigma_cap = _SAME_DAY_TIGHT_SIGMA_CAP_F * unit_mult
+        same_day_sigma_cap_source = "fixed_same_day_tight_consensus"
+        station_sigma_cap = None
+        if calibration:
+            try:
+                station_n_samples = int(calibration.get("station_n_samples") or 0)
+            except (TypeError, ValueError):
+                station_n_samples = 0
+            station_error = calibration.get("station_rmse_f")
+            if station_error is None:
+                station_error = calibration.get("station_mae_f")
+            try:
+                station_error_f = float(station_error)
+            except (TypeError, ValueError):
+                station_error_f = None
+            if (
+                station_n_samples >= _SAME_DAY_STATION_SIGMA_MIN_SAMPLES
+                and station_error_f is not None
+                and station_error_f > 0
+            ):
+                station_sigma_cap = min(
+                    _SAME_DAY_STATION_SIGMA_MAX_F,
+                    max(_SAME_DAY_STATION_SIGMA_MIN_F, 1.35 * station_error_f),
+                ) * unit_mult
+        if station_sigma_cap is not None:
+            sigma_cap = min(sigma_cap, station_sigma_cap)
+            same_day_sigma_cap_source = "station_calibration"
+        same_day_sigma_cap_value = sigma_cap
         if sigma_final > sigma_cap:
             sigma_final = sigma_cap
             same_day_sigma_cap_applied = True
@@ -1344,6 +1392,8 @@ def compute_model(
         mu_final = float(lock_mu)
         sigma_final = float(lock_sigma)
         projected_high = float(lock_projected_high)
+        projected_high_for_blend = projected_high
+        projected_high_raw = projected_high
 
     inputs = {
         "nws_high": nws_high,
@@ -1365,7 +1415,8 @@ def compute_model(
         "kalman_nowcast_active": kalman_nowcast_active,
         "kalman_weight": round(kalman_w, 3),
         "kalman_divergence_f": round(kalman_divergence, 2) if kalman_divergence is not None else None,
-        "projected_high": float(projected_high),
+        "projected_high": float(projected_high_for_blend),
+        "projected_high_raw": float(projected_high_raw),
         "projected_high_for_blend": float(projected_high_for_blend),
         "projected_high_capped": projected_high_capped,
         "metar_projection_gate": metar_projection_gate,
@@ -1381,7 +1432,8 @@ def compute_model(
         "source_quality_gates": source_quality_gates,
         "sigma_raw": float(sigma_raw),
         "same_day_sigma_cap_applied": same_day_sigma_cap_applied,
-        "same_day_sigma_cap_f": _SAME_DAY_TIGHT_SIGMA_CAP_F * unit_mult,
+        "same_day_sigma_cap_f": same_day_sigma_cap_value,
+        "same_day_sigma_cap_source": same_day_sigma_cap_source,
         "time_to_settlement_h": (
             round(time_to_settlement_h, 2)
             if time_to_settlement_h is not None
@@ -1415,6 +1467,8 @@ def compute_model(
             "peak_already_passed": adaptive.peak_already_passed,
             "composite_peak_timing": adaptive.composite_peak_timing,
             "peak_timing_source": adaptive.peak_timing_source,
+            "remaining_rise_cap_active": getattr(adaptive, "remaining_rise_cap_active", True),
+            "remaining_rise_cap_reason": getattr(adaptive, "remaining_rise_cap_reason", None),
         }
 
     # ── M1 BMA shadow output (read-only; does not affect trade decisions) ───
@@ -1441,6 +1495,16 @@ def compute_model(
             bma_meta_out["sigma_delta_vs_legacy_raw"] = round(
                 bma_sigma_out - float(sigma_raw), 3
             )
+            _bma_sources = {
+                c.get("source") for c in bma_meta_out.get("components", [])
+                if isinstance(c, dict)
+            }
+            _excluded_in_bma = sorted(
+                src for src in excluded_sources
+                if src in _bma_sources
+            )
+            bma_meta_out["diagnostic_only"] = bool(_excluded_in_bma)
+            bma_meta_out["diagnostic_excluded_sources"] = _excluded_in_bma
         except Exception:
             log.exception("model: BMA shadow output failed; legacy path unaffected")
             bma_mu_out = bma_sigma_out = bma_probs_out = None
@@ -1462,7 +1526,7 @@ def compute_model(
         sigma=float(sigma_final),
         probs=probs,
         mu_forecast=float(mu_forecast),
-        mu_projected=float(projected_high),
+        mu_projected=float(projected_high_for_blend),
         w_metar=float(w_metar),
         remaining_rise=remaining_rise,
         forecast_quality=forecast_quality,

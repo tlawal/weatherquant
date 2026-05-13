@@ -82,6 +82,8 @@ class AdaptiveResult:
     composite_peak_timing: Optional[str]   # e.g. "3:52 PM ET"
     peak_timing_source: Optional[str]      # e.g. "kalman_trend"
     remaining_rise_cap: Optional[float] = None   # ML-predicted remaining rise (°)
+    remaining_rise_cap_active: bool = True       # False when the cap conflicts with trusted consensus
+    remaining_rise_cap_reason: Optional[str] = None
     diurnal_peak_estimate: Optional[float] = None  # T_max from fitted curve
     diurnal_fit_rmse: Optional[float] = None       # goodness of fit (°)
     diurnal_fit_active: bool = False                # whether curve was used
@@ -395,6 +397,7 @@ def compute_station_predictions(
     city_tz: str = "America/New_York",
     estimated_peak_mins: Optional[float] = None,
     remaining_rise: Optional[float] = None,
+    forecast_high: Optional[float] = None,
     diurnal_model: Optional["DiurnalFit"] = None,
 ) -> list[StationTimePrediction]:
     """Compute predicted temps at each station observation time from start_hour through end_hour.
@@ -403,7 +406,8 @@ def compute_station_predictions(
     factor so that the extrapolated warming rate decelerates toward zero
     at the estimated peak temperature time.  An optional remaining-rise
     cap prevents predictions from exceeding the Kalman temperature plus
-    the ML-predicted remaining temperature rise.
+    the ML-predicted remaining temperature rise, except when that cap is
+    clearly below a trusted same-day consensus before the expected peak.
 
     Past observation times are filled with actual observed values.
     """
@@ -485,10 +489,20 @@ def compute_station_predictions(
                 else:
                     predicted = kalman_pred
 
-                # Cap: never exceed current temp + ML-predicted remaining rise
+                # Cap: never exceed current temp + ML-predicted remaining rise.
+                # If that ceiling sits far below trusted consensus before the
+                # estimated peak, treat the cap as a diagnostic only. This
+                # prevents temporary cooling dips from forcing same-day highs
+                # several degrees below the operational forecast panel.
                 if remaining_rise is not None and remaining_rise >= 0:
                     max_predicted = kalman.smoothed_temp + remaining_rise
-                    predicted = min(predicted, max_predicted)
+                    cap_conflicts_with_consensus = (
+                        forecast_high is not None
+                        and max_predicted < forecast_high - 3.0
+                        and target_hour <= peak_hour + 0.5
+                    )
+                    if not cap_conflicts_with_consensus:
+                        predicted = min(predicted, max_predicted)
 
                 # Floor: during warming hours, don't predict below current temp
                 if blended_slope > 0 and minutes_ahead > 0 and target_hour < peak_hour:
@@ -527,6 +541,7 @@ def compute_peak_timing(
     dt_key: str = "observed_at",
     temp_key: str = "temp_f",
     city_tz: str = "America/New_York",
+    forecast_high: Optional[float] = None,
 ) -> dict:
     """Estimate when the daily peak temperature occurs/occurred.
 
@@ -547,6 +562,28 @@ def compute_peak_timing(
         "peak_already_passed": False,
         "detail": "",
     }
+
+    # Forward-looking peak estimates used both for the final fused peak time
+    # and to guard against false "peak already passed" declarations before
+    # the forecast/climatological peak window.
+    forward_estimates: list[tuple[float, float, str]] = []
+    if wu_hourly_peak_time:
+        wu_mins = _parse_time_to_mins(wu_hourly_peak_time)
+        if wu_mins is not None:
+            wu_weight = 0.6 if current_hour_local < 14 else 0.3
+            forward_estimates.append((wu_mins, wu_weight, "wu_hourly"))
+
+    if historical_peak_mins is not None and 600 < historical_peak_mins < 1200:
+        forward_estimates.append((historical_peak_mins, 0.2, "historical"))
+
+    if forward_estimates:
+        _total_fw = sum(w for _, w, _ in forward_estimates)
+        plausible_peak_mins = sum(m * w for m, w, _ in forward_estimates) / _total_fw
+        plausible_peak_mins = max(600, min(1200, plausible_peak_mins))
+    else:
+        plausible_peak_mins = 900.0
+
+    negative_trend_suppressed = False
 
     # Check if Kalman trend has been negative for extended period
     # → peak likely already passed.
@@ -572,39 +609,35 @@ def compute_peak_timing(
             and max_temp is not None
             and (max_temp - latest_temp) >= 0.3
         ):
-            max_dt = max_obs[dt_key]
-            if max_dt.tzinfo is None:
-                max_dt = max_dt.replace(tzinfo=timezone.utc)
-            max_dt = max_dt.astimezone(tz)
-            peak_mins = max_dt.hour * 60 + max_dt.minute
-            result["estimated_peak_mins"] = peak_mins
-            result["estimated_peak_time"] = max_dt.strftime("%-I:%M %p")
-            result["peak_already_passed"] = True
-            result["source"] = "actual_observed"
-            result["confidence"] = "high"
-            result["detail"] = (
-                f"Kalman trend negative ({kalman.temp_trend_per_min * 60:.1f}°/hr) "
-                f"for {kalman.n_observations} obs; "
-                f"max {max_temp:.1f}°F is {max_temp - latest_temp:.1f}°F above "
-                f"current {latest_temp:.1f}°F — peak already reached"
+            obs_reference = max(latest_temp, max_temp)
+            before_forward_peak = current_hour_local * 60 < plausible_peak_mins
+            consensus_still_higher = (
+                forecast_high is not None
+                and forecast_high >= obs_reference + 3.0
             )
-            return result
+            if before_forward_peak and consensus_still_higher:
+                negative_trend_suppressed = True
+            else:
+                max_dt = max_obs[dt_key]
+                if max_dt.tzinfo is None:
+                    max_dt = max_dt.replace(tzinfo=timezone.utc)
+                max_dt = max_dt.astimezone(tz)
+                peak_mins = max_dt.hour * 60 + max_dt.minute
+                result["estimated_peak_mins"] = peak_mins
+                result["estimated_peak_time"] = max_dt.strftime("%-I:%M %p")
+                result["peak_already_passed"] = True
+                result["source"] = "actual_observed"
+                result["confidence"] = "high"
+                result["detail"] = (
+                    f"Kalman trend negative ({kalman.temp_trend_per_min * 60:.1f}°/hr) "
+                    f"for {kalman.n_observations} obs; "
+                    f"max {max_temp:.1f}°F is {max_temp - latest_temp:.1f}°F above "
+                    f"current {latest_temp:.1f}°F — peak already reached"
+                )
+                return result
 
     # Source estimates (minutes since midnight)
-    estimates: list[tuple[float, float, str]] = []  # (mins, weight, label)
-
-    # 1. WU hourly forecast peak time
-    if wu_hourly_peak_time:
-        wu_mins = _parse_time_to_mins(wu_hourly_peak_time)
-        if wu_mins is not None:
-            # Weight WU higher in morning, lower in afternoon
-            wu_weight = 0.6 if current_hour_local < 14 else 0.3
-            estimates.append((wu_mins, wu_weight, "wu_hourly"))
-
-    # 2. Historical average peak timing
-    if historical_peak_mins is not None and 600 < historical_peak_mins < 1200:
-        hist_weight = 0.2  # always low — just a sanity check
-        estimates.append((historical_peak_mins, hist_weight, "historical"))
+    estimates: list[tuple[float, float, str]] = list(forward_estimates)  # (mins, weight, label)
 
     # 3. Kalman trend extrapolation (if still rising)
     if kalman and kalman.n_observations >= 5 and kalman.temp_trend_per_min > 0.005:
@@ -648,6 +681,12 @@ def compute_peak_timing(
         f"{lbl}: {int(mins // 60)}:{int(mins % 60):02d} (w={w:.2f})"
         for mins, w, lbl in estimates
     )
+    if negative_trend_suppressed:
+        suffix = (
+            "negative Kalman trend treated as temporary cooling dip; "
+            f"trusted consensus {forecast_high:.1f}°F remains above observed high"
+        )
+        result["detail"] = f"{result['detail']}; {suffix}" if result["detail"] else suffix
 
     return result
 
@@ -727,6 +766,7 @@ def run_adaptive(
         current_hour_local=now_local.hour,
         todays_obs=todays_obs,
         city_tz=city_tz,
+        forecast_high=forecast_high,
     )
 
     # 4. ML remaining-rise cap (prevents runaway extrapolation)
@@ -766,6 +806,17 @@ def run_adaptive(
         except Exception:
             log.debug("adaptive: diurnal curve fit failed, using decay fallback")
 
+    remaining_rise_cap_active = True
+    remaining_rise_cap_reason = None
+    if _remaining_rise is not None and forecast_high is not None:
+        cap_ceiling = kalman.smoothed_temp + _remaining_rise
+        peak_mins = peak_info.get("estimated_peak_mins")
+        current_mins = now_local.hour * 60 + now_local.minute
+        before_peak = peak_mins is not None and current_mins < float(peak_mins)
+        if before_peak and cap_ceiling < forecast_high - 3.0:
+            remaining_rise_cap_active = False
+            remaining_rise_cap_reason = "below_consensus_before_peak"
+
     # 6. Station-time predictions (diurnal curve + decay + remaining-rise cap)
     predictions = compute_station_predictions(
         kalman=kalman,
@@ -776,7 +827,8 @@ def run_adaptive(
         todays_obs=todays_obs,
         city_tz=city_tz,
         estimated_peak_mins=peak_info.get("estimated_peak_mins"),
-        remaining_rise=_remaining_rise,
+        remaining_rise=_remaining_rise if remaining_rise_cap_active else None,
+        forecast_high=forecast_high,
         diurnal_model=_diurnal_fit,
     )
 
@@ -827,6 +879,8 @@ def run_adaptive(
         composite_peak_timing=peak_info["estimated_peak_time"],
         peak_timing_source=peak_info["source"],
         remaining_rise_cap=_remaining_rise,
+        remaining_rise_cap_active=remaining_rise_cap_active,
+        remaining_rise_cap_reason=remaining_rise_cap_reason,
         diurnal_peak_estimate=_diurnal_fit.T_max if _diurnal_fit else None,
         diurnal_fit_rmse=_diurnal_fit.rmse if _diurnal_fit else None,
         diurnal_fit_active=(_diurnal_fit is not None and _diurnal_fit.is_reliable),

@@ -1,6 +1,8 @@
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+import pytest
+
 import backend.modeling.temperature_model as temperature_model
 from backend.engine.signal_engine import classify_city_state
 from backend.modeling.adaptive import AdaptiveResult, KalmanState, StationTimePrediction
@@ -257,6 +259,9 @@ def test_same_day_ai_outlier_is_quarantined_from_spread_and_probabilities(monkey
         daily_high_metar=69.1,
         current_temp_f=69.1,
         calibration={
+            "station_rmse_f": 1.3,
+            "station_mae_f": 1.1,
+            "station_n_samples": 8,
             "station_source_weights": {
                 "nws": 0.16,
                 "wu_hourly": 0.12,
@@ -315,7 +320,9 @@ def test_same_day_ai_outlier_is_quarantined_from_spread_and_probabilities(monkey
     assert model is not None
     assert model.inputs["raw_spread"] >= 30.0
     assert model.inputs["trusted_spread"] <= 2.5
-    assert model.probs[0] < 0.10
+    assert model.mu >= 79.5
+    assert model.sigma <= 1.9
+    assert model.probs[0] < 0.03
     assert "ecmwf_aifs" not in model.inputs["sources_used"]
     assert model.inputs["excluded_sources"]["ecmwf_aifs"] == "outlier_vs_trusted_median"
     assert (
@@ -323,7 +330,12 @@ def test_same_day_ai_outlier_is_quarantined_from_spread_and_probabilities(monkey
         == "outlier_vs_trusted_median"
     )
     assert model.inputs["metar_projection_gate"] == "below_consensus"
+    assert model.inputs["projected_high_for_blend"] == pytest.approx(
+        model.inputs["mu_forecast"]
+    )
+    assert model.inputs["projected_high_raw"] < model.inputs["mu_forecast"] - 3.0
     assert model.inputs["same_day_sigma_cap_applied"] is True
+    assert model.inputs["same_day_sigma_cap_source"] == "station_calibration"
 
 
 def test_lock_falls_back_when_adaptive_lags(monkeypatch):
