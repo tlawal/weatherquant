@@ -12,6 +12,7 @@ import web.routes as web_routes
 from backend.execution.position_sync import sync_positions_from_chain
 from backend.storage.models import (
     Base,
+    AuditLog,
     Bucket,
     City,
     Event,
@@ -577,7 +578,7 @@ def test_redemptions_can_include_api_position_without_admin_sync(tmp_path, monke
     monkeypatch.setattr(api_routes, "_fetch_wallet_api_positions", fake_fetch_wallet_api_positions)
     monkeypatch.setattr("aiohttp.ClientSession", FakeSession)
 
-    res = _run(api_routes.redemptions_list(onchain=True))
+    res = _run(api_routes.redemptions_live())
     bucket = res["events"][0]["buckets"][0]
     assert bucket["net_qty"] == 3
     assert bucket["avg_cost"] == 0.25
@@ -586,10 +587,166 @@ def test_redemptions_can_include_api_position_without_admin_sync(tmp_path, monke
     _run(engine.dispose())
 
 
+def test_redemptions_marks_db_only_position_missing_on_chain(tmp_path, monkeypatch):
+    engine, session_factory = _run(_setup_test_db(tmp_path, monkeypatch))
+    city = _run(_create_city(session_factory))
+
+    async def seed():
+        async with session_factory() as session:
+            event = Event(city_id=city.id, date_et="2026-05-07", status="ok")
+            session.add(event)
+            await session.flush()
+            bucket = Bucket(
+                event_id=event.id,
+                bucket_idx=0,
+                label="Will the highest temperature in Atlanta be 70-71F?",
+                yes_token_id="yes-token",
+                no_token_id="no-token",
+                condition_id="cond-stale",
+            )
+            session.add(bucket)
+            await session.flush()
+            session.add(Position(
+                bucket_id=bucket.id,
+                side="yes",
+                net_qty=2.0,
+                avg_cost=0.25,
+                last_mkt_price=0.20,
+                entry_type="MANUAL",
+            ))
+            await session.commit()
+
+    async def fake_fetch_wallet_api_positions(*args, **kwargs):
+        return ([], "0xwallet")
+
+    _run(seed())
+    monkeypatch.setattr(api_routes, "_fetch_wallet_api_positions", fake_fetch_wallet_api_positions)
+
+    res = _run(api_routes.redemptions_list())
+    bucket = res["events"][0]["buckets"][0]
+    assert bucket["sync_status"] == "missing_on_chain"
+    assert bucket["requires_action"] is True
+    assert res["summary"]["db_only_exposure"] == 0.5
+    assert res["summary"]["stale_rows"] == 1
+
+    _run(engine.dispose())
+
+
+def test_redemptions_wallet_timeout_still_returns_db_rows(tmp_path, monkeypatch):
+    engine, session_factory = _run(_setup_test_db(tmp_path, monkeypatch))
+    city = _run(_create_city(session_factory))
+
+    async def seed():
+        async with session_factory() as session:
+            event = Event(
+                city_id=city.id,
+                date_et="2026-05-07",
+                status="ok",
+                resolved_at=datetime.utcnow(),
+            )
+            session.add(event)
+            await session.flush()
+            bucket = Bucket(
+                event_id=event.id,
+                bucket_idx=0,
+                label="Will the highest temperature in Atlanta be 70-71F?",
+                yes_token_id="yes-token",
+                no_token_id="no-token",
+                condition_id="cond-timeout",
+            )
+            session.add(bucket)
+            await session.flush()
+            session.add(Position(
+                bucket_id=bucket.id,
+                side="yes",
+                net_qty=1.0,
+                avg_cost=0.40,
+                entry_type="MANUAL",
+            ))
+            await session.commit()
+
+    async def fake_fetch_wallet_api_positions(*args, **kwargs):
+        raise TimeoutError("wallet slow")
+
+    async def fail_onchain(*args, **kwargs):
+        raise AssertionError("default redemptions endpoint must not call on-chain checks")
+
+    _run(seed())
+    monkeypatch.setattr(api_routes, "_fetch_wallet_api_positions", fake_fetch_wallet_api_positions)
+    monkeypatch.setattr(api_routes, "_fetch_onchain_determined_map", fail_onchain)
+
+    res = _run(api_routes.redemptions_list())
+    assert res["events"][0]["buckets"][0]["net_qty"] == 1.0
+    assert "wallet_positions_unavailable" in res["timing"]["degraded_reason"]
+
+    _run(engine.dispose())
+
+
+def test_mark_position_closed_zeroes_stale_position_and_audits(tmp_path, monkeypatch):
+    engine, session_factory = _run(_setup_test_db(tmp_path, monkeypatch))
+    city = _run(_create_city(session_factory))
+    ids = {}
+
+    async def seed():
+        async with session_factory() as session:
+            event = Event(city_id=city.id, date_et="2026-05-07", status="ok")
+            session.add(event)
+            await session.flush()
+            bucket = Bucket(
+                event_id=event.id,
+                bucket_idx=0,
+                label="Will the highest temperature in Atlanta be 70-71F?",
+                yes_token_id="yes-token",
+                condition_id="cond-close",
+            )
+            session.add(bucket)
+            await session.flush()
+            pos = Position(
+                bucket_id=bucket.id,
+                side="yes",
+                net_qty=3.0,
+                avg_cost=0.20,
+                realized_pnl=0.0,
+                unrealized_pnl=0.15,
+                entry_type="MANUAL",
+            )
+            session.add(pos)
+            await session.commit()
+            ids["position_id"] = pos.id
+
+    async def verify():
+        async with session_factory() as session:
+            pos = await session.get(Position, ids["position_id"])
+            audits = (await session.execute(
+                select(AuditLog).where(AuditLog.action == "position_mark_closed")
+            )).scalars().all()
+            assert pos.net_qty == 0.0
+            assert pos.unrealized_pnl == 0.0
+            assert "Closed locally" in pos.current_exit_status
+            assert len(audits) == 1
+
+    _run(seed())
+    res = _run(api_routes.mark_position_closed(
+        ids["position_id"],
+        api_routes.MarkClosedRequest(reason="stale DB cleanup"),
+        actor="test",
+    ))
+    assert res["ok"] is True
+    assert res["old_qty"] == 3.0
+    _run(verify())
+
+    _run(engine.dispose())
+
+
 def test_redemptions_template_wraps_market_titles():
     html = open("web/templates/redemptions.html", encoding="utf-8").read()
     assert "whitespace-normal break-words leading-snug" in html
     assert 'text-cyan-600 font-semibold mt-0.5 truncate' not in html
+    assert "STALE DB POSITION" in html
+    assert "Mark Closed" in html
+    assert "Check UMA" in html
+    assert "Quick Exit" in html
+    assert "REDEEM" in html
 
 
 def test_position_sync_does_not_cancel_db_work_with_global_timeout():

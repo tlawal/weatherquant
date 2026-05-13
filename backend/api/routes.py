@@ -9,11 +9,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Body
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
 from backend.api.deps import require_admin
@@ -46,6 +47,7 @@ from backend.storage.repos import (
     get_latest_metar,
     get_latest_model_snapshot,
     get_latest_signals,
+    get_latest_signals_for_buckets,
     get_signals_for_latest_snapshot,
     get_position,
     get_recent_orders,
@@ -1190,356 +1192,473 @@ async def _fetch_wallet_api_positions(timeout_s: float = 6.0) -> tuple[list[dict
             return (data if isinstance(data, list) else []), addr
 
 
-@router.get("/api/redemptions")
-async def redemptions_list(onchain: bool = False):
-    """All events that have positions, with optional on-chain determination checks."""
+class MarkClosedRequest(BaseModel):
+    reason: str = "operator_reconciled"
+    close_price: Optional[float] = None
+
+
+def _float_or_zero(value) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+async def _fetch_onchain_determined_map(
+    condition_ids: set[str],
+    cid_to_gamma_event_id: Optional[dict[str, Optional[str]]] = None,
+) -> tuple[dict[str, Optional[bool]], Optional[str]]:
+    """Slow opt-in UMA/Polygon determination lookup."""
+    if not condition_ids:
+        return {}, None
+    if not Config.POLYGON_RPC_URL:
+        return {cid: None for cid in condition_ids}, "polygon_rpc_not_configured"
+
     import aiohttp
 
-    NEG_RISK_ADAPTER = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"
-    GET_DETERMINED_SEL = "7ae2e67b"  # getDetermined(bytes32)
-    POLYGON_RPC = Config.POLYGON_RPC_URL
+    neg_risk_adapter = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"
+    get_determined_sel = "7ae2e67b"  # getDetermined(bytes32)
+    timeout = aiohttp.ClientTimeout(total=8)
+    determined: dict[str, Optional[bool]] = {}
+    cid_to_market_id: dict[str, str] = {}
+    sem = asyncio.Semaphore(6)
 
-    # Gather all relevant events: unresolved with positions + resolved unredeemed + recently redeemed
-    async with get_session() as sess:
-        unresolved = await get_unresolved_events_with_positions(sess)
-        unredeemed = await get_unredeemed_resolved_events(sess)
-        redeemed = await get_recently_redeemed_events(sess, days=30)
+    async with aiohttp.ClientSession(timeout=timeout) as http:
+        if cid_to_gamma_event_id:
+            unique_event_ids = {gid for gid in cid_to_gamma_event_id.values() if gid}
 
-    api_positions_task = asyncio.create_task(_fetch_wallet_api_positions())
-
-    all_events = {e.id: e for e in unresolved + unredeemed + redeemed}
-    events = sorted(all_events.values(), key=lambda e: e.date_et, reverse=True)
-
-    # Optionally batch check on-chain determination for all condition_ids.
-    # This can be slow, so the default endpoint stays on DB/API-backed data.
-    condition_ids = set()
-    for evt in events:
-        for b in evt.buckets:
-            if b.condition_id:
-                condition_ids.add(b.condition_id)
-
-    determined_map = {}
-    cid_to_market_id = {}
-    if onchain and POLYGON_RPC and condition_ids:
-        timeout = aiohttp.ClientTimeout(total=4)
-        async with aiohttp.ClientSession(timeout=timeout) as http:
-            # Step 1: fetch negRiskMarketID for each event from Gamma API (or default to condition ID if not NegRisk)
-            async def fetch_market_id(evt):
-                if not evt.gamma_event_id:
-                    return
+            async def fetch_market_id(gamma_event_id: str):
                 try:
-                    url = f"https://gamma-api.polymarket.com/events/{evt.gamma_event_id}"
-                    async with http.get(url) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            if isinstance(data, list) and len(data) > 0:
-                                data = data[0]
-                            market_id = data.get("negRiskMarketID")
-                            
-                            # Map this market ID to all buckets in this event
-                            for b in evt.buckets:
-                                if b.condition_id and market_id:
-                                    cid_to_market_id[b.condition_id] = market_id
+                    async with http.get(f"https://gamma-api.polymarket.com/events/{gamma_event_id}") as resp:
+                        if resp.status != 200:
+                            return
+                        payload = await resp.json()
+                    if isinstance(payload, list) and payload:
+                        payload = payload[0]
+                    if not isinstance(payload, dict):
+                        return
+                    market_id = payload.get("negRiskMarketID")
+                    if not market_id:
+                        return
+                    for cid, gid in cid_to_gamma_event_id.items():
+                        if gid == gamma_event_id:
+                            cid_to_market_id[cid] = market_id
                 except Exception:
-                    pass
-            await asyncio.gather(*(fetch_market_id(evt) for evt in events))
-
-            # Step 2: call getDetermined(negRiskMarketID)
-            async def fetch_determined(cid):
-                # Fall back to checking the condition_id if negRiskMarketID is absent (standard CTF)
-                mid = cid_to_market_id.get(cid, cid)
-                if not mid:
-                    determined_map[cid] = None
                     return
+
+            await asyncio.gather(*(fetch_market_id(gid) for gid in unique_event_ids))
+
+        async def check(cid: str):
+            async with sem:
                 try:
-                    mid_hex = mid.replace("0x", "")
-                    data = f"0x{GET_DETERMINED_SEL}{mid_hex.zfill(64)}"
-                    call = http.post(POLYGON_RPC, json={
-                            "jsonrpc": "2.0", "id": 1, "method": "eth_call",
-                            "params": [{"to": NEG_RISK_ADAPTER, "data": data}, "latest"],
-                        })
-                    resp = await (await asyncio.wait_for(call, timeout=4.0)).json()
-                    if "result" in resp:
-                        determined_map[cid] = int(resp["result"], 16) != 0
-                    else:
-                        determined_map[cid] = None
+                    mid_hex = cid_to_market_id.get(cid, cid).replace("0x", "")
+                    data = f"0x{get_determined_sel}{mid_hex.zfill(64)}"
+                    async with http.post(Config.POLYGON_RPC_URL, json={
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "eth_call",
+                        "params": [{"to": neg_risk_adapter, "data": data}, "latest"],
+                    }) as resp:
+                        payload = await resp.json()
+                    result = payload.get("result")
+                    determined[cid] = int(result, 16) != 0 if result else None
                 except Exception:
-                    determined_map[cid] = None
-            await asyncio.gather(*(fetch_determined(cid) for cid in condition_ids))
+                    determined[cid] = None
 
-    # ── Fetch live prices from Polymarket API (for when DB snapshots are stale) ──
-    cid_to_api_price = {}
-    try:
-        api_positions_list, addr = await api_positions_task
-    except Exception:
-        api_positions_list, addr = [], None
-    for pos in api_positions_list:
-        cid = pos.get("conditionId", "")
-        if cid:
-            cid_to_api_price[cid] = float(pos.get("curPrice", 0) or 0)
+        await asyncio.gather(*(check(cid) for cid in condition_ids))
+    return determined, None
 
-    # ── Bulk-fetch market snapshots & station calibrations (avoid N+1) ──
-    all_bucket_ids = [b.id for evt in events for b in evt.buckets if b.condition_id]
-    async with get_session() as sess:
-        snap_map = await get_latest_market_snapshots_bulk(sess, all_bucket_ids)
-        from backend.storage.repos import get_all_station_calibrations
-        all_cals = await get_all_station_calibrations(sess)
-    cal_by_slug = {c.city_slug: c for c in all_cals}
 
+async def _build_redemptions_payload(
+    *,
+    wallet_timeout_s: float = 1.5,
+    include_missing_wallet_positions: bool = False,
+    include_onchain: bool = False,
+) -> dict:
+    """DB-first position reconciliation payload.
+
+    The default page path must never wait on Gamma or Polygon. Wallet/data-api
+    enrichment is short-timeout only; DB rows still render if that side-channel
+    is down or slow.
+    """
+    from sqlalchemy import select
+    from backend.storage.models import Bucket, City, Event, Position
+    from backend.storage.repos import get_all_station_calibrations, get_heartbeat
+
+    total_t0 = time.perf_counter()
+    db_t0 = time.perf_counter()
     now_utc = datetime.now(timezone.utc)
-    STALE_THRESHOLD = timedelta(minutes=5)
+    today = et_today()
+    stale_threshold = timedelta(minutes=5)
+    degraded_reasons: list[str] = []
 
-    rows = []
-    for evt in events:
-        async with get_session() as sess:
-            from backend.storage.models import City
-            city = await sess.get(City, evt.city_id)
-            buckets_info = []
-            for bucket in evt.buckets:
-                if not bucket.condition_id:
-                    continue
-                pos = await get_position(sess, bucket.id)
-                mkt_snap = snap_map.get(bucket.id)
-                is_winner = (
-                    evt.winning_bucket_idx is not None
-                    and bucket.bucket_idx == evt.winning_bucket_idx
-                )
-                exit_strategy = None
-                if pos and pos.net_qty > 0:
-                    from backend.storage.repos import get_latest_signal_for_bucket
-                    sig = await get_latest_signal_for_bucket(sess, bucket.id)
-                    if sig:
-                        exit_strategy = {
-                            "type": "default",
-                            "cut_loss_temp_high": bucket.high_f + 1.0 if bucket.high_f is not None else None,
-                            "cut_loss_temp_low": bucket.low_f - 3.0 if bucket.low_f is not None else None,
-                            "take_profit_price": round(pos.avg_cost + Config.QUICK_FLIP_TARGET, 3),
-                            "expiry_time": "19:30 Local",
-                        }
-
-                # Live market prices: prefer Polymarket API for accuracy, fall back to DB snapshot
-                api_price = float(cid_to_api_price.get(bucket.condition_id, 0) or 0)
-                snap_price = float(mkt_snap.yes_mid or 0) if mkt_snap else 0
-                last_mkt = float(pos.last_mkt_price or 0) if pos else 0
-                # Use API price if available (>0), otherwise use snapshot, then fallback to last known
-                live_price = api_price if api_price > 0 else (snap_price if snap_price > 0 else last_mkt)
-                live_bid = mkt_snap.yes_bid if mkt_snap else 0
-                live_spread = mkt_snap.spread if mkt_snap else 0
-
-                # Snapshot freshness metadata
-                snap_ts = None
-                snap_stale = True  # default stale if no snapshot
-                if mkt_snap and mkt_snap.fetched_at:
-                    snap_dt = mkt_snap.fetched_at
-                    if snap_dt.tzinfo is None:
-                        snap_dt = snap_dt.replace(tzinfo=timezone.utc)
-                    snap_ts = snap_dt.isoformat()
-                    snap_stale = (now_utc - snap_dt) > STALE_THRESHOLD
-
-                buckets_info.append({
-                    "bucket_idx": bucket.bucket_idx,
-                    "bucket_id": bucket.id,
-                    "position_id": pos.id if pos else None,
-                    "label": bucket.label,
-                    "condition_id": bucket.condition_id,
-                    "net_qty": pos.net_qty if pos else 0,
-                    "avg_cost": pos.avg_cost if pos else 0,
-                    "last_mkt_price": pos.last_mkt_price if pos else 0,
-                    "live_price": live_price or 0,
-                    "live_bid": live_bid or 0,
-                    "live_spread": live_spread or 0,
-                    "snapshot_at": snap_ts,
-                    "snapshot_stale": snap_stale,
-                    "is_winner": is_winner,
-                    "on_chain_determined": determined_map.get(bucket.condition_id),
-                    "exit_strategy": exit_strategy,
-                    # Position Tracking Metadata
-                    "entry_type": pos.entry_type if pos else None,
-                    "strategy": pos.strategy if pos else None,
-                    "governing_exit_conditions": pos.governing_exit_conditions if pos else None,
-                    "current_exit_status": pos.current_exit_status if pos else None,
-                    "entry_time": pos.entry_time.isoformat() if pos and pos.entry_time and hasattr(pos.entry_time, 'isoformat') else (pos.entry_time if pos else None),
-                })
-
-        # Overall on-chain status: determined if ANY bucket with position is determined
-        any_determined = any(
-            b["on_chain_determined"] for b in buckets_info
-            if b["net_qty"] > 0 and b["on_chain_determined"] is not None
+    async with get_session() as sess:
+        result = await sess.execute(
+            select(Position, Bucket, Event, City)
+            .join(Bucket, Position.bucket_id == Bucket.id)
+            .join(Event, Bucket.event_id == Event.id)
+            .join(City, Event.city_id == City.id)
+            .where(Position.net_qty > 0)
+            .order_by(Event.date_et.desc(), City.display_name.asc(), Bucket.bucket_idx.asc())
         )
+        pos_rows = list(result.all())
+        bucket_ids = [bucket.id for _, bucket, _, _ in pos_rows]
+        snap_map = await get_latest_market_snapshots_bulk(sess, bucket_ids)
+        sig_map = await get_latest_signals_for_buckets(sess, bucket_ids)
+        all_cals = await get_all_station_calibrations(sess)
+        arming = await get_arming_state(sess)
+        hb = await get_heartbeat(sess, "run_exit_engine")
+        daily_pnl = await get_daily_realized_pnl(sess, today)
 
-        if evt.redeemed_at:
-            status = "redeemed"
-        elif evt.resolved_at and any_determined:
-            status = "redeemable"
-        elif evt.resolved_at:
-            status = "resolved_not_determined"
+    cal_by_slug = {c.city_slug: c for c in all_cals}
+    db_ms = round((time.perf_counter() - db_t0) * 1000, 1)
+
+    wallet_t0 = time.perf_counter()
+    wallet_positions: list[dict] = []
+    wallet_addr = None
+    wallet_checked = False
+    try:
+        wallet_positions, wallet_addr = await _fetch_wallet_api_positions(timeout_s=wallet_timeout_s)
+        wallet_checked = bool(wallet_addr)
+        if not wallet_checked:
+            degraded_reasons.append("wallet_address_not_configured")
+    except Exception as exc:
+        degraded_reasons.append(f"wallet_positions_unavailable:{type(exc).__name__}")
+        log.warning("redemptions: wallet position refresh failed: %s", exc)
+    wallet_ms = round((time.perf_counter() - wallet_t0) * 1000, 1)
+
+    api_pos_by_cid = {
+        str(p.get("conditionId", "")): p
+        for p in wallet_positions
+        if p.get("conditionId") and _float_or_zero(p.get("size")) > 0
+    }
+    api_price_by_cid = {
+        cid: _float_or_zero(pos.get("curPrice"))
+        for cid, pos in api_pos_by_cid.items()
+    }
+
+    condition_ids = {bucket.condition_id for _, bucket, _, _ in pos_rows if bucket.condition_id}
+    cid_to_gamma_event_id = {
+        bucket.condition_id: evt.gamma_event_id
+        for _, bucket, evt, _ in pos_rows
+        if bucket.condition_id
+    }
+    onchain_t0 = time.perf_counter()
+    determined_map: dict[str, Optional[bool]] = {}
+    if include_onchain:
+        determined_map, onchain_reason = await _fetch_onchain_determined_map(
+            condition_ids,
+            cid_to_gamma_event_id,
+        )
+        if onchain_reason:
+            degraded_reasons.append(onchain_reason)
+    onchain_ms = round((time.perf_counter() - onchain_t0) * 1000, 1) if include_onchain else 0.0
+
+    grouped: dict[int, dict] = {}
+    confirmed_wallet_exposure = 0.0
+    db_only_exposure = 0.0
+    redeemable_value = 0.0
+    unrealized_pnl = 0.0
+    stale_rows = 0
+
+    for pos, bucket, evt, city in pos_rows:
+        cid = bucket.condition_id or ""
+        api_pos = api_pos_by_cid.get(cid)
+        api_price = api_price_by_cid.get(cid, 0.0)
+        snap = snap_map.get(bucket.id)
+        sig = sig_map.get(bucket.id)
+        cal = cal_by_slug.get(city.city_slug)
+
+        snap_price = _float_or_zero(snap.yes_mid) if snap else 0.0
+        last_mkt = _float_or_zero(pos.last_mkt_price)
+        live_price = api_price if api_price > 0 else (snap_price if snap_price > 0 else last_mkt)
+        live_bid = _float_or_zero(snap.yes_bid) if snap else 0.0
+        live_spread = _float_or_zero(snap.spread) if snap else 0.0
+        snap_ts = None
+        snap_stale = True
+        if snap and snap.fetched_at:
+            snap_dt = snap.fetched_at
+            if snap_dt.tzinfo is None:
+                snap_dt = snap_dt.replace(tzinfo=timezone.utc)
+            snap_ts = snap_dt.isoformat()
+            snap_stale = (now_utc - snap_dt) > stale_threshold
+
+        old_or_resolved = bool(evt.resolved_at or evt.redeemed_at or evt.date_et < today)
+        on_chain_determined = determined_map.get(cid)
+        wallet_confirmed = bool(api_pos)
+        wallet_redeemable = bool(api_pos and api_pos.get("redeemable"))
+        is_winner = evt.winning_bucket_idx is not None and bucket.bucket_idx == evt.winning_bucket_idx
+
+        if evt.redeemed_at or pos.net_qty <= 0:
+            sync_status = "closed_local"
+        elif wallet_redeemable or (include_onchain and evt.resolved_at and is_winner and on_chain_determined):
+            sync_status = "redeemable"
+        elif wallet_checked and not wallet_confirmed:
+            sync_status = "missing_on_chain"
+        elif old_or_resolved:
+            sync_status = "awaiting_resolution"
+        elif wallet_confirmed:
+            sync_status = "live"
         else:
-            status = "open"
+            sync_status = "live"
 
-        # Station calibration data
-        cal = cal_by_slug.get(city.city_slug) if city else None
+        if sync_status == "redeemable":
+            event_status = "redeemable"
+        elif evt.redeemed_at:
+            event_status = "redeemed"
+        elif old_or_resolved and sync_status != "live":
+            event_status = "resolved_not_determined"
+        else:
+            event_status = "open"
 
-        rows.append({
+        exposure = _float_or_zero(pos.net_qty) * _float_or_zero(pos.avg_cost)
+        if sync_status == "missing_on_chain":
+            db_only_exposure += exposure
+            stale_rows += 1
+        elif wallet_confirmed:
+            confirmed_wallet_exposure += exposure
+        if sync_status == "redeemable":
+            redeemable_value += _float_or_zero(pos.net_qty)
+
+        mark = live_price if live_price > 0 else _float_or_zero(pos.avg_cost)
+        row_unrealized = _float_or_zero(pos.net_qty) * (mark - _float_or_zero(pos.avg_cost))
+        unrealized_pnl += row_unrealized
+
+        tradable = (
+            event_status == "open"
+            and sync_status in {"live", "awaiting_resolution"}
+            and bool(bucket.yes_token_id)
+            and live_bid > 0
+        )
+        action_reason = None
+        if sync_status == "missing_on_chain":
+            action_reason = "DB position is absent from wallet/data-api reconciliation."
+        elif event_status == "resolved_not_determined":
+            action_reason = "Market is old or locally resolved, but UMA/on-chain redeemability is not confirmed."
+        elif not tradable and event_status == "open":
+            action_reason = "No live bid/liquidity available for direct exit."
+
+        exit_strategy = None
+        if sig:
+            exit_strategy = {
+                "type": "default",
+                "cut_loss_temp_high": bucket.high_f + 1.0 if bucket.high_f is not None else None,
+                "cut_loss_temp_low": bucket.low_f - 3.0 if bucket.low_f is not None else None,
+                "take_profit_price": round(_float_or_zero(pos.avg_cost) + Config.QUICK_FLIP_TARGET, 3),
+                "expiry_time": "19:30 Local",
+            }
+
+        event_payload = grouped.setdefault(evt.id, {
             "event_id": evt.id,
-            "city_name": city.display_name if city else "?",
-            "city_slug": city.city_slug if city else "",
+            "source": "db",
+            "city_name": city.display_name,
+            "city_slug": city.city_slug,
             "date_et": evt.date_et,
             "gamma_event_id": evt.gamma_event_id,
-            "status": status,
+            "event_slug": evt.gamma_slug,
+            "status": event_status,
             "resolved_at": evt.resolved_at.isoformat() if evt.resolved_at else None,
             "redeemed_at": evt.redeemed_at.isoformat() if evt.redeemed_at else None,
             "winning_bucket_idx": evt.winning_bucket_idx,
-            "buckets": buckets_info,
+            "buckets": [],
             "station_mae": round(cal.mae_f, 1) if cal and cal.mae_f is not None else None,
             "station_bias": round(cal.bias_f, 1) if cal and cal.bias_f is not None else None,
             "station_tradeability": cal.tradeability if cal else None,
         })
+        if event_payload["status"] == "open" and event_status != "open":
+            event_payload["status"] = event_status
+        if event_payload["status"] == "resolved_not_determined" and event_status == "redeemable":
+            event_payload["status"] = "redeemable"
 
-    # Overlay live data-api positions onto DB-backed rows. This lets a manual
-    # buy appear on /redemptions immediately even if the background DB sync has
-    # not caught up yet.
-    api_pos_by_cid = {
-        p.get("conditionId", ""): p
-        for p in api_positions_list
-        if p.get("conditionId") and float(p.get("size", 0) or 0) > 0
-    }
-    for r in rows:
-        for b in r["buckets"]:
-            api_pos = api_pos_by_cid.get(b.get("condition_id"))
-            if not api_pos:
+        wallet_size = _float_or_zero(api_pos.get("size")) if api_pos else None
+        wallet_avg = _float_or_zero(api_pos.get("avgPrice")) if api_pos else None
+        if api_pos:
+            pos_qty = wallet_size
+            avg_cost = wallet_avg
+            if api_price > 0:
+                live_price = api_price
+        else:
+            pos_qty = _float_or_zero(pos.net_qty)
+            avg_cost = _float_or_zero(pos.avg_cost)
+
+        event_payload["buckets"].append({
+            "bucket_idx": bucket.bucket_idx,
+            "bucket_id": bucket.id,
+            "position_id": pos.id,
+            "label": bucket.label,
+            "condition_id": cid,
+            "yes_token_id": bucket.yes_token_id,
+            "net_qty": pos_qty,
+            "avg_cost": avg_cost,
+            "last_mkt_price": _float_or_zero(pos.last_mkt_price),
+            "live_price": live_price or 0,
+            "live_bid": live_bid or 0,
+            "live_spread": live_spread or 0,
+            "snapshot_at": snap_ts,
+            "snapshot_stale": snap_stale,
+            "is_winner": is_winner,
+            "on_chain_determined": on_chain_determined,
+            "exit_strategy": exit_strategy,
+            "entry_type": pos.entry_type,
+            "strategy": pos.strategy,
+            "governing_exit_conditions": pos.governing_exit_conditions,
+            "current_exit_status": pos.current_exit_status,
+            "entry_time": pos.entry_time.isoformat() if pos.entry_time and hasattr(pos.entry_time, "isoformat") else pos.entry_time,
+            "wallet_confirmed": wallet_confirmed,
+            "wallet_size": wallet_size,
+            "wallet_price": api_price if api_price > 0 else None,
+            "sync_status": sync_status,
+            "action_reason": action_reason,
+            "requires_action": sync_status in {"missing_on_chain", "redeemable"} or event_status == "resolved_not_determined",
+            "tradable": tradable,
+            "unrealized_pnl": row_unrealized,
+        })
+
+    if include_missing_wallet_positions:
+        db_condition_ids = {bucket.condition_id for _, bucket, _, _ in pos_rows if bucket.condition_id}
+        for cid, api_pos in api_pos_by_cid.items():
+            if cid in db_condition_ids:
                 continue
-            size = float(api_pos.get("size", 0) or 0)
-            avg_price = float(api_pos.get("avgPrice", 0) or 0)
-            cur_price = float(api_pos.get("curPrice", 0) or 0)
-            if size <= 0:
-                continue
-            b["net_qty"] = size
-            b["avg_cost"] = avg_price
-            b["live_price"] = cur_price if cur_price > 0 else (b.get("live_price") or avg_price)
-            b["last_mkt_price"] = b["live_price"]
-            b["entry_type"] = b.get("entry_type") or "MANUAL"
-            if not b.get("label") or b.get("label", "").startswith("Bucket"):
-                b["label"] = f"{api_pos.get('outcome', 'YES')} — {api_pos.get('title', '')}"
+            size = _float_or_zero(api_pos.get("size"))
+            avg_price = _float_or_zero(api_pos.get("avgPrice"))
+            cur_price = _float_or_zero(api_pos.get("curPrice")) or avg_price
+            grouped[-len(grouped) - 1] = {
+                "event_id": None,
+                "source": "wallet",
+                "city_name": api_pos.get("title", "Wallet Position"),
+                "city_slug": "",
+                "date_et": api_pos.get("endDate", ""),
+                "gamma_event_id": api_pos.get("eventId"),
+                "event_slug": api_pos.get("eventSlug", ""),
+                "status": "redeemable" if api_pos.get("redeemable") else "open",
+                "resolved_at": None,
+                "redeemed_at": None,
+                "winning_bucket_idx": None,
+                "buckets": [{
+                    "bucket_idx": 0,
+                    "bucket_id": None,
+                    "position_id": None,
+                    "label": f"{api_pos.get('outcome', 'YES')} - {api_pos.get('title', '')}",
+                    "condition_id": cid,
+                    "yes_token_id": api_pos.get("asset"),
+                    "net_qty": size,
+                    "avg_cost": avg_price,
+                    "last_mkt_price": cur_price,
+                    "live_price": cur_price,
+                    "live_bid": 0,
+                    "live_spread": 0,
+                    "snapshot_at": None,
+                    "snapshot_stale": True,
+                    "is_winner": cur_price >= 0.999,
+                    "on_chain_determined": None,
+                    "entry_type": "MANUAL",
+                    "strategy": None,
+                    "governing_exit_conditions": None,
+                    "current_exit_status": None,
+                    "entry_time": None,
+                    "wallet_confirmed": True,
+                    "wallet_size": size,
+                    "wallet_price": cur_price,
+                    "sync_status": "redeemable" if api_pos.get("redeemable") else "live",
+                    "action_reason": None,
+                    "requires_action": bool(api_pos.get("redeemable")),
+                    "tradable": False,
+                    "unrealized_pnl": size * (cur_price - avg_price),
+                }],
+                "station_mae": None,
+                "station_bias": None,
+                "station_tradeability": None,
+            }
 
-    # ── Add wallet positions missing from the DB (catches manual trades) ──
-    db_condition_ids = set()
-    for r in rows:
-        for b in r["buckets"]:
-            if b["condition_id"] and b.get("net_qty", 0) > 0:
-                db_condition_ids.add(b["condition_id"])
-
-    # Add DB-missing wallet positions only on explicit on-chain refresh. The
-    # standard page path already overlays API positions onto known DB markets.
-    if onchain and addr and api_positions_list:
-        try:
-            timeout = aiohttp.ClientTimeout(total=10)
-            async with aiohttp.ClientSession(timeout=timeout) as http:
-                for pos in api_positions_list:
-                    cid = pos.get("conditionId", "")
-                    if not cid or cid in db_condition_ids:
-                        continue
-                    size = float(pos.get("size", 0))
-                    if size <= 0:
-                        continue
-
-                    # Check on-chain determination — getDetermined takes negRiskMarketID
-                    determined = None
-                    if onchain and POLYGON_RPC:
-                        try:
-                            # Fetch Market ID from Event mapping
-                            mid = cid_to_market_id.get(cid)
-                            # If not in DB mapping, try to fetch directly from Gamma API
-                            gamma_event_id = pos.get("eventId")
-                            if not mid and gamma_event_id:
-                                url = f"https://gamma-api.polymarket.com/events/{gamma_event_id}"
-                                async with http.get(url) as resp:
-                                    if resp.status == 200:
-                                        data = await resp.json()
-                                        if isinstance(data, list) and len(data) > 0:
-                                            data = data[0]
-                                        mid = data.get("negRiskMarketID")
-
-                            # Fallback to condition id if it's not NegRisk
-                            mid = mid or cid
-
-                            if mid:
-                                mid_hex = mid.replace("0x", "")
-                                call_data = f"0x{GET_DETERMINED_SEL}{mid_hex.zfill(64)}"
-                                rpc_resp = await (await http.post(POLYGON_RPC, json={
-                                    "jsonrpc": "2.0", "id": 1, "method": "eth_call",
-                                    "params": [{"to": NEG_RISK_ADAPTER, "data": call_data}, "latest"],
-                                })).json()
-                                if "result" in rpc_resp:
-                                    determined = int(rpc_resp["result"], 16) != 0
-                        except Exception:
-                            pass
-                    elif onchain and not POLYGON_RPC:
-                        log.warning("redemptions: onchain=true but POLYGON_RPC_URL is not configured")
-                    redeemable_api = pos.get("redeemable", False)
-                    if redeemable_api and determined:
-                        status = "redeemable"
-                    elif redeemable_api:
-                        status = "resolved_not_determined"
-                    else:
-                        status = "open"
-
-                    # Use curPrice from API as live_price if available
-                    cur_price = float(pos.get("curPrice", 0))
-                    avg_price = float(pos.get("avgPrice", 0))
-                    # Fallback chain: curPrice from API > 1.0 (winner) > avg_price
-                    live_price = cur_price if cur_price > 0 else (1.0 if pos.get("curPrice", 0) == 1 else avg_price)
-
-                    rows.append({
-                        "event_id": None,
-                        "source": "on_chain",
-                        "city_name": pos.get("title", "Manual Position"),
-                        "city_slug": "",
-                        "date_et": pos.get("endDate", ""),
-                        "gamma_event_id": pos.get("eventId"),
-                        "event_slug": pos.get("eventSlug", ""),
-                        "status": status,
-                        "resolved_at": None,
-                        "redeemed_at": None,
-                        "winning_bucket_idx": None,
-                        "buckets": [{
-                            "bucket_idx": 0,
-                            "bucket_id": None,
-                            "position_id": None,
-                            "label": f"{pos.get('outcome', 'YES')} — {pos.get('title', '')}",
-                            "condition_id": cid,
-                            "net_qty": size,
-                            "avg_cost": avg_price,
-                            "last_mkt_price": live_price,
-                            "live_price": live_price,
-                            "live_bid": 0,
-                            "live_spread": 0,
-                            "snapshot_at": None,
-                            "snapshot_stale": True,
-                            "is_winner": pos.get("curPrice", 0) == 1,
-                            "on_chain_determined": determined,
-                            "entry_type": "MANUAL",
-                            "strategy": None,
-                            "governing_exit_conditions": None,
-                            "current_exit_status": None,
-                            "entry_time": None,
-                        }],
-                    })
-        except Exception as e:
-            log.warning("redemptions: failed to fetch on-chain positions: %s", e)
-
-    # Fetch Auto Redeem Status + Exit Engine Heartbeat
-    async with get_session() as sess:
-        from backend.storage.repos import get_arming_state, get_heartbeat
-        arming = await get_arming_state(sess)
-        auto_redeem_enabled = arming.auto_redeem_enabled if arming else False
-        hb = await get_heartbeat(sess, "run_exit_engine")
+    rows = sorted(grouped.values(), key=lambda item: str(item.get("date_et") or ""), reverse=True)
+    positions_monitored = sum(
+        1
+        for event in rows
+        for bucket in event["buckets"]
+        if event["status"] == "open" and _float_or_zero(bucket.get("net_qty")) > 0
+    )
+    total_ms = round((time.perf_counter() - total_t0) * 1000, 1)
 
     return {
         "events": rows,
-        "auto_redeem_enabled": auto_redeem_enabled,
+        "auto_redeem_enabled": bool(arming.auto_redeem_enabled) if arming else False,
         "exit_engine_last_run": hb.last_run_at.isoformat() if hb and hb.last_run_at else None,
-        "positions_monitored": len([r for r in rows if r["status"] == "open" and any(b["net_qty"] > 0 for b in r["buckets"])]),
+        "positions_monitored": positions_monitored,
+        "wallet_address": wallet_addr,
+        "wallet_checked": wallet_checked,
+        "summary": {
+            "confirmed_wallet_exposure": round(confirmed_wallet_exposure, 4),
+            "db_only_exposure": round(db_only_exposure, 4),
+            "redeemable_value": round(redeemable_value, 4),
+            "unrealized_pnl": round(unrealized_pnl, 4),
+            "stale_rows": stale_rows,
+            "daily_realized_pnl": round(daily_pnl, 4),
+        },
+        "timing": {
+            "db_ms": db_ms,
+            "wallet_ms": wallet_ms,
+            "onchain_ms": onchain_ms,
+            "total_ms": total_ms,
+            "degraded_reason": ";".join(degraded_reasons) if degraded_reasons else None,
+        },
     }
+
+
+@router.get("/api/redemptions")
+async def redemptions_list():
+    return await _build_redemptions_payload(wallet_timeout_s=1.5)
+
+
+@router.get("/api/redemptions/live")
+async def redemptions_live():
+    return await _build_redemptions_payload(
+        wallet_timeout_s=6.0,
+        include_missing_wallet_positions=True,
+    )
+
+
+@router.get("/api/redemptions/onchain")
+async def redemptions_onchain():
+    return await _build_redemptions_payload(
+        wallet_timeout_s=6.0,
+        include_missing_wallet_positions=True,
+        include_onchain=True,
+    )
+
+
+@router.post("/api/positions/{position_id}/mark-closed")
+async def mark_position_closed(
+    position_id: int,
+    payload: MarkClosedRequest,
+    actor: str = Depends(require_admin),
+):
+    from backend.storage.models import Position
+
+    async with get_session() as sess:
+        pos = await sess.get(Position, position_id)
+        if not pos:
+            raise HTTPException(status_code=404, detail="Position not found")
+
+        old_qty = _float_or_zero(pos.net_qty)
+        old_avg = _float_or_zero(pos.avg_cost)
+        if payload.close_price is not None and old_qty > 0:
+            pos.realized_pnl = _float_or_zero(pos.realized_pnl) + old_qty * (payload.close_price - old_avg)
+            pos.last_mkt_price = payload.close_price
+        pos.net_qty = 0.0
+        pos.unrealized_pnl = 0.0
+        pos.current_exit_status = f"Closed locally: {payload.reason}"
+        pos.updated_at = datetime.now(timezone.utc)
+        await append_audit(sess, actor=actor, action="position_mark_closed", payload={
+            "position_id": position_id,
+            "bucket_id": pos.bucket_id,
+            "old_qty": old_qty,
+            "avg_cost": old_avg,
+            "close_price": payload.close_price,
+            "reason": payload.reason,
+        })
+        await sess.commit()
+
+    return {"ok": True, "position_id": position_id, "old_qty": old_qty}
 
 
 @router.get("/api/redeem-diag")
@@ -1766,6 +1885,25 @@ async def get_audit(limit: int = 100, action: Optional[str] = None):
 
 
 # ─── Calibration ─────────────────────────────────────────────────────────────
+
+@router.get("/calibration/edge", response_class=HTMLResponse)
+async def calibration_edge_page_from_api_router(request: Request, days_back: int = 30):
+    """Serve the alpha dashboard before /calibration/{city_slug} can catch edge."""
+    from fastapi.templating import Jinja2Templates
+    from backend.modeling.edge_metrics import compute_edge_metrics
+
+    metrics = await compute_edge_metrics(days_back=days_back)
+    templates = Jinja2Templates(directory="web/templates")
+    return templates.TemplateResponse(
+        "calibration_edge.html",
+        {
+            "request": request,
+            "metrics": metrics,
+            "days_back": days_back,
+            "metrics_json": json.dumps(metrics, default=str),
+        },
+    )
+
 
 @router.get("/calibration/{city_slug}")
 async def get_city_calibration(city_slug: str):

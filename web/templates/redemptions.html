@@ -16,8 +16,8 @@
     <button onclick="sweepAll(this)" class="px-4 py-1.5 rounded text-sm font-semibold transition-colors bg-[var(--bg-panel)] border border-[var(--border)] hover:bg-[var(--cyan)] hover:text-black hover:border-[var(--cyan)]" style="color:var(--text-muted)">
       Sweep All Negative Risk
     </button>
-    <button id="refresh-btn" onclick="loadEvents()" class="px-4 py-1.5 rounded text-sm font-semibold transition-colors bg-[var(--cyan)] text-black hover:bg-opacity-80 shadow-[0_0_10px_var(--cyan)]">
-      Refresh Positions ↻
+    <button id="refresh-btn" onclick="loadEvents('live')" class="px-4 py-1.5 rounded text-sm font-semibold transition-colors bg-[var(--cyan)] text-black hover:bg-opacity-80 shadow-[0_0_10px_var(--cyan)]">
+      Refresh Wallet ↻
     </button>
     <label class="flex items-center gap-1.5 text-[0.6rem] text-gray-500 cursor-pointer font-mono select-none">
       <input type="checkbox" id="auto-refresh-toggle" onchange="toggleAutoRefresh(this.checked)" class="accent-[var(--cyan)]">
@@ -29,32 +29,36 @@
 <!-- TOP SUMMARY CARDS -->
 <div class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-6">
   <div class="card p-4 flex flex-col justify-center border border-[var(--border)] bg-[rgba(0,0,0,0.5)]">
-    <div class="text-[0.6rem] font-bold tracking-wider uppercase mb-1" style="color:var(--text-muted)">Total Open Exposure</div>
+    <div class="text-[0.6rem] font-bold tracking-wider uppercase mb-1" style="color:var(--text-muted)">Confirmed Wallet Exposure</div>
     <div id="summary-exposure" class="text-xl font-bold font-mono text-gray-300">--</div>
   </div>
   <div class="card p-4 flex flex-col justify-center border border-[var(--border)] bg-[rgba(0,0,0,0.5)]">
-    <div class="text-[0.6rem] font-bold tracking-wider uppercase mb-1" style="color:var(--text-muted)">Realized P&L Today</div>
+    <div class="text-[0.6rem] font-bold tracking-wider uppercase mb-1" style="color:var(--text-muted)">DB-Only Exposure</div>
     <div id="summary-realized" class="text-xl font-bold font-mono text-gray-300">--</div>
   </div>
   <div class="card p-4 flex flex-col justify-center border border-[var(--border)] bg-[rgba(0,0,0,0.5)]">
-    <div class="text-[0.6rem] font-bold tracking-wider uppercase mb-1" style="color:var(--text-muted)">Unrealized P&L</div>
+    <div class="text-[0.6rem] font-bold tracking-wider uppercase mb-1" style="color:var(--text-muted)">Redeemable Value</div>
     <div id="summary-unrealized" class="text-xl font-bold font-mono text-gray-300">--</div>
   </div>
   <div class="card p-4 flex flex-col justify-center border border-[var(--border)] bg-[rgba(0,0,0,0.5)]">
-    <div class="text-[0.6rem] font-bold tracking-wider uppercase mb-1" style="color:var(--text-muted)">% Bankroll Risk</div>
+    <div class="text-[0.6rem] font-bold tracking-wider uppercase mb-1" style="color:var(--text-muted)">Unrealized P&L</div>
     <div id="summary-bankroll" class="text-xl font-bold font-mono text-gray-300">--</div>
   </div>
   <div class="card p-4 flex flex-col justify-center border border-[var(--border)] bg-[rgba(0,0,0,0.5)]">
-    <div class="text-[0.6rem] font-bold tracking-wider uppercase mb-1" style="color:var(--text-muted)">Automatic / Manual</div>
-    <div id="summary-auto-manual" class="text-xl font-bold font-mono text-gray-300">-- / --</div>
+    <div class="text-[0.6rem] font-bold tracking-wider uppercase mb-1" style="color:var(--text-muted)">Stale Rows</div>
+    <div id="summary-auto-manual" class="text-xl font-bold font-mono text-gray-300">--</div>
   </div>
 </div>
 
 <!-- U7 — Alpha-vs-market callout card. Self-loads from /api/calibration/edge.json
      on mount; click-through opens the full Alpha Dashboard. Red border when the
      legacy model is losing to market for 5+ consecutive days (kill-switch territory). -->
+<details class="mb-6">
+  <summary class="cursor-pointer text-xs font-bold uppercase tracking-wider mb-2" style="color:var(--text-muted)">
+    Alpha over market diagnostics
+  </summary>
 <a href="/calibration/edge"
-   class="block mb-6 card p-4 transition-all hover:opacity-90 cursor-pointer no-underline"
+   class="block card p-4 transition-all hover:opacity-90 cursor-pointer no-underline"
    style="border-color:var(--border)"
    x-data="redemptionsAlphaCard()" x-init="load()"
    :style="`border-color: ${borderColor()}; ${borderColor() === 'var(--red)' ? 'box-shadow: 0 0 12px rgba(239,68,68,0.20);' : ''}`"
@@ -105,10 +109,11 @@
     </div>
   </div>
 </a>
+</details>
 
 <!-- FILTER TABS -->
 <div class="flex items-center gap-2 mb-4 border-b border-[var(--border)] pb-2 font-mono text-sm" id="filter-tabs">
-  <button onclick="setFilter('ALL')" class="filter-tab px-3 py-1 rounded bg-[var(--bg-panel)] text-[var(--cyan)] font-bold border border-[var(--cyan)]" data-filter="ALL">ALL OPEN</button>
+  <button onclick="setFilter('ALL')" class="filter-tab px-3 py-1 rounded bg-[var(--bg-panel)] text-[var(--cyan)] font-bold border border-[var(--cyan)]" data-filter="ALL">ALL POSITIONS</button>
   <button onclick="setFilter('AUTOMATIC')" class="filter-tab px-3 py-1 rounded text-gray-400 hover:text-white transition" data-filter="AUTOMATIC">AUTOMATIC ONLY</button>
   <button onclick="setFilter('MANUAL')" class="filter-tab px-3 py-1 rounded text-gray-400 hover:text-white transition" data-filter="MANUAL">MANUAL ONLY</button>
   <button onclick="setFilter('RESOLVED')" class="filter-tab px-3 py-1 rounded text-gray-400 hover:text-white transition" data-filter="RESOLVED">RESOLVED TODAY</button>
@@ -121,24 +126,8 @@
   <div class="text-sm font-mono" style="color:var(--cyan)">LOADING POSITIONS...</div>
 </div>
 
-<!-- Events Table -->
-<div class="card overflow-x-auto hidden border-t-2 border-[var(--cyan)]" id="events-card">
-  <table class="w-full text-left border-collapse font-mono text-sm whitespace-nowrap">
-    <thead class="bg-[rgba(255,255,255,0.03)] border-b border-[var(--border)]">
-      <tr>
-        <th class="py-2 px-2 lg:py-3 lg:px-4 uppercase tracking-wider text-[0.65rem] font-bold sortable" style="color:var(--text-muted)" onclick="toggleSort('city')">City / Bucket <span class="sort-arrow" data-sort="city"></span></th>
-        <th class="py-2 px-2 lg:py-3 lg:px-4 uppercase tracking-wider text-[0.65rem] font-bold sortable" style="color:var(--text-muted)" onclick="toggleSort('entry_time')">Entry Info / Type <span class="sort-arrow" data-sort="entry_time"></span></th>
-        <th class="py-2 px-2 lg:py-3 lg:px-4 uppercase tracking-wider text-[0.65rem] font-bold hidden lg:table-cell" style="color:var(--text-muted)">Strategy & Conditions (Hover)</th>
-        <th class="py-2 px-2 lg:py-3 lg:px-4 uppercase tracking-wider text-[0.65rem] font-bold text-right sortable" style="color:var(--text-muted)" onclick="toggleSort('mark')">C. Mark <span class="sort-arrow" data-sort="mark"></span></th>
-        <th class="py-2 px-2 lg:py-3 lg:px-4 uppercase tracking-wider text-[0.65rem] font-bold text-right sortable" style="color:var(--text-muted)" onclick="toggleSort('pnl')">Unrealized P&L <span class="sort-arrow" data-sort="pnl"></span></th>
-        <th class="py-2 px-2 lg:py-3 lg:px-4 uppercase tracking-wider text-[0.65rem] font-bold hidden lg:table-cell" style="color:var(--text-muted)">Live Exit Status</th>
-        <th class="py-2 px-2 lg:py-3 lg:px-4 uppercase tracking-wider text-[0.65rem] font-bold text-center" style="color:var(--text-muted)">Status</th>
-        <th class="py-2 px-2 lg:py-3 lg:px-4 uppercase tracking-wider text-[0.65rem] font-bold text-right" style="color:var(--text-muted)">Actions</th>
-      </tr>
-    </thead>
-    <tbody id="events-tbody" class="divide-y divide-[var(--border)]"></tbody>
-  </table>
-</div>
+<!-- Position workflow sections -->
+<div id="sections-root" class="hidden space-y-5"></div>
 
 <!-- Empty state -->
 <div id="empty" class="card p-8 text-center hidden text-sm font-mono" style="color:var(--text-muted)">
@@ -288,6 +277,15 @@ const STATUS_LABELS = {
   open:                     {text: 'LIVE',                  color: 'var(--cyan)',       bg: 'transparent'},
 };
 
+const SYNC_LABELS = {
+  live:                {text: 'WALLET CONFIRMED',  color: 'var(--green)'},
+  missing_on_chain:    {text: 'STALE DB POSITION', color: 'var(--red)'},
+  closed_local:        {text: 'CLOSED LOCAL',      color: 'var(--text-muted)'},
+  redeemable:          {text: 'REDEEMABLE',        color: 'var(--green)'},
+  awaiting_resolution: {text: 'AWAITING UMA',      color: 'var(--yellow)'},
+  unknown:             {text: 'WALLET UNKNOWN',    color: 'var(--text-muted)'},
+};
+
 async function apiCall(path, method='POST', body=null) {
   const tok = getAdminToken() || promptForToken();
   if (!tok) return null;
@@ -305,6 +303,20 @@ function badge(status) {
   return `<span class="text-[0.65rem] px-1.5 py-0.5 rounded font-bold uppercase" style="background:${s.bg};color:${s.color};${border}">${s.text}</span>`;
 }
 
+function syncBadge(status) {
+  const s = SYNC_LABELS[status] || {text: status || 'UNKNOWN', color: 'var(--text-muted)'};
+  return `<span class="text-[0.58rem] px-1.5 py-0.5 rounded font-bold uppercase border" style="color:${s.color};border-color:${s.color}">${s.text}</span>`;
+}
+
+function esc(v) {
+  return String(v ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+}
+
+function fmtUsd(v, digits=2) {
+  const n = Number(v || 0);
+  return `${n < 0 ? '-' : ''}$${Math.abs(n).toFixed(digits)}`;
+}
+
 function setFilter(f) {
   CURRENT_FILTER = f;
   document.querySelectorAll('.filter-tab').forEach(el => {
@@ -314,7 +326,7 @@ function setFilter(f) {
       el.className = "filter-tab px-3 py-1 rounded text-gray-400 hover:text-white transition";
     }
   });
-  renderTable();
+  renderSections();
 }
 
 // ── Sorting ──────────────────────────────────────────────────────────────────
@@ -335,7 +347,7 @@ function toggleSort(col) {
       el.classList.remove('active');
     }
   });
-  renderTable();
+  renderSections();
 }
 
 function _computeRow(evt, b) {
@@ -387,164 +399,190 @@ function toggleAutoRefresh(on) {
   }
 }
 
-// ── Table Rendering ──────────────────────────────────────────────────────────
-function renderTable() {
-  const tbody = document.getElementById('events-tbody');
-  tbody.innerHTML = '';
+function rowSection({evt, b}) {
+  const sync = b.sync_status || 'unknown';
+  const failed = (b.current_exit_status || '').toLowerCase().includes('fail');
+  if (sync === 'missing_on_chain' || sync === 'redeemable' || failed) return 'needs_action';
+  if (evt.status === 'redeemed' || sync === 'closed_local') return 'closed';
+  if (evt.status === 'resolved_not_determined' || sync === 'awaiting_resolution') return 'awaiting';
+  return 'live';
+}
+
+function marketUrl(evt) {
+  if (evt.event_slug) return `https://polymarket.com/event/${encodeURIComponent(evt.event_slug)}`;
+  if (evt.gamma_event_id) return `https://polymarket.com/event/${encodeURIComponent(evt.gamma_event_id)}`;
+  return 'https://polymarket.com';
+}
+
+function actionButtons({evt, b}) {
+  const cid = esc(b.condition_id || '');
+  const qty = Number(b.net_qty || 0);
+  const city = esc(evt.city_slug || '');
+  const bucketId = Number(b.bucket_id || 0);
+  const positionId = b.position_id ? Number(b.position_id) : null;
+  const journal = positionId ? `<a href="/positions/${positionId}/journal" class="text-[0.58rem] text-cyan-400 hover:underline">Journal</a>` : '';
+  const openMarket = `<a href="${marketUrl(evt)}" target="_blank" rel="noopener" class="px-2 py-[2px] rounded text-[0.58rem] font-bold border border-cyan-500/50 text-cyan-300 hover:bg-cyan-900/30">Open Market</a>`;
+  const openCity = city ? `<a href="/city/${city}" class="px-2 py-[2px] rounded text-[0.58rem] font-bold border border-cyan-500/50 text-cyan-300 hover:bg-cyan-900/30">Open City</a>` : openMarket;
+  const refresh = `<button onclick="loadEvents('live')" class="px-2 py-[2px] rounded text-[0.58rem] font-bold border border-cyan-500/50 text-cyan-300 hover:bg-cyan-900/30">Sync From Wallet</button>`;
+  const uma = `<button onclick="loadEvents('onchain')" class="px-2 py-[2px] rounded text-[0.58rem] font-bold border border-yellow-500/50 text-yellow-300 hover:bg-yellow-900/30">Check UMA</button>`;
+  const markClosed = positionId ? `<button onclick="markClosed(${positionId}, this)" class="px-2 py-[2px] rounded text-[0.58rem] font-bold border border-red-500/50 text-red-300 hover:bg-red-900/30">Mark Closed</button>` : '';
+
+  if (b.sync_status === 'missing_on_chain') {
+    return `<div class="flex flex-col items-end gap-1">${refresh}${markClosed}${openMarket}${journal}</div>`;
+  }
+  if (evt.status === 'redeemable' || b.sync_status === 'redeemable') {
+    return `<div class="flex flex-col items-end gap-1"><button onclick="redeemByCondition('${cid}', this)" class="px-2 py-[2px] rounded text-[0.58rem] font-bold shadow hover:opacity-80" style="background:var(--green);color:#000">REDEEM</button><button onclick="sweepAll(this)" class="px-2 py-[2px] rounded text-[0.58rem] font-bold border border-green-500/50 text-green-300 hover:bg-green-900/30">Sweep</button>${journal}</div>`;
+  }
+  if (evt.status === 'resolved_not_determined' || b.sync_status === 'awaiting_resolution') {
+    return `<div class="flex flex-col items-end gap-1">${uma}${refresh}${openMarket}${journal}</div>`;
+  }
+  if (evt.status === 'open' && b.tradable !== false) {
+    return `<div class="flex flex-col items-end gap-1"><button onclick="marketSell('${cid}', ${qty}, '${city}', ${bucketId}, this)" class="px-2 py-[2px] rounded text-[0.58rem] font-bold border border-red-500/50 text-red-400 hover:bg-red-900/30">Quick Exit</button><a href="/city/${city}" class="px-2 py-[2px] rounded text-[0.58rem] font-bold border border-yellow-500/50 text-yellow-300 hover:bg-yellow-900/30">Limit Exit</a>${openCity}${journal}</div>`;
+  }
+  return `<div class="flex flex-col items-end gap-1">${refresh}${openMarket}${journal}</div>`;
+}
+
+function sectionTable(rows) {
+  const body = rows.map(({ evt, b, bType, currentPrice, pnl }) => {
+    const qtyStr = b.net_qty > 0 ? `${Number(b.net_qty).toFixed(0)} sh` : '-';
+    const pnlPct = b.avg_cost > 0 ? ((currentPrice / b.avg_cost) - 1) * 100 : 0;
+    const pnlColor = pnl > 0 ? "var(--green)" : pnl < 0 ? "#ef4444" : "var(--text-muted)";
+    const eTime = b.entry_time ? new Date(b.entry_time).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) : '--';
+    const typeBadge = bType === 'AUTOMATIC'
+      ? `<span class="px-1 py-[1px] bg-purple-900/40 text-purple-300 border border-purple-500/50 rounded text-[0.55rem] font-bold">AUTO</span>`
+      : `<span class="px-1 py-[1px] bg-yellow-900/40 text-yellow-300 border border-yellow-500/50 rounded text-[0.55rem] font-bold">MANUAL</span>`;
+
+    const maeColor = evt.station_tradeability === 'GREEN' ? 'bg-green-500'
+      : evt.station_tradeability === 'AMBER' ? 'bg-yellow-500'
+      : evt.station_tradeability === 'RED' ? 'bg-red-500'
+      : 'bg-gray-600';
+    const maeText = evt.station_mae !== null && evt.station_mae !== undefined ? `MAE: ${Number(evt.station_mae).toFixed(1)}\u00B0F` : 'MAE: --';
+    const markSub = b.snapshot_at && b.snapshot_stale
+      ? `<div class="text-[0.5rem] text-yellow-600 mt-0.5">STALE ${Math.max(0, Math.round((Date.now() - new Date(b.snapshot_at).getTime()) / 60000))}m</div>`
+      : (b.live_bid > 0 ? `<div class="text-[0.55rem] text-gray-500 mt-0.5">bid $${Number(b.live_bid).toFixed(3)} · spd ${(Number(b.live_spread || 0) * 100).toFixed(1)}¢</div>` : '');
+    const statText = b.current_exit_status || b.action_reason || (evt.status !== 'open' ? 'Awaiting operator reconciliation' : 'Monitoring');
+    const statColor = statText.includes('triggered') || statText.includes('absent') ? 'text-red-400' : statText.includes('Monitoring') ? 'text-green-400' : 'text-gray-400';
+    const staleTint = b.sync_status === 'missing_on_chain' ? 'bg-red-950/20' : '';
+
+    return `
+      <tr class="hover:bg-[rgba(255,255,255,0.02)] transition-colors ${staleTint}">
+        <td class="py-2 px-2 lg:py-3 lg:px-4 align-top">
+          <div class="font-bold text-gray-200 text-[0.8rem] max-w-[360px] whitespace-normal leading-tight" title="${esc(evt.city_name || 'Wallet')}">
+            ${evt.city_slug ? `<a href="/city/${esc(evt.city_slug)}" class="hover:underline">${esc(evt.city_name)}</a>` : esc(evt.city_name || 'Wallet')}
+          </div>
+          <div class="text-[0.65rem] text-cyan-600 font-semibold mt-1 max-w-[420px] whitespace-normal break-words leading-snug" title="${esc(b.label)}">${esc(b.label)}</div>
+          <div class="mt-2 flex flex-wrap gap-1">${syncBadge(b.sync_status || 'unknown')}</div>
+        </td>
+        <td class="py-2 px-2 lg:py-3 lg:px-4 align-top">
+          <div class="text-gray-300 text-[0.75rem] font-semibold">$${Number(b.avg_cost || 0).toFixed(3)} at ${eTime}</div>
+          <div class="mt-1 flex items-center gap-2">${typeBadge} <span class="font-bold text-[0.65rem]" style="color:var(--cyan)">${qtyStr}</span></div>
+        </td>
+        <td class="py-2 px-2 lg:py-3 lg:px-4 align-top hidden lg:table-cell">
+          <div class="font-bold text-purple-400 text-[0.7rem] uppercase tracking-wider">${esc(b.strategy || (bType === 'MANUAL' ? 'Ungoverned' : 'Default-Cascade'))}</div>
+          <div class="text-[0.6rem] text-gray-500 mt-1 flex items-center gap-1" title="${maeText}">
+            <span class="w-2 h-2 rounded-full ${maeColor} inline-block"></span> ${maeText}
+          </div>
+        </td>
+        <td class="py-2 px-2 lg:py-3 lg:px-4 align-top text-right">
+          <div class="text-[0.75rem] text-gray-300 font-bold">$${Number(currentPrice || 0).toFixed(3)}</div>
+          ${markSub}
+        </td>
+        <td class="py-2 px-2 lg:py-3 lg:px-4 align-top text-right font-bold w-24">
+          <div class="text-[0.8rem]" style="color:${pnlColor}">${pnl > 0 ? '+' : ''}${fmtUsd(pnl)}<br/><span class="text-[0.6rem] font-normal">(${pnl > 0 ? '+' : ''}${pnlPct.toFixed(1)}%)</span></div>
+        </td>
+        <td class="py-2 px-2 lg:py-3 lg:px-4 w-52 align-top text-[0.65rem] font-bold tracking-tight whitespace-normal leading-tight h-full bg-[rgba(255,255,255,0.01)] border-l border-[rgba(255,255,255,0.03)] hidden lg:table-cell ${statColor}">
+          ${esc(statText)}
+        </td>
+        <td class="py-2 px-2 lg:py-3 lg:px-4 align-top text-center w-28">
+          <div class="mb-1">${badge(evt.status)}</div>
+          ${b.is_winner ? '<div class="text-[0.6rem] text-green-400 font-bold uppercase tracking-wider mt-1.5">WINNER</div>' : ''}
+        </td>
+        <td class="py-2 px-2 lg:py-3 lg:px-4 align-top text-right w-28 border-l border-[rgba(255,255,255,0.05)]">${actionButtons({evt, b})}</td>
+      </tr>
+    `;
+  }).join('');
+
+  return `
+    <div class="card overflow-x-auto border-t-2 border-[var(--cyan)]">
+      <table class="w-full text-left border-collapse font-mono text-sm whitespace-nowrap">
+        <thead class="bg-[rgba(255,255,255,0.03)] border-b border-[var(--border)]">
+          <tr>
+            <th class="py-2 px-2 lg:py-3 lg:px-4 uppercase tracking-wider text-[0.65rem] font-bold sortable" style="color:var(--text-muted)" onclick="toggleSort('city')">City / Bucket <span class="sort-arrow" data-sort="city"></span></th>
+            <th class="py-2 px-2 lg:py-3 lg:px-4 uppercase tracking-wider text-[0.65rem] font-bold sortable" style="color:var(--text-muted)" onclick="toggleSort('entry_time')">Entry Info / Type <span class="sort-arrow" data-sort="entry_time"></span></th>
+            <th class="py-2 px-2 lg:py-3 lg:px-4 uppercase tracking-wider text-[0.65rem] font-bold hidden lg:table-cell" style="color:var(--text-muted)">Strategy</th>
+            <th class="py-2 px-2 lg:py-3 lg:px-4 uppercase tracking-wider text-[0.65rem] font-bold text-right sortable" style="color:var(--text-muted)" onclick="toggleSort('mark')">C. Mark <span class="sort-arrow" data-sort="mark"></span></th>
+            <th class="py-2 px-2 lg:py-3 lg:px-4 uppercase tracking-wider text-[0.65rem] font-bold text-right sortable" style="color:var(--text-muted)" onclick="toggleSort('pnl')">Unrealized P&L <span class="sort-arrow" data-sort="pnl"></span></th>
+            <th class="py-2 px-2 lg:py-3 lg:px-4 uppercase tracking-wider text-[0.65rem] font-bold hidden lg:table-cell" style="color:var(--text-muted)">Exit / Reconcile Status</th>
+            <th class="py-2 px-2 lg:py-3 lg:px-4 uppercase tracking-wider text-[0.65rem] font-bold text-center" style="color:var(--text-muted)">Lifecycle</th>
+            <th class="py-2 px-2 lg:py-3 lg:px-4 uppercase tracking-wider text-[0.65rem] font-bold text-right" style="color:var(--text-muted)">Actions</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-[var(--border)]">${body}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+function sectionBlock(title, description, rows, closed=false) {
+  if (rows.length === 0) return '';
+  const header = `
+    <div class="flex items-center justify-between gap-3 mb-2">
+      <div>
+        <h2 class="font-mono text-lg font-bold" style="color:${closed ? 'var(--text-muted)' : 'var(--cyan)'}">${title} <span class="text-xs text-gray-500">(${rows.length})</span></h2>
+        <p class="text-xs font-mono text-gray-500">${description}</p>
+      </div>
+    </div>`;
+  if (closed) {
+    return `<details class="space-y-2"><summary class="cursor-pointer list-none">${header}</summary>${sectionTable(rows)}</details>`;
+  }
+  return `<section>${header}${sectionTable(rows)}</section>`;
+}
+
+// ── Section Rendering ────────────────────────────────────────────────────────
+function renderSections() {
+  const root = document.getElementById('sections-root');
+  root.innerHTML = '';
   const flat = _flattenAndSort();
 
   if (flat.length === 0) {
-    document.getElementById('events-card').classList.add('hidden');
+    root.classList.add('hidden');
     document.getElementById('empty').classList.remove('hidden');
     return;
   }
 
-  for (const { evt, b, bType, currentPrice, pnl } of flat) {
-      const isWin = b.is_winner;
-      const isLose = evt.winning_bucket_idx !== null && !isWin;
-      const qtyStr = b.net_qty > 0 ? `${b.net_qty.toFixed(0)} sh` : '-';
+  const groups = {needs_action: [], live: [], awaiting: [], closed: []};
+  flat.forEach(row => groups[rowSection(row)].push(row));
+  root.innerHTML = [
+    sectionBlock('Needs Action', 'Stale DB rows, redeemable wins, and failed exits that need an operator decision.', groups.needs_action),
+    sectionBlock('Live Positions', 'Tradable open markets with current exit controls.', groups.live),
+    sectionBlock('Awaiting Resolution', 'Old or resolved markets waiting for UMA/on-chain confirmation.', groups.awaiting),
+    sectionBlock('Closed / Redeemed', 'Locally closed or already redeemed positions.', groups.closed, true),
+  ].join('');
 
-      const pnlPct = b.avg_cost > 0 ? ((currentPrice / b.avg_cost) - 1) * 100 : 0;
-      const pnlColor = pnl > 0 ? "var(--green)" : pnl < 0 ? "#ef4444" : "var(--text-muted)";
-      const pnlStr = `<span style="color:${pnlColor}">${pnl > 0 ? '+' : ''}$${pnl.toFixed(2)}<br/><span class="text-[0.6rem] font-normal">(${pnl > 0 ? '+' : ''}${pnlPct.toFixed(1)}%)</span></span>`;
-
-      const eTime = b.entry_time ? new Date(b.entry_time).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) : '--';
-      const typeBadge = bType === 'AUTOMATIC'
-          ? `<span class="px-1 py-[1px] bg-purple-900/40 text-purple-300 border border-purple-500/50 rounded text-[0.55rem] font-bold">AUTO</span>`
-          : `<span class="px-1 py-[1px] bg-yellow-900/40 text-yellow-300 border border-yellow-500/50 rounded text-[0.55rem] font-bold">MANUAL</span>`;
-
-      // governing exit conditions parsing
-      let logicText = 'N/A';
-      if (b.governing_exit_conditions) {
-         try {
-             let j = JSON.parse(b.governing_exit_conditions);
-             logicText = `<div class="text-left"><div class="text-red-400">CUT: Hi>${j.cut_temp_high||'?'} / Lo<${j.cut_temp_low||'?'}</div><div class="text-green-400">TP: $${j.take_profit_price||'?'}</div><div class="text-blue-400">EXP: ${j.expiry_time||'?'}</div></div>`;
-         } catch(e) { logicText = b.governing_exit_conditions; }
-      } else if (b.exit_strategy) {
-          logicText = `<div class="text-left text-xs"><div class="text-green-400">TP: $${b.exit_strategy.take_profit_price||'?'}</div></div>`;
-      }
-
-      const stratDisplay = b.strategy || (bType === 'MANUAL' ? 'Ungoverned' : 'Default-Cascade');
-
-      // Live exit status
-      let statText = b.current_exit_status || (evt.status !== 'open' ? 'Position Closed' : 'Evaluating stream...');
-      let statColor = statText.includes('triggered') ? 'text-red-400' : 'text-gray-400';
-      if (statText.includes('Monitoring')) statColor = 'text-green-400';
-      if (statText.includes('Closed')) statColor = 'text-gray-500';
-
-      // C.Mark staleness indicator
-      let markColor = 'text-gray-300';
-      let markSub = '';
-      if (evt.status === 'open' && b.net_qty > 0) {
-        if (!b.snapshot_at) {
-          markColor = 'text-gray-500';
-          markSub = `<div class="text-[0.5rem] text-gray-600 mt-0.5">(entry)</div>`;
-        } else if (b.snapshot_stale) {
-          markColor = 'text-yellow-400';
-          const snapAge = Math.round((Date.now() - new Date(b.snapshot_at).getTime()) / 60000);
-          markSub = `<div class="text-[0.5rem] text-yellow-600 mt-0.5">STALE ${snapAge}m</div>`;
-        } else {
-          markSub = b.live_bid > 0 ? `<div class="text-[0.55rem] text-gray-500 mt-0.5">bid $${b.live_bid.toFixed(3)} · spd ${(b.live_spread * 100).toFixed(1)}¢</div>` : '';
-        }
-      } else {
-        markSub = b.live_bid > 0 ? `<div class="text-[0.55rem] text-gray-500 mt-0.5">bid $${b.live_bid.toFixed(3)} · spd ${(b.live_spread * 100).toFixed(1)}¢</div>` : '';
-      }
-
-      // MAE badge
-      const maeColor = evt.station_tradeability === 'GREEN' ? 'bg-green-500'
-                      : evt.station_tradeability === 'AMBER' ? 'bg-yellow-500'
-                      : evt.station_tradeability === 'RED' ? 'bg-red-500'
-                      : 'bg-gray-600';
-      const maeText = evt.station_mae !== null && evt.station_mae !== undefined ? `MAE: ${evt.station_mae.toFixed(1)}\u00B0F` : 'MAE: --';
-
-      const conditionId = b.condition_id || '';
-      let actionBtn = '';
-      if (evt.status === 'redeemable') {
-        actionBtn = `<button onclick="redeemByCondition('${conditionId}', this)" class="px-2 py-1 rounded text-[0.65rem] font-bold shadow hover:opacity-80" style="background:var(--green);color:#000">REDEEM</button>`;
-      } else if (evt.status === 'open') {
-        actionBtn = `
-           <div class="flex flex-col gap-1 hidden lg:flex">
-             <button onclick="marketSell('${conditionId}', ${b.net_qty}, '${evt.city_slug}', ${b.bucket_id || 0}, this)" class="px-2 py-[2px] rounded text-[0.6rem] font-bold border border-red-500/50 text-red-400 hover:bg-red-900/30 w-full">QUICK EXIT</button>
-             <button class="px-2 py-[2px] rounded text-[0.6rem] font-bold border border-yellow-500/50 text-yellow-500 hover:bg-yellow-900/30 w-full cursor-not-allowed" title="Coming soon: multi-level ladder sell at incremental price tiers">LADDER</button>
-           </div>
-           <button class="lg:hidden px-2 py-1 border border-gray-600 rounded text-[0.6rem]">...</button>
-        `;
-      }
-
-      tbody.innerHTML += `
-        <tr class="hover:bg-[rgba(255,255,255,0.02)] transition-colors">
-          <td class="py-2 px-2 lg:py-3 lg:px-4 align-top">
-            <div class="font-bold text-gray-200 text-[0.8rem] max-w-[360px] whitespace-normal leading-tight" title="${evt.city_name || 'On-Chain'}"><a href="/city/${evt.city_slug}" class="hover:underline">${evt.city_name || 'On-Chain'}</a></div>
-            <div class="text-[0.65rem] text-cyan-600 font-semibold mt-1 max-w-[420px] whitespace-normal break-words leading-snug" title="${b.label}">${b.label}</div>
-          </td>
-          <td class="py-2 px-2 lg:py-3 lg:px-4 align-top">
-            <div class="text-gray-300 text-[0.75rem] font-semibold">$${b.avg_cost.toFixed(3)} at ${eTime}</div>
-            <div class="mt-1 flex items-center gap-2">
-              ${typeBadge} <span class="font-bold text-[0.65rem]" style="color:var(--cyan)">${qtyStr}</span>
-            </div>
-          </td>
-          <td class="py-2 px-2 lg:py-3 lg:px-4 align-top hidden lg:table-cell">
-             <span class="tooltip-trigger font-bold text-purple-400 text-[0.7rem] uppercase tracking-wider">${stratDisplay}
-               <div class="tooltip-content w-48 bg-black/90 p-2 text-[0.65rem] border border-gray-700 shadow-xl rounded leading-tight font-mono normal-case">
-                 <div class="font-bold text-gray-500 mb-1 border-b border-gray-800 pb-1">GOVERNING LOGIC</div>
-                 ${logicText}
-               </div>
-             </span>
-             <div class="text-[0.6rem] text-gray-500 mt-1 flex items-center gap-1" title="${maeText}">
-               <span class="w-2 h-2 rounded-full ${maeColor} inline-block"></span> ${maeText}
-             </div>
-          </td>
-          <td class="py-2 px-2 lg:py-3 lg:px-4 align-top text-right">
-            <div class="text-[0.75rem] ${markColor} font-bold">$${currentPrice.toFixed(3)}</div>
-            ${markSub}
-          </td>
-          <td class="py-2 px-2 lg:py-3 lg:px-4 align-top text-right font-bold w-24">
-            <div class="text-[0.8rem]">${pnlStr}</div>
-          </td>
-          <td class="py-2 px-2 lg:py-3 lg:px-4 w-48 align-top text-[0.65rem] font-bold tracking-tight whitespace-normal leading-tight h-full bg-[rgba(255,255,255,0.01)] border-l border-[rgba(255,255,255,0.03)] hidden lg:table-cell ${statColor}">
-            ${statText}
-          </td>
-          <td class="py-2 px-2 lg:py-3 lg:px-4 align-top text-center w-24">
-            <div class="mb-1">${badge(evt.status)}</div>
-            ${isWin ? '<div class="text-[0.6rem] text-green-400 font-bold uppercase tracking-wider mt-1.5"><span class="animate-pulse">★</span> WINNER <span class="animate-pulse">★</span></div>' : ''}
-            ${isLose ? '<div class="text-[0.6rem] text-red-400 font-bold uppercase tracking-wider mt-1.5">LOSER</div>' : ''}
-          </td>
-          <td class="py-2 px-2 lg:py-3 lg:px-4 align-top text-right w-24 border-l border-[rgba(255,255,255,0.05)]">
-            <div class="mt-0.5">${actionBtn}</div>
-            ${b.position_id ? `<a href="/positions/${b.position_id}/journal" class="text-[0.55rem] text-cyan-400 hover:underline mt-1 inline-block" title="Per-exit journal">📓 Journal</a>` : ''}
-          </td>
-        </tr>
-      `;
-  }
-
-  document.getElementById('events-card').classList.remove('hidden');
+  root.classList.remove('hidden');
   document.getElementById('empty').classList.add('hidden');
 }
 
 // ── Data Loading ─────────────────────────────────────────────────────────────
-async function loadEvents() {
+async function loadEvents(mode='default') {
   const loading = document.getElementById('loading');
   const refreshBtn = document.getElementById('refresh-btn');
+  const endpoint = mode === 'onchain' ? '/api/redemptions/onchain' : (mode === 'live' ? '/api/redemptions/live' : '/api/redemptions');
   loading.innerHTML = '<div class="spinner mx-auto"></div><div class="text-sm font-mono" style="color:var(--cyan)">LOADING POSITIONS...</div>';
   loading.classList.remove('hidden');
-  document.getElementById('events-card').classList.add('hidden');
+  document.getElementById('sections-root').classList.add('hidden');
   document.getElementById('empty').classList.add('hidden');
-  if (refreshBtn) { refreshBtn.disabled = true; refreshBtn.textContent = 'Refreshing...'; }
+  if (refreshBtn) { refreshBtn.disabled = true; refreshBtn.textContent = mode === 'onchain' ? 'Checking UMA...' : 'Refreshing...'; }
   const slowLoadTimer = setTimeout(() => {
     if (!loading.classList.contains('hidden')) {
-      loading.innerHTML = '<div class="spinner mx-auto"></div><div class="text-sm font-mono" style="color:var(--cyan)">LOADING POSITIONS...</div><div class="text-xs font-mono text-gray-500">Waiting on live Polymarket/on-chain status. DB positions will render as soon as available.</div>';
+      loading.innerHTML = '<div class="spinner mx-auto"></div><div class="text-sm font-mono" style="color:var(--cyan)">LOADING POSITIONS...</div><div class="text-xs font-mono text-gray-500">DB rows are loaded first; live wallet and UMA checks are short-timeout side channels.</div>';
     }
   }, 2500);
 
   try {
-    const [redRes, posRes] = await Promise.all([
-      fetch('/api/redemptions'),
-      fetch('/positions')
-    ]);
+    const redRes = await fetch(endpoint);
     if (!redRes.ok) throw new Error(`/api/redemptions returned ${redRes.status}`);
-    if (!posRes.ok) throw new Error(`/positions returned ${posRes.status}`);
     const red = await redRes.json();
-    const posReq = await posRes.json();
 
     if (red.auto_redeem_enabled !== undefined) {
       document.getElementById('auto-redeem-toggle').checked = red.auto_redeem_enabled;
@@ -554,24 +592,21 @@ async function loadEvents() {
       const t = new Date(red.exit_engine_last_run);
       const ago = Math.round((Date.now() - t.getTime()) / 1000);
       const agoStr = ago < 60 ? `${ago}s ago` : ago < 3600 ? `${Math.round(ago/60)}m ago` : `${Math.round(ago/3600)}h ago`;
-      document.getElementById('last-run-banner').textContent = `Exit engine: ${t.toLocaleTimeString()} (${agoStr}) \u2014 ${red.positions_monitored || 0} positions monitored`;
+      const timing = red.timing || {};
+      const degraded = timing.degraded_reason ? ` · degraded: ${timing.degraded_reason}` : '';
+      document.getElementById('last-run-banner').textContent = `Exit engine: ${t.toLocaleTimeString()} (${agoStr}) - ${red.positions_monitored || 0} monitored · API ${timing.total_ms || '--'}ms${degraded}`;
     } else {
       document.getElementById('last-run-banner').textContent = `Exit engine: not yet run`;
     }
 
-    if (posReq && posReq.positions) {
-      const exp = posReq.positions.reduce((acc, p) => acc + (p.net_qty * p.avg_cost), 0);
-      document.getElementById('summary-exposure').innerHTML = '$' + exp.toFixed(2);
-      document.getElementById('summary-realized').innerHTML = '$' + (posReq.daily_realized_pnl || 0).toFixed(2);
-
-      const unPnl = posReq.total_unrealized_pnl || 0;
-      const unPnlColor = unPnl > 0 ? "text-green-400" : unPnl < 0 ? "text-red-400" : "text-gray-400";
-      document.getElementById('summary-unrealized').className = `text-xl font-bold font-mono ${unPnlColor}`;
-      document.getElementById('summary-unrealized').innerHTML = (unPnl > 0 ? '+$' : unPnl < 0 ? '-$' : '$') + Math.abs(unPnl).toFixed(2);
-
-      const risk = (exp / 10.0) * 100;
-      document.getElementById('summary-bankroll').innerHTML = `<span class="${risk > 50 ? 'text-red-400' : 'text-gray-300'}">${risk.toFixed(1)}%</span>`;
-    }
+    const summary = red.summary || {};
+    document.getElementById('summary-exposure').innerHTML = fmtUsd(summary.confirmed_wallet_exposure || 0);
+    document.getElementById('summary-realized').innerHTML = fmtUsd(summary.db_only_exposure || 0);
+    document.getElementById('summary-unrealized').innerHTML = fmtUsd(summary.redeemable_value || 0);
+    const unPnl = Number(summary.unrealized_pnl || 0);
+    document.getElementById('summary-bankroll').className = `text-xl font-bold font-mono ${unPnl > 0 ? 'text-green-400' : unPnl < 0 ? 'text-red-400' : 'text-gray-300'}`;
+    document.getElementById('summary-bankroll').innerHTML = `${unPnl > 0 ? '+' : ''}${fmtUsd(unPnl)}`;
+    document.getElementById('summary-auto-manual').innerHTML = `<span class="${(summary.stale_rows || 0) > 0 ? 'text-red-400' : 'text-gray-300'}">${summary.stale_rows || 0}</span>`;
 
     if (!red.events || red.events.length === 0) {
       loading.classList.add('hidden');
@@ -580,27 +615,13 @@ async function loadEvents() {
     }
 
     RAW_DATA = red.events;
-
-    // Count auto vs manual
-    let aCnt = 0; let mCnt = 0;
-    RAW_DATA.forEach(e => {
-        if (e.status !== 'open') return;
-        e.buckets.forEach(b => {
-             if (b.net_qty > 0) {
-                 const type = b.entry_type || (e.source==='on_chain'?'MANUAL':'AUTOMATIC');
-                 if (type==='AUTOMATIC') aCnt++; else mCnt++;
-             }
-        });
-    });
-    document.getElementById('summary-auto-manual').innerHTML = `<span class="text-purple-400">${aCnt}</span> / <span class="text-yellow-400">${mCnt}</span>`;
-
-    renderTable();
+    renderSections();
     loading.classList.add('hidden');
   } catch (e) {
     loading.innerHTML = '<div class="text-red-400 text-sm font-mono">SYSTEM ERROR: ' + e.message + '</div>';
   } finally {
     clearTimeout(slowLoadTimer);
-    if (refreshBtn) { refreshBtn.disabled = false; refreshBtn.textContent = 'Refresh Positions \u21BB'; }
+    if (refreshBtn) { refreshBtn.disabled = false; refreshBtn.textContent = 'Refresh Wallet \u21BB'; }
   }
 }
 
@@ -651,6 +672,38 @@ async function redeemByCondition(conditionId, btn) {
       btn.disabled = false;
     }
   } catch (e) {
+    btn.textContent = origText;
+    btn.disabled = false;
+  } finally {
+    _actionInProgress = false;
+  }
+}
+
+async function markClosed(positionId, btn) {
+  if (!confirm('Mark this DB position closed locally? Use this only after wallet/data-api reconciliation confirms it is no longer held.')) return;
+  _actionInProgress = true;
+  btn.disabled = true;
+  const origText = btn.textContent;
+  btn.textContent = '...';
+  try {
+    const reason = prompt('Reason for local close:', 'stale DB cleanup');
+    if (reason === null) {
+      btn.disabled = false;
+      btn.textContent = origText;
+      _actionInProgress = false;
+      return;
+    }
+    const data = await apiCall(`/api/positions/${positionId}/mark-closed`, 'POST', { reason });
+    if (data && data.ok) {
+      btn.textContent = 'CLOSED';
+      setTimeout(() => loadEvents('live'), 1000);
+    } else {
+      alert('Mark closed failed: ' + (data?.detail || JSON.stringify(data)));
+      btn.textContent = origText;
+      btn.disabled = false;
+    }
+  } catch (e) {
+    alert('Network error: ' + e.message);
     btn.textContent = origText;
     btn.disabled = false;
   } finally {
