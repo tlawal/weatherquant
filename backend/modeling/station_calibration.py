@@ -404,6 +404,29 @@ async def refresh_all_station_calibrations(min_samples: int = 1) -> int:
                     city.metar_station, city.id, city_tz
                 )
                 await update_station_weights(city.metar_station)
+                cutoff_date = (
+                    datetime.now(ZoneInfo(city_tz)) - timedelta(days=60)
+                ).strftime("%Y-%m-%d")
+                async with get_session() as sess:
+                    active_station_rows = (
+                        await sess.execute(
+                            select(distinct(Event.resolution_station_id)).where(
+                                Event.city_id == city.id,
+                                Event.date_et >= cutoff_date,
+                                Event.resolution_station_id.isnot(None),
+                            )
+                        )
+                    ).all()
+                for (active_station_id,) in active_station_rows:
+                    if (
+                        not active_station_id
+                        or active_station_id.upper() == city.metar_station.upper()
+                    ):
+                        continue
+                    await backfill_forecast_daily_errors(
+                        active_station_id.upper(), city.id, city_tz
+                    )
+                    await update_station_weights(active_station_id.upper())
             except Exception:
                 log.exception(
                     "station_weights: %s update failed", city.metar_station

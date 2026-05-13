@@ -7,6 +7,7 @@ from backend.modeling.regime import (
     RegimeLabel,
     detect_regime,
     regime_kelly_multiplier,
+    regime_sigma_inflation,
 )
 
 
@@ -116,3 +117,10 @@ def test_kelly_multiplier_monotonically_decreasing():
         cur = regime_kelly_multiplier(s)
         assert cur <= prev
         prev = cur
+
+
+def test_sigma_inflation_volatile_caps_at_one_point_five():
+    assert regime_sigma_inflation(0.0) == pytest.approx(1.0)
+    assert regime_sigma_inflation(0.5) == pytest.approx(1.25)
+    assert regime_sigma_inflation(1.0) == pytest.approx(1.5)
+    assert regime_sigma_inflation(2.0) == pytest.approx(1.5)

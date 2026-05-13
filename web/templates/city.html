@@ -1132,7 +1132,14 @@
     <span class="mono">Δ {{ "%.1f"|format(model.inputs.kalman_divergence_f) }}°{{ city.unit|default('F') }}</span>
   </div>
   <p class="text-[11px] mt-1 opacity-80">
-    Kalman nowcast only — using ensemble blend (70% multi-model + 30% Kalman) for main signal.
+    {% set kalman_w = model.inputs.kalman_weight|default(0) %}
+    {% if kalman_w <= 0 %}
+    Kalman excluded from the primary signal; using the multi-model ensemble.
+    {% elif model.inputs.ensemble_breakdown and model.inputs.ensemble_breakdown.mode %}
+    Kalman nowcast active at {{ "%.0f"|format(kalman_w * 100) }}% blend weight.
+    {% else %}
+    Kalman nowcast active in the primary signal.
+    {% endif %}
     {% if model.inputs.mu_multi_model is not none %}
     Multi-model μ: <span class="mono">{{ "%.1f"|format(model.inputs.mu_multi_model) }}°</span>
     {% endif %}
@@ -1211,7 +1218,8 @@
       <span class="px-2 py-0.5 rounded-full font-bold" style="background:rgba(34,211,238,0.15);color:var(--cyan)" title="Primary signal: multi-model ensemble (NWS/WU/HRRR/NBM/ECMWF IFS) + Kalman nowcast blended only in a ±2h window around anticipated peak and only when it agrees with consensus">
         Primary: {{ "%.1f"|format(model.mu) }}°{{ city.unit|default('F') }}{% if adaptive_info.composite_peak_timing %} @ {{ adaptive_info.composite_peak_timing }}{% endif %}
         <span class="opacity-60 text-[9px] ml-1">
-          {% if model.inputs.kalman_nowcast_active %}multi + {{ "%.0f"|format(model.inputs.kalman_weight * 100) }}% kalman{% else %}multi-model only{% endif %}
+          {% set primary_kalman_w = model.inputs.kalman_weight|default(0) %}
+          {% if model.inputs.kalman_nowcast_active|default(false) %}multi + {{ "%.0f"|format(primary_kalman_w * 100) }}% kalman{% else %}multi-model only{% endif %}
         </span>
       </span>
       {% elif adaptive_info.composite_peak_timing %}

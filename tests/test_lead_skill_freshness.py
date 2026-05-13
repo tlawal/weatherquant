@@ -15,6 +15,7 @@ from backend.modeling.temperature_model import (
     _LEAD_SKILL_CLAMP,
     _LEAD_SKILL_MIN_N_OBS,
     _freshness_factor,
+    _lead_time_sigma_growth,
     _lead_skill_factors,
     compute_model,
 )
@@ -120,6 +121,23 @@ def test_freshness_tau_differs_per_source():
     hrrr = _freshness_factor("hrrr", age)
     ecmwf = _freshness_factor("ecmwf_ifs", age)
     assert ecmwf > hrrr
+
+
+def test_lead_time_sigma_growth_caps_one_to_three_day_horizons():
+    event_settlement_utc = datetime(2026, 5, 13, 23, 59, tzinfo=timezone.utc)
+    sigma_48h = _lead_time_sigma_growth(
+        {"nws": event_settlement_utc - timedelta(hours=48)},
+        event_settlement_utc,
+        1.0,
+    )
+    sigma_96h = _lead_time_sigma_growth(
+        {"nws": event_settlement_utc - timedelta(hours=96)},
+        event_settlement_utc,
+        1.0,
+    )
+
+    assert sigma_48h == pytest.approx(3.5)
+    assert sigma_96h == pytest.approx(6.3)
 
 
 def test_wu_hourly_uses_fetched_at_for_lead_skill_and_bma_sigma_note():

@@ -187,8 +187,11 @@ class MetarObsExtended(Base):
     wind_speed_kt: Mapped[Optional[float]] = mapped_column(Float)
     wind_gust_kt: Mapped[Optional[float]] = mapped_column(Float)
     altimeter_inhg: Mapped[Optional[float]] = mapped_column(Float)
+    sea_level_pressure_mb: Mapped[Optional[float]] = mapped_column(Float)
+    visibility_sm: Mapped[Optional[float]] = mapped_column(Float)
     precip_in: Mapped[Optional[float]] = mapped_column(Float)
     cloud_cover: Mapped[Optional[str]] = mapped_column(String(4))  # CLR/FEW/SCT/BKN/OVC
+    cloud_base_ft: Mapped[Optional[int]] = mapped_column(Integer)
     wx_string: Mapped[Optional[str]] = mapped_column(String(64))  # -RA, TS, etc.
     condition: Mapped[Optional[str]] = mapped_column(String(32))
 

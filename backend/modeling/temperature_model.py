@@ -157,6 +157,20 @@ _FRESHNESS_TAU_HOURS = {
     "wu_hourly": 12.0,
     "wu_history": 12.0,
 }
+_AI_FORECAST_SOURCES = frozenset({
+    "ecmwf_aifs",
+    "gfs_graphcast",
+    "pangu_weather",
+    "fourcastnet_v2",
+    "aurora",
+})
+_STALE_AI_LIVE_EXCLUDE_SOURCES = frozenset({
+    "pangu_weather",
+    "fourcastnet_v2",
+    "aurora",
+})
+_STALE_AI_LIVE_EXCLUDE_HOURS = 24.0
+_UNPROVEN_AI_WEIGHT_CAP = 0.05
 # Hard cap on lead-skill weight swing — protects against thin-data buckets.
 _LEAD_SKILL_CLAMP = (0.7, 1.3)
 # Floor on freshness factor so a stale source still contributes something.
@@ -196,7 +210,10 @@ def _lead_time_sigma_growth(
         return 0.0
     leads_h.sort()
     median_lead = leads_h[len(leads_h) // 2]
-    return (1.5 + 0.05 * median_lead) * unit_mult
+    sigma_f = 1.5 + 0.05 * median_lead
+    if median_lead <= 72.0:
+        sigma_f = min(sigma_f, 3.5)
+    return sigma_f * unit_mult
 
 
 def _ensemble_sigma(
@@ -708,6 +725,8 @@ def compute_model(
     now_ts = now_utc or datetime.now(timezone.utc)
     mra = model_run_at_by_source or {}
     weight_factors: dict[str, dict] = {}
+    bma_calibrated: dict[str, tuple[float, float]] = {}
+    excluded_sources: dict[str, str] = {}
     for src in list(calibrated.keys()):
         mu_val, base_w = calibrated[src]
         lf = lead_factors.get(src, 1.0)
@@ -720,29 +739,60 @@ def compute_model(
         else:
             age_h = None
             ff = 1.0
-        calibrated[src] = (mu_val, base_w * lf * ff)
+        diagnostic_effective = base_w * lf * ff
+        bma_calibrated[src] = (mu_val, diagnostic_effective)
+        effective = diagnostic_effective
+        live_gate: Optional[str] = None
+
+        if (
+            src in _STALE_AI_LIVE_EXCLUDE_SOURCES
+            and age_h is not None
+            and age_h > _STALE_AI_LIVE_EXCLUDE_HOURS
+        ):
+            live_gate = "stale_ai_excluded"
+            excluded_sources[src] = f"age_hours>{_STALE_AI_LIVE_EXCLUDE_HOURS:g}"
+            del calibrated[src]
+            effective = 0.0
+        else:
+            if src in _AI_FORECAST_SOURCES and src not in station_w:
+                capped = min(effective, _UNPROVEN_AI_WEIGHT_CAP)
+                if capped < effective:
+                    live_gate = "unproven_ai_weight_cap"
+                effective = capped
+            calibrated[src] = (mu_val, effective)
         weight_factors[src] = {
             "base": round(base_w, 4),
             "lead_factor": round(lf, 3),
             "freshness_factor": round(ff, 3),
             "age_hours": round(age_h, 2) if age_h is not None else None,
-            "effective": round(base_w * lf * ff, 4),
+            "diagnostic_effective": round(diagnostic_effective, 4),
+            "effective": round(effective, 4),
+            "live_gate": live_gate,
         }
+
+    if not calibrated:
+        log.warning("model: all forecast sources excluded by live gates")
+        return None
 
     # Multi-model weighted mean of available sources (re-normalize weights).
     total_weight = sum(w for _, w in calibrated.values())
+    if total_weight <= 0.0:
+        log.warning("model: non-positive live source weight after calibration gates")
+        return None
     mu_multi_model = sum(v * w for v, w in calibrated.values()) / total_weight
 
     # ── M1 BMA shadow predictive (Phase 1) ───────────────────────────────────
-    # Build a Gaussian-mixture predictive distribution over the same calibrated
-    # per-source means, using SourceLeadTimeSkill MAE as σᵢ when available.
+    # Build a Gaussian-mixture diagnostic over all calibrated per-source means,
+    # using SourceLeadTimeSkill MAE as σᵢ when available. BMA intentionally sees
+    # stale/thin AI members for shadow diagnostics; live legacy probabilities
+    # above can exclude or cap them until local evidence is credible.
     # SHADOW MODE: computed for comparison only — `mu_final`, `sigma_final`,
     # `probs` below remain driven by the legacy single-Gaussian path. Once we
     # have ≥14 days of side-by-side CRPS we'll promote the BMA outputs.
     try:
         bma_predictive = build_bma_predictive(
-            calibrated_means={src: mu_val for src, (mu_val, _) in calibrated.items()},
-            weights_by_source={src: w for src, (_, w) in calibrated.items()},
+            calibrated_means={src: mu_val for src, (mu_val, _) in bma_calibrated.items()},
+            weights_by_source={src: w for src, (_, w) in bma_calibrated.items()},
             lead_skill_mae_by_source=lead_skill_mae_by_source or {},
             lead_skill_n_obs_by_source=lead_skill_n_obs_by_source or {},
             sigma_unit_mult=(5.0 / 9.0 if unit == "C" else 1.0),
@@ -840,13 +890,13 @@ def compute_model(
         sigma_raw = math.sqrt(sigma_raw * sigma_raw + sigma_lead * sigma_lead)
 
     # ── Q6: regime-aware σ inflation ─────────────────────────────────────────
-    # Caller supplies a multiplier in [1.0, 2.0] from regime_sigma_inflation().
+    # Caller supplies a multiplier in [1.0, 1.5] from regime_sigma_inflation().
     # Applied multiplicatively (not in quadrature) because regime here
     # represents *systematic* widening of forecast residual variance, not an
     # additional independent noise source. Bounded for safety in case the
     # caller passes an outlier value.
     if regime_sigma_multiplier is not None:
-        _mult = max(1.0, min(2.5, float(regime_sigma_multiplier)))
+        _mult = max(1.0, min(1.5, float(regime_sigma_multiplier)))
         sigma_raw = sigma_raw * _mult
 
     # ── Weather-conditioned sigma adjustment ─────────────────────────────────
@@ -1121,6 +1171,7 @@ def compute_model(
         "spread": float(max(vals) - min(vals)) if len(vals) >= 2 else 0.0,
         "sigma_raw": float(sigma_raw),
         "sources_used": list(calibrated.keys()),
+        "excluded_sources": excluded_sources,
         "forecast_quality": forecast_quality,
         "prob_new_high": round(prob_hotter_bucket, 4),
         "prob_hotter_bucket": round(prob_hotter_bucket, 4),
@@ -1160,10 +1211,9 @@ def compute_model(
             if canonical_buckets:
                 bma_probs_out = bma_bucket_probabilities(bma_predictive, canonical_buckets)
             bma_meta_out = predictive_to_dict(bma_predictive)
-            # Diagnostic: how far the mixture mean drifts from the legacy
-            # weighted mean. Should be ~0 in Phase 1 because we feed the
-            # same per-source weights — non-zero values indicate a
-            # normalization edge case or unit-conversion path.
+            # Diagnostic: how far the mixture mean drifts from the live legacy
+            # weighted mean. This can be non-zero while BMA remains a shadow
+            # diagnostic over sources that live probabilities exclude or cap.
             bma_meta_out["mu_delta_vs_legacy"] = round(
                 bma_mu_out - float(mu_multi_model), 3
             )

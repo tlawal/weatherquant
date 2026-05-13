@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict
@@ -21,6 +23,10 @@ from backend.storage.models import (
 from backend.modeling.settlement import canonical_bucket_ranges, find_bucket_idx_for_value
 
 log = logging.getLogger(__name__)
+
+_RELIABILITY_CACHE_TTL_S = 600
+_reliability_metrics_cache: dict[tuple[int, int], tuple[float, list["ReliabilityBin"]]] = {}
+_reliability_diagnostics_cache: dict[int, tuple[float, dict]] = {}
 
 @dataclass
 class ReliabilityBin:
@@ -36,6 +42,20 @@ class ReliabilityBin:
     @property
     def observed_prob(self) -> float:
         return self.hits / self.count if self.count > 0 else 0.0
+
+
+def clear_reliability_cache() -> None:
+    """Clear in-process reliability caches after settlement/backfill jobs."""
+    _reliability_metrics_cache.clear()
+    _reliability_diagnostics_cache.clear()
+
+
+def _clone_bins(bins: list[ReliabilityBin]) -> list[ReliabilityBin]:
+    return [ReliabilityBin(b.min_prob, b.max_prob, b.count, b.hits) for b in bins]
+
+
+def _cache_enabled() -> bool:
+    return not os.environ.get("PYTEST_CURRENT_TEST")
 
 async def get_reliability_metrics(city_id: int, days_back: int = 90) -> List[ReliabilityBin]:
     """
@@ -54,6 +74,13 @@ async def get_reliability_metrics(city_id: int, days_back: int = 90) -> List[Rel
       - Event has Bucket rows (bucket boundaries to decide "which bucket won")
       - Ground-truth high exists via MetarObs or wu_history
     """
+    cache_key = (int(city_id), int(days_back))
+    now_mono = time.monotonic()
+    if _cache_enabled():
+        cached = _reliability_metrics_cache.get(cache_key)
+        if cached and now_mono - cached[0] < _RELIABILITY_CACHE_TTL_S:
+            return _clone_bins(cached[1])
+
     # Create bins: 0-10%, 10-20%, ..., 90-100%
     bins = [ReliabilityBin(i/10, (i+1)/10) for i in range(10)]
 
@@ -144,6 +171,8 @@ async def get_reliability_metrics(city_id: int, days_back: int = 90) -> List[Rel
         if not results:
             log.debug("calibration: city_id=%d no past events with snapshots in last %dd",
                       city_id, days_back)
+            if _cache_enabled():
+                _reliability_metrics_cache[cache_key] = (time.monotonic(), _clone_bins(bins))
             return bins
 
         matched = 0
@@ -176,6 +205,8 @@ async def get_reliability_metrics(city_id: int, days_back: int = 90) -> List[Rel
             "calibration: city_id=%d events_in_window=%d matched=%d total_samples=%d bins_with_data=%d",
             city_id, len(results), matched, total, sum(1 for b in bins if b.count > 0),
         )
+    if _cache_enabled():
+        _reliability_metrics_cache[cache_key] = (time.monotonic(), _clone_bins(bins))
     return bins
 
 async def get_reliability_diagnostics(city_id: int) -> dict:
@@ -190,6 +221,12 @@ async def get_reliability_diagnostics(city_id: int) -> dict:
     `resolved_events` / `last_resolved_at` are retained as INFORMATIONAL only
     — they track redeemer activity but no longer gate calibration.
     """
+    now_mono = time.monotonic()
+    if _cache_enabled():
+        cached = _reliability_diagnostics_cache.get(int(city_id))
+        if cached and now_mono - cached[0] < _RELIABILITY_CACHE_TTL_S:
+            return dict(cached[1])
+
     today_et = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     async with get_session() as sess:
@@ -275,7 +312,7 @@ async def get_reliability_diagnostics(city_id: int) -> dict:
             )
         )).scalar_one()
 
-    return {
+    out = {
         "total_events": int(total_events or 0),
         "past_events": int(past_events or 0),
         "past_events_with_snapshot": int(past_with_snap or 0),
@@ -288,6 +325,9 @@ async def get_reliability_diagnostics(city_id: int) -> dict:
         # back-compat alias so older template copies don't KeyError during rolling deploy
         "events_with_snapshot": int(past_with_snap or 0),
     }
+    if _cache_enabled():
+        _reliability_diagnostics_cache[int(city_id)] = (time.monotonic(), dict(out))
+    return out
 
 
 def remap_probability(prob: float, bins: List[ReliabilityBin]) -> float:

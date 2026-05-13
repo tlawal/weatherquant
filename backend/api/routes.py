@@ -2808,6 +2808,80 @@ async def refresh_station_calibrations(actor: str = Depends(require_admin)):
     return {"ok": True, "stations_updated": count}
 
 
+@router.post("/api/admin/recompute-forecast-daily-errors")
+async def recompute_forecast_daily_errors(
+    max_days: int = 60,
+    actor: str = Depends(require_admin),
+):
+    """One-off repair path for station/source daily-error rows.
+
+    Rebuilds ForecastDailyError rows with the latest settlement-basis logic and
+    refreshes StationSourceWeight for each enabled city station plus any recent
+    event-specific resolution station.
+    """
+    from sqlalchemy import distinct, select
+
+    from backend.modeling.station_weights import (
+        backfill_forecast_daily_errors,
+        update_station_weights,
+    )
+    from backend.storage.models import Event
+
+    max_days = max(1, min(int(max_days), 365))
+    cutoff_date = (datetime.now(timezone.utc) - timedelta(days=max_days)).strftime("%Y-%m-%d")
+
+    async with get_session() as sess:
+        cities = await get_all_cities(sess, enabled_only=True)
+
+    rows_written = 0
+    stations_updated = 0
+    for city in cities:
+        city_tz = getattr(city, "tz", "America/New_York") or "America/New_York"
+        station_ids = {city.metar_station.upper()} if city.metar_station else set()
+        async with get_session() as sess:
+            resolution_rows = (
+                await sess.execute(
+                    select(distinct(Event.resolution_station_id)).where(
+                        Event.city_id == city.id,
+                        Event.date_et >= cutoff_date,
+                        Event.resolution_station_id.isnot(None),
+                    )
+                )
+            ).all()
+        for (station_id,) in resolution_rows:
+            if station_id:
+                station_ids.add(station_id.upper())
+
+        for station_id in sorted(station_ids):
+            rows_written += await backfill_forecast_daily_errors(
+                station_id,
+                city.id,
+                city_tz,
+                max_days=max_days,
+            )
+            updated = await update_station_weights(station_id, lookback_days=max_days)
+            if updated:
+                stations_updated += 1
+
+    async with get_session() as sess:
+        await append_audit(
+            sess,
+            actor=actor,
+            action="forecast_daily_errors_recomputed",
+            payload={
+                "max_days": max_days,
+                "rows_written_or_updated": rows_written,
+                "stations_updated": stations_updated,
+            },
+        )
+    return {
+        "ok": True,
+        "max_days": max_days,
+        "rows_written_or_updated": rows_written,
+        "stations_updated": stations_updated,
+    }
+
+
 # IMPORTANT: keep this `/{station_id}` route LAST in the station-calibrations
 # group. See the comment above `_cal_refresh_in_progress` for the rationale.
 @router.get("/api/station-calibrations/{station_id}")

@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import backend.modeling.temperature_model as temperature_model
@@ -118,6 +118,94 @@ def test_compute_model_includes_hrrr_15min_source(monkeypatch):
     assert model is not None
     assert model.inputs["hrrr_15min_high"] == 66.0
     assert model.inputs["sources_used"] == ["hrrr_15min"]
+
+
+def test_stale_unproven_ai_sources_do_not_create_cold_tail(monkeypatch):
+    """Atlanta-like regression: local consensus near 80°F should not place
+    ~30% mass below 75°F just because thin/stale AI sources are cooler."""
+    class _EarlyDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            fixed = cls(2026, 4, 8, 8, 0, tzinfo=ZoneInfo("America/New_York"))
+            return fixed.astimezone(tz) if tz else fixed
+
+    monkeypatch.setattr(temperature_model, "datetime", _EarlyDateTime)
+
+    now_utc = datetime(2026, 5, 13, 13, 0, tzinfo=timezone.utc)
+    fresh = now_utc - timedelta(hours=2)
+    stale = now_utc - timedelta(hours=34)
+    event_settlement_utc = datetime(2026, 5, 14, 3, 59, tzinfo=timezone.utc)
+
+    model = compute_model(
+        nws_high=80.6,
+        wu_hourly_peak=80.0,
+        daily_high_metar=None,
+        current_temp_f=61.0,
+        calibration={
+            "station_source_weights": {
+                "nws": 0.16,
+                "wu_hourly": 0.12,
+                "hrrr": 0.22,
+                "hrrr_15min": 0.20,
+                "nbm": 0.15,
+                "ecmwf_ifs": 0.15,
+            },
+            "station_source_biases": {},
+        },
+        buckets=[
+            (None, 75.0),
+            (76.0, 77.0),
+            (78.0, 79.0),
+            (80.0, 81.0),
+            (82.0, 83.0),
+            (84.0, None),
+        ],
+        forecast_quality="ok",
+        unit="F",
+        city_tz="America/New_York",
+        hrrr_high=80.2,
+        hrrr_15min_high=80.3,
+        nbm_high=80.0,
+        ecmwf_ifs_high=80.1,
+        ecmwf_aifs_high=79.0,
+        gfs_graphcast_high=80.9,
+        pangu_weather_high=76.7,
+        fourcastnet_v2_high=76.4,
+        aurora_high=74.8,
+        model_run_at_by_source={
+            "nws": fresh,
+            "wu_hourly": fresh,
+            "hrrr": fresh,
+            "hrrr_15min": fresh,
+            "nbm": fresh,
+            "ecmwf_ifs": fresh,
+            "ecmwf_aifs": fresh,
+            "gfs_graphcast": fresh,
+            "pangu_weather": stale,
+            "fourcastnet_v2": stale,
+            "aurora": stale,
+        },
+        now_utc=now_utc,
+        event_settlement_utc=event_settlement_utc,
+    )
+
+    assert model is not None
+    assert model.probs[0] < 0.10
+    assert "pangu_weather" not in model.inputs["sources_used"]
+    assert "fourcastnet_v2" not in model.inputs["sources_used"]
+    assert "aurora" not in model.inputs["sources_used"]
+    assert model.inputs["excluded_sources"] == {
+        "pangu_weather": "age_hours>24",
+        "fourcastnet_v2": "age_hours>24",
+        "aurora": "age_hours>24",
+    }
+    factors = model.inputs["ensemble_breakdown"]["weight_factors"]
+    assert factors["ecmwf_aifs"]["effective"] <= 0.05
+    assert factors["gfs_graphcast"]["effective"] <= 0.05
+    bma_sources = {
+        c["source"] for c in model.inputs["bma_shadow"]["components"]
+    }
+    assert {"pangu_weather", "fourcastnet_v2", "aurora"} <= bma_sources
 
 
 def test_lock_falls_back_when_adaptive_lags(monkeypatch):

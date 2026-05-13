@@ -872,6 +872,18 @@ def _build_short_range_models(
             elif mean_high - v > 1.0:
                 outliers_low.append(src)
 
+    legacy_missing_external_models = [
+        label
+        for src, label in (
+            ("hrrr", "HRRR"),
+            ("nbm", "NBM"),
+            ("nam", "NAM"),
+            ("rap", "RAP"),
+            ("ecmwf_ifs", "ECMWF"),
+        )
+        if source_forecasts.get(src) is None
+    ]
+
     return {
         # Legacy fields kept for back-compat with deterministic engine
         # and any older prompt path.
@@ -884,6 +896,7 @@ def _build_short_range_models(
         "recent_error_summary": error_summary,
         "best_recent_source": _best_recent_source(error_summary),
         "worst_recent_source": _worst_recent_source(error_summary),
+        "missing_external_models": legacy_missing_external_models,
         # NEW: full per-source ensemble view with metadata.
         "ensemble_sources": per_source,
         "panel_disagreement": {

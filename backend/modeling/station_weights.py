@@ -13,15 +13,14 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select, func
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from backend.storage.db import get_session
 from backend.storage.models import (
+    Event,
     ForecastDailyError,
     ForecastObs,
     MetarObs,
@@ -43,6 +42,12 @@ GLOBAL_MSE_PRIOR = 9.0  # ≈ 3°F RMSE, typical day-ahead NWP error
 # Clamp bounds on final normalized weight so no source dominates or zeros
 WEIGHT_FLOOR = 0.05
 WEIGHT_CAP = 0.60
+# Live-trading safety gates. Station weights and biases are learned from daily
+# errors, and 3-5 rows is enough to be actively harmful. Keep live probabilities
+# on defaults until the station/source pair has a minimally credible sample.
+MIN_LIVE_STATION_SOURCE_SAMPLES = 10
+MAX_LIVE_STATION_BIAS_ABS_F = 3.0
+MAX_LIVE_STATION_BIAS_MAE_7D_F = 4.0
 # Forecast sources participating in the live ensemble. Keep this aligned with
 # station_calibration.py and signal_engine.py so every traded source can receive
 # per-station bias/weight corrections once it has errors.
@@ -64,6 +69,26 @@ DEFAULT_WEIGHTS: dict[str, float] = {
     "fourcastnet_v2": 0.35,
     "aurora": 0.35,
 }
+
+
+def _clamp_station_bias(bias_f: Optional[float]) -> float:
+    """Clamp dynamic station bias corrections to a sane live-trading range."""
+    bias = float(bias_f or 0.0)
+    return max(-MAX_LIVE_STATION_BIAS_ABS_F, min(MAX_LIVE_STATION_BIAS_ABS_F, bias))
+
+
+def _use_live_station_weight(row: StationSourceWeight) -> bool:
+    """Whether a station/source row is mature enough to move live weights."""
+    return int(row.n_samples or 0) >= MIN_LIVE_STATION_SOURCE_SAMPLES and float(row.weight or 0.0) > 0.0
+
+
+def _use_live_station_bias(row: StationSourceWeight) -> bool:
+    """Whether a station/source row is mature and accurate enough to debias."""
+    if not _use_live_station_weight(row):
+        return False
+    if row.mae_7d is not None and float(row.mae_7d) > MAX_LIVE_STATION_BIAS_MAE_7D_F:
+        return False
+    return True
 
 
 def _compute_weights_from_stats(
@@ -208,7 +233,7 @@ async def load_station_source_weights(
     """Return (weights, biases) dicts for use by compute_model.
 
     Falls back to default weights / zero bias when station has no row or a source
-    has n_samples < 3 (cold-start protection). The model side also applies
+    has n_samples < MIN_LIVE_STATION_SOURCE_SAMPLES. The model side also applies
     DEFAULT_WEIGHTS when a source is missing from the returned dict.
     """
     weights: dict[str, float] = {}
@@ -226,10 +251,18 @@ async def load_station_source_weights(
         ).scalars().all()
 
     for r in rows:
-        if r.n_samples >= 3 and r.weight > 0:
+        if _use_live_station_weight(r):
             weights[r.source] = float(r.weight)
-            biases[r.source] = float(r.bias_f or 0.0)
+        if _use_live_station_bias(r):
+            biases[r.source] = _clamp_station_bias(r.bias_f)
     return weights, biases
+
+
+def _day_window(date_et: str, city_tz: str) -> tuple[datetime, datetime, datetime]:
+    tz = ZoneInfo(city_tz)
+    start_dt = datetime.strptime(date_et, "%Y-%m-%d").replace(tzinfo=tz)
+    end_dt = start_dt + timedelta(days=1)
+    return start_dt, end_dt, end_dt.astimezone(timezone.utc)
 
 
 async def load_source_skill_summary(
@@ -281,32 +314,80 @@ async def backfill_forecast_daily_errors(
         (now - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(1, max_days + 1)
     ]
 
-    # Observed highs per date
+    # Observed highs per date. Prefer the event's explicit resolution station,
+    # then WU history, then any raw METAR daily max for the city. This aligns
+    # station weights with the settlement basis instead of whichever raw ASOS
+    # reading happened to be largest.
     obs_highs: dict[str, float] = {}
     async with get_session() as sess:
+        event_rows = (
+            await sess.execute(
+                select(Event).where(
+                    Event.city_id == city_id,
+                    Event.date_et.in_(dates),
+                )
+            )
+        ).scalars().all()
+        events_by_date = {e.date_et: e for e in event_rows}
+        event_end_by_date: dict[str, datetime] = {}
+
         for d in dates:
-            start_dt = datetime.strptime(d, "%Y-%m-%d").replace(tzinfo=tz)
-            end_dt = start_dt + timedelta(days=1)
+            start_dt, end_dt, event_end_utc = _day_window(d, city_tz)
+            event_end_by_date[d] = event_end_utc
+            event = events_by_date.get(d)
+            target_station = (
+                (event.resolution_station_id if event else None)
+                or station_id
+                or ""
+            ).upper()
             val = (
                 await sess.execute(
                     select(func.max(MetarObs.temp_f)).where(
                         MetarObs.city_id == city_id,
+                        MetarObs.metar_station == target_station,
                         MetarObs.temp_f.isnot(None),
                         MetarObs.observed_at >= start_dt,
                         MetarObs.observed_at < end_dt,
                     )
                 )
             ).scalar_one_or_none()
+            if val is None:
+                val = (
+                    await sess.execute(
+                        select(ForecastObs.high_f)
+                        .where(
+                            ForecastObs.city_id == city_id,
+                            ForecastObs.source == "wu_history",
+                            ForecastObs.date_et == d,
+                            ForecastObs.high_f.isnot(None),
+                        )
+                        .order_by(ForecastObs.fetched_at.desc(), ForecastObs.id.desc())
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+            if val is None:
+                val = (
+                    await sess.execute(
+                        select(func.max(MetarObs.temp_f)).where(
+                            MetarObs.city_id == city_id,
+                            MetarObs.temp_f.isnot(None),
+                            MetarObs.observed_at >= start_dt,
+                            MetarObs.observed_at < end_dt,
+                        )
+                    )
+                ).scalar_one_or_none()
             if val is not None:
                 obs_highs[d] = float(val)
 
         if not obs_highs:
             return 0
 
-        # Forecast highs per (source, date) — latest fetch
+        # Forecast highs per (source, date) — latest fetch available before the
+        # event day ends. This prevents late/revised rows from rewriting history.
         fc: dict[tuple[str, str], float] = {}
         for src in ENSEMBLE_SOURCES:
             for d in dates:
+                cutoff_utc = event_end_by_date.get(d)
                 val = (
                     await sess.execute(
                         select(ForecastObs.high_f)
@@ -315,40 +396,43 @@ async def backfill_forecast_daily_errors(
                             ForecastObs.source == src,
                             ForecastObs.date_et == d,
                             ForecastObs.high_f.isnot(None),
+                            ForecastObs.fetched_at <= cutoff_utc,
                         )
-                        .order_by(ForecastObs.fetched_at.desc())
+                        .order_by(ForecastObs.fetched_at.desc(), ForecastObs.id.desc())
                         .limit(1)
                     )
                 ).scalar_one_or_none()
                 if val is not None:
                     fc[(src, d)] = float(val)
 
-        # Existing rows → skip duplicates
+        # Existing rows → true upsert/update instead of skipping duplicates.
         existing = (
             await sess.execute(
-                select(
-                    ForecastDailyError.source,
-                    ForecastDailyError.date_et,
-                ).where(ForecastDailyError.station_id == station_id)
+                select(ForecastDailyError).where(
+                    ForecastDailyError.station_id == station_id,
+                    ForecastDailyError.date_et.in_(dates),
+                )
             )
-        ).all()
-        existing_set = {(s, d) for s, d in existing}
+        ).scalars().all()
+        existing_by_key = {(r.source, r.date_et): r for r in existing}
 
         written = 0
         for (src, d), fval in fc.items():
             obs = obs_highs.get(d)
-            if obs is None or (src, d) in existing_set:
+            if obs is None:
                 continue
-            sess.add(
-                ForecastDailyError(
+            err = fval - obs
+            row = existing_by_key.get((src, d))
+            if row is None:
+                row = ForecastDailyError(
                     station_id=station_id,
                     date_et=d,
                     source=src,
-                    forecast_high_f=fval,
-                    observed_high_f=obs,
-                    err_f=fval - obs,
                 )
-            )
+                sess.add(row)
+            row.forecast_high_f = fval
+            row.observed_high_f = obs
+            row.err_f = err
             written += 1
         if written:
             await sess.commit()

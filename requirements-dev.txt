@@ -1,0 +1,4 @@
+-r requirements.txt
+
+# Optional infra smoke-test dependency for infra/fcn3_modal_smoke.py.
+modal>=0.73.0

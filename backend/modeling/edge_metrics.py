@@ -28,10 +28,10 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
-from typing import Iterable, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Optional
 
-from sqlalchemy import desc, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.backtesting.metrics import compute_brier
@@ -198,19 +198,73 @@ async def _score_resolved_events(
         .order_by(Event.resolved_at.asc())
     )
     rows = list(result.all())
+    if not rows:
+        return []
+
+    events = [event for event, _ in rows]
+    city_by_event_id = {event.id: city for event, city in rows}
+    event_ids = [event.id for event in events]
+
+    latest_snap_sub = (
+        select(
+            ModelSnapshot.event_id,
+            func.max(ModelSnapshot.id).label("max_snap_id"),
+        )
+        .where(ModelSnapshot.event_id.in_(event_ids))
+        .group_by(ModelSnapshot.event_id)
+        .subquery()
+    )
+    snap_rows = (
+        await sess.execute(
+            select(ModelSnapshot).join(
+                latest_snap_sub,
+                ModelSnapshot.id == latest_snap_sub.c.max_snap_id,
+            )
+        )
+    ).scalars().all()
+    snap_by_event_id = {snap.event_id: snap for snap in snap_rows}
+
+    bucket_rows = (
+        await sess.execute(
+            select(Bucket)
+            .where(Bucket.event_id.in_(event_ids))
+            .order_by(Bucket.event_id, Bucket.bucket_idx)
+        )
+    ).scalars().all()
+    buckets_by_event_id: dict[int, list[Bucket]] = {}
+    bucket_ids: list[int] = []
+    for bucket in bucket_rows:
+        buckets_by_event_id.setdefault(bucket.event_id, []).append(bucket)
+        bucket_ids.append(bucket.id)
+
+    market_by_bucket_id: dict[int, Optional[float]] = {}
+    if bucket_ids:
+        latest_market_sub = (
+            select(
+                MarketSnapshot.bucket_id,
+                func.max(MarketSnapshot.id).label("max_market_id"),
+            )
+            .where(MarketSnapshot.bucket_id.in_(bucket_ids))
+            .group_by(MarketSnapshot.bucket_id)
+            .subquery()
+        )
+        market_rows = (
+            await sess.execute(
+                select(MarketSnapshot).join(
+                    latest_market_sub,
+                    MarketSnapshot.id == latest_market_sub.c.max_market_id,
+                )
+            )
+        ).scalars().all()
+        market_by_bucket_id = {
+            m.bucket_id: m.yes_mid if m.yes_mid is not None else None
+            for m in market_rows
+        }
 
     scores: list[_BucketScore] = []
-    for event, city in rows:
-        # Latest snapshot is fine — signal engine stops producing new snapshots
-        # once an event resolves, so latest ≈ latest-before-resolved_at.
-        snap = (
-            await sess.execute(
-                select(ModelSnapshot)
-                .where(ModelSnapshot.event_id == event.id)
-                .order_by(desc(ModelSnapshot.computed_at))
-                .limit(1)
-            )
-        ).scalar_one_or_none()
+    for event in events:
+        city = city_by_event_id[event.id]
+        snap = snap_by_event_id.get(event.id)
         if snap is None:
             continue
 
@@ -231,25 +285,11 @@ async def _score_resolved_events(
         except Exception:
             log.debug("edge_metrics: bad inputs_json on snapshot id=%s", snap.id)
 
-        # Per-bucket market price (latest MarketSnapshot before resolution).
-        buckets = (
-            await sess.execute(
-                select(Bucket)
-                .where(Bucket.event_id == event.id)
-                .order_by(Bucket.bucket_idx.asc())
-            )
-        ).scalars().all()
-        market_by_bucket: dict[int, Optional[float]] = {}
-        for b in buckets:
-            mkt = (
-                await sess.execute(
-                    select(MarketSnapshot)
-                    .where(MarketSnapshot.bucket_id == b.id)
-                    .order_by(desc(MarketSnapshot.fetched_at))
-                    .limit(1)
-                )
-            ).scalar_one_or_none()
-            market_by_bucket[b.bucket_idx] = mkt.yes_mid if mkt and mkt.yes_mid is not None else None
+        buckets = buckets_by_event_id.get(event.id, [])
+        market_by_bucket = {
+            b.bucket_idx: market_by_bucket_id.get(b.id)
+            for b in buckets
+        }
 
         scores.extend(_score_event(
             event={
