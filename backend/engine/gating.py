@@ -46,6 +46,7 @@ async def run_all_gates(
     city_id: int,
     strategy: str = "default",
     side: str = "BUY",
+    emit_log: bool = True,
 ) -> GateResult:
     """
     Run all safety gates for a candidate trade signal.
@@ -216,14 +217,14 @@ async def run_all_gates(
     # selection, users intentionally trade any available date. The gate was
     # protecting against stale events from 8PM rollover, which no longer exists.
 
-    if failures:
+    if emit_log and failures:
         log.warning(
             "gates: FAILED on %s bucket=%s: %s",
             signal.city_slug,
             signal.bucket_idx,
             "; ".join(failures),
         )
-    else:
+    elif emit_log:
         log.info(
             "gates: ALL PASSED for %s bucket=%s edge=%.3f",
             signal.city_slug,

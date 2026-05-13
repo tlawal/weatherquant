@@ -267,8 +267,14 @@ async def fetch_gamma_all() -> None:
         for d in active_dates_for_city(city)
     ]
 
+    sem = asyncio.Semaphore(max(1, Config.GAMMA_FETCH_CONCURRENCY))
+
+    async def fetch_one(city, d):
+        async with sem:
+            return await _fetch_city_event(city, d)
+
     results = await asyncio.gather(
-        *[_fetch_city_event(city, d) for city, d in tasks],
+        *[fetch_one(city, d) for city, d in tasks],
         return_exceptions=True,
     )
 

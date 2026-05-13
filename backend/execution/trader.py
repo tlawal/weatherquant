@@ -109,7 +109,14 @@ async def execute_signal(
             return result
 
     # ── Run all safety gates ──────────────────────────────────────────────────
-    gate_result = await run_all_gates(signal, event, city.id, strategy=strategy, side=side)
+    gate_result = await run_all_gates(
+        signal,
+        event,
+        city.id,
+        strategy=strategy,
+        side=side,
+        emit_log=not manual,
+    )
 
     # For manual trades, filter out bot-only gates that don't apply to
     # human-initiated trades. Keep critical safety gates (daily loss, max positions).
@@ -124,6 +131,19 @@ async def execute_signal(
         filtered = [f for f in gate_result.failures
                     if not any(f.startswith(g) for g in BOT_ONLY_GATES)]
         gate_result = GateResult(passed=len(filtered) == 0, failures=filtered)
+        if gate_result.failures:
+            log.warning(
+                "manual gates: FAILED on %s bucket=%s after bot-only filters: %s",
+                signal.city_slug,
+                signal.bucket_idx,
+                "; ".join(gate_result.failures),
+            )
+        else:
+            log.info(
+                "manual gates: passed on %s bucket=%s after bot-only filters",
+                signal.city_slug,
+                signal.bucket_idx,
+            )
 
     result["gate_failures"] = gate_result.failures
 
@@ -711,11 +731,9 @@ async def _poll_for_fill(
         try:
             if not clob._client:
                 break
-            loop = asyncio.get_event_loop()
-            from py_clob_client_v2.clob_types import OpenOrderParams
 
-            # OpenOrderParams.market expects the condition_id (market ID), not
-            # the outcome token_id. Without condition_id we cannot safely query
+            # get_open_orders expects the condition_id (market ID), not the
+            # outcome token_id. Without condition_id we cannot safely query
             # open orders, so skip this tick's open-orders check and rely on
             # the next poll — the 30 s timeout still bounds the wait.
             if not condition_id:
@@ -726,15 +744,7 @@ async def _poll_for_fill(
                 )
                 continue
 
-            open_orders = await asyncio.wait_for(
-                loop.run_in_executor(
-                    None,
-                    lambda: clob._client.get_orders(
-                        OpenOrderParams(market=condition_id)
-                    ),
-                ),
-                timeout=8.0,
-            )
+            open_orders = await clob.get_open_orders(market=condition_id)
             # If our order is no longer in open orders, it was filled or cancelled
             order_ids = [o.get("id") or o.get("orderID") for o in (open_orders or [])]
             if clob_order_id and clob_order_id not in order_ids:

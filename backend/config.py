@@ -120,6 +120,7 @@ class Config:
     # ── API Rate Limiting ─────────────────────────────────────────────────────
     WU_MIN_SCRAPE_INTERVAL_SECONDS: int = _int("WU_MIN_SCRAPE_INTERVAL_SECONDS", 1800)
     WU_FAILED_RETRY_INTERVAL_SECONDS: int = _int("WU_FAILED_RETRY_INTERVAL_SECONDS", 300)
+    GAMMA_FETCH_CONCURRENCY: int = _int("GAMMA_FETCH_CONCURRENCY", 6)
 
     # ── Market Context LLM ────────────────────────────────────────────────────
     MARKET_CONTEXT_LLM_PROVIDER: str = os.environ.get(
