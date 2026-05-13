@@ -213,6 +213,8 @@ function redemptionsAlphaCard() {
         const d = await r.json();
         const src = d.by_source || {};
         const sig = d.promotion_signal || {};
+        const statusCounts = d.settlement_status_counts || {};
+        const diag = d.diagnostics || {};
 
         this.legacyBrier = src.legacy && src.legacy.brier;
         this.bmaBrier    = src.bma    && src.bma.brier;
@@ -243,12 +245,20 @@ function redemptionsAlphaCard() {
         this.legacyEdgeLabel  = this._bpsLabel(this.legacyEdgeBps);
         this.bmaEdgeLabel     = this._bpsLabel(this.bmaEdgeBps);
         this.streakLabel      = `${this.streak}d`;
-        this.nEventsLabel     = this.nEvents
-          ? `${this.nEvents} settled events`
-          : 'no settled events yet';
+        if (this.nEvents) {
+          const prov = statusCounts.provisional_local || 0;
+          const conf = statusCounts.gamma_confirmed || 0;
+          this.nEventsLabel = prov
+            ? `${this.nEvents} scored · ${prov} provisional`
+            : `${this.nEvents} gamma-confirmed`;
+        } else {
+          this.nEventsLabel = `no scored events yet · ${diag.past_events || 0} past`;
+        }
 
         this.tooltip = (
-          `Alpha vs market — last 30 days, ${this.nEvents} events.\n`
+          `Alpha vs market — last 30 days, ${this.nEvents} scored events.\n`
+          + `Status: ${statusCounts.provisional_local || 0} provisional, ${statusCounts.gamma_confirmed || 0} gamma-confirmed.\n`
+          + `Missing: ${diag.events_missing_model_snapshot || 0} model events, ${diag.missing_market_snapshot_buckets || 0} market buckets.\n`
           + `Legacy edge: ${this._bpsLabel(this.legacyEdgeBps)}\n`
           + `BMA shadow edge: ${this._bpsLabel(this.bmaEdgeBps)}\n`
           + `BMA winning streak: ${this.streak} day(s)`

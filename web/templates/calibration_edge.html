@@ -11,8 +11,8 @@
         Alpha Dashboard
       </h1>
       <p class="text-sm mt-1" style="color:var(--text-muted)">
-        Brier(model) − Brier(market) over settled events.
-        The only metric that directly measures whether we add value over the market.
+        Brier(model) − Brier(market) over fixed pre-resolution checkpoints.
+        Provisional local scores use canonical settlement highs until Gamma confirms.
       </p>
     </div>
     <form method="get" class="flex items-center gap-2 text-xs">
@@ -30,11 +30,17 @@
   <!-- ── Headline KPIs ───────────────────────────────────────────────────── -->
   {% set src = metrics.by_source %}
   {% set sig = metrics.promotion_signal %}
+  {% set diag = metrics.diagnostics or {} %}
+  {% set status_counts = metrics.settlement_status_counts or {} %}
   <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
     <div class="card p-4">
-      <div class="text-[10px] uppercase tracking-widest" style="color:var(--text-muted)">Settled events</div>
+      <div class="text-[10px] uppercase tracking-widest" style="color:var(--text-muted)">Scored events</div>
       <div class="text-2xl font-bold mono mt-1">{{ metrics.n_events }}</div>
-      <div class="text-[11px] mt-0.5" style="color:var(--text-muted)">{{ metrics.n_buckets }} buckets / {{ metrics.lookback_days }}d</div>
+      <div class="text-[11px] mt-0.5" style="color:var(--text-muted)">
+        {{ metrics.n_buckets }} buckets / {{ metrics.lookback_days }}d
+        {% if status_counts.provisional_local %}<span class="ml-1" style="color:#FBBF24">provisional {{ status_counts.provisional_local }}</span>{% endif %}
+        {% if status_counts.gamma_confirmed %}<span class="ml-1" style="color:var(--green)">confirmed {{ status_counts.gamma_confirmed }}</span>{% endif %}
+      </div>
     </div>
     <div class="card p-4">
       <div class="text-[10px] uppercase tracking-widest" style="color:var(--text-muted)">Legacy edge</div>
@@ -75,6 +81,26 @@
     </div>
   </div>
 
+  <!-- ── Scoring Diagnostics ─────────────────────────────────────────────── -->
+  <div class="card p-4">
+    <div class="flex items-center justify-between gap-3 flex-wrap">
+      <div>
+        <h2 class="font-semibold text-sm">Scoring Diagnostics</h2>
+        <p class="text-[11px] mt-1" style="color:var(--text-muted)">
+          Snapshot checkpoint: {{ diag.score_checkpoint_hour_local|default(12) }}:00 local. Scores are provisional until Gamma/UMA confirms the market result.
+        </p>
+      </div>
+      <div class="flex flex-wrap gap-2 text-[10px] mono">
+        <span class="px-2 py-1 rounded" style="background:var(--bg-panel);color:var(--text-muted)">past {{ diag.past_events|default(0) }}</span>
+        <span class="px-2 py-1 rounded" style="background:var(--bg-panel);color:var(--text-muted)">local {{ diag.local_settled_events|default(0) }}</span>
+        <span class="px-2 py-1 rounded" style="background:var(--bg-panel);color:var(--text-muted)">gamma {{ diag.gamma_confirmed_events|default(0) }}</span>
+        <span class="px-2 py-1 rounded" style="background:var(--bg-panel);color:#FBBF24">provisional {{ diag.provisional_local_events|default(0) }}</span>
+        <span class="px-2 py-1 rounded" style="background:var(--bg-panel);color:var(--text-muted)">no model {{ diag.events_missing_model_snapshot|default(0) }}</span>
+        <span class="px-2 py-1 rounded" style="background:var(--bg-panel);color:var(--text-muted)">no market buckets {{ diag.missing_market_snapshot_buckets|default(0) }}</span>
+      </div>
+    </div>
+  </div>
+
   <!-- ── Cumulative-Brier chart ─────────────────────────────────────────── -->
   <div class="card p-4">
     <div class="flex items-center justify-between mb-3">
@@ -87,9 +113,9 @@
       <div id="edge-chart" style="width:100%;height:360px"></div>
     {% else %}
       <div class="px-4 py-12 text-center text-sm" style="color:var(--text-muted)">
-        No settled events in the last {{ days_back }} days. Need at least one
-        resolved event with both a model snapshot and a market snapshot to
-        score the headline numbers.
+        No scored events in the last {{ days_back }} days. Need at least one
+        past event with a canonical settlement high plus pre-checkpoint model
+        and market snapshots.
       </div>
     {% endif %}
   </div>

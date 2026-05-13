@@ -8,9 +8,13 @@ covered by the smoke test in this file plus the live page after deploy.
 from __future__ import annotations
 
 import asyncio
+import json
 import math
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from backend.modeling.edge_metrics import (
     BPS,
@@ -20,6 +24,15 @@ from backend.modeling.edge_metrics import (
     _consecutive_days_bma_wins,
     _score_event,
     compute_edge_metrics,
+)
+from backend.storage.models import (
+    Base,
+    Bucket,
+    City,
+    Event,
+    MarketSnapshot,
+    MetarObs,
+    ModelSnapshot,
 )
 
 
@@ -210,6 +223,112 @@ def test_streak_empty_input():
 
 # ───────────────────── compute_edge_metrics integration ─────────────────────
 
+async def _setup_edge_db(tmp_path):
+    db_path = tmp_path / "edge_metrics_test.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+    session_factory = async_sessionmaker(
+        engine,
+        expire_on_commit=False,
+        class_=AsyncSession,
+    )
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    return engine, session_factory
+
+
+def _past_date(days_back: int = 3) -> str:
+    return (
+        datetime.now(ZoneInfo("America/New_York")) - timedelta(days=days_back)
+    ).strftime("%Y-%m-%d")
+
+
+def _checkpoint(date_et: str) -> datetime:
+    return datetime.strptime(date_et, "%Y-%m-%d").replace(
+        hour=12,
+        minute=0,
+        second=0,
+        microsecond=0,
+        tzinfo=ZoneInfo("America/New_York"),
+    ).astimezone(timezone.utc)
+
+
+async def _seed_scored_event(session, *, date_et: str, resolved: bool = False):
+    city = City(
+        city_slug="atlanta",
+        display_name="Atlanta",
+        metar_station="KATL",
+        enabled=True,
+        is_us=True,
+        unit="F",
+        tz="America/New_York",
+    )
+    session.add(city)
+    await session.flush()
+
+    event = Event(
+        city_id=city.id,
+        date_et=date_et,
+        status="ok",
+        trading_enabled=True,
+        winning_bucket_idx=3 if resolved else None,
+        resolved_at=(_checkpoint(date_et) + timedelta(hours=8)) if resolved else None,
+    )
+    session.add(event)
+    await session.flush()
+
+    ranges = [(None, 75.0), (76.0, 77.0), (78.0, 79.0), (80.0, 81.0)]
+    buckets = []
+    for idx, (low_f, high_f) in enumerate(ranges):
+        bucket = Bucket(
+            event_id=event.id,
+            bucket_idx=idx,
+            label=f"b{idx}",
+            low_f=low_f,
+            high_f=high_f,
+            condition_id=f"cond-{event.id}-{idx}",
+        )
+        session.add(bucket)
+        buckets.append(bucket)
+    await session.flush()
+
+    checkpoint = _checkpoint(date_et)
+    session.add(MetarObs(
+        city_id=city.id,
+        metar_station="KATL",
+        observed_at=checkpoint + timedelta(hours=5),
+        temp_f=80.1,
+        source="aviation",
+    ))
+    session.add(ModelSnapshot(
+        event_id=event.id,
+        computed_at=checkpoint - timedelta(hours=1),
+        mu=80.0,
+        sigma=2.0,
+        probs_json=json.dumps([0.10, 0.20, 0.30, 0.40]),
+        inputs_json=json.dumps({"bma_shadow": {"probs": [0.05, 0.15, 0.25, 0.55]}}),
+    ))
+    session.add(ModelSnapshot(
+        event_id=event.id,
+        computed_at=checkpoint + timedelta(hours=8),
+        mu=80.0,
+        sigma=0.2,
+        probs_json=json.dumps([0.0, 0.0, 0.0, 1.0]),
+        inputs_json=json.dumps({"bma_shadow": {"probs": [0.0, 0.0, 0.0, 1.0]}}),
+    ))
+    for idx, bucket in enumerate(buckets):
+        session.add(MarketSnapshot(
+            bucket_id=bucket.id,
+            fetched_at=checkpoint - timedelta(minutes=30),
+            yes_bid=0.20,
+            yes_ask=0.30,
+            yes_mid=[0.05, 0.15, 0.30, 0.50][idx],
+            yes_bid_depth=100.0,
+            yes_ask_depth=100.0,
+            spread=0.10,
+        ))
+    await session.commit()
+    return city, event
+
 def test_compute_edge_metrics_with_no_resolved_events_returns_empty_safe(monkeypatch):
     """When the DB has no resolved events, the function must still return
     a complete schema with null Brier and zero counts — never raise."""
@@ -235,3 +354,39 @@ def test_compute_edge_metrics_with_no_resolved_events_returns_empty_safe(monkeyp
     assert out["by_city"] == {}
     assert out["promotion_signal"]["bma_better_than_legacy"] is False
     assert out["promotion_signal"]["consecutive_days_bma_wins"] == 0
+
+
+def test_compute_edge_metrics_scores_provisional_local_settlements(tmp_path):
+    async def _case():
+        engine, session_factory = await _setup_edge_db(tmp_path)
+        try:
+            async with session_factory() as session:
+                await _seed_scored_event(session, date_et=_past_date(), resolved=False)
+                out = await compute_edge_metrics(days_back=30, sess=session)
+                assert out["n_events"] == 1
+                assert out["settlement_status_counts"]["provisional_local"] == 1
+                assert out["diagnostics"]["provisional_local_events"] == 1
+                assert out["diagnostics"]["gamma_confirmed_events"] == 0
+                # Uses the noon pre-resolution snapshot, not the later near-perfect
+                # post-resolution snapshot.
+                assert out["by_source"]["legacy"]["brier"] == pytest.approx(0.125)
+        finally:
+            await engine.dispose()
+
+    asyncio.run(_case())
+
+
+def test_compute_edge_metrics_labels_gamma_confirmed_settlements(tmp_path):
+    async def _case():
+        engine, session_factory = await _setup_edge_db(tmp_path)
+        try:
+            async with session_factory() as session:
+                await _seed_scored_event(session, date_et=_past_date(), resolved=True)
+                out = await compute_edge_metrics(days_back=30, sess=session)
+                assert out["n_events"] == 1
+                assert out["settlement_status_counts"]["gamma_confirmed"] == 1
+                assert out["diagnostics"]["gamma_confirmed_events"] == 1
+        finally:
+            await engine.dispose()
+
+    asyncio.run(_case())

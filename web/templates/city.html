@@ -614,8 +614,15 @@
                {% if forecasts.wu_hourly.collected_at %}
                <div class="flex justify-between w-full"><span style="color:var(--text-muted)">Data Collected</span><span class="mono">{{ forecasts.wu_hourly.collected_at }}</span></div>
                {% endif %}
-               {% if forecasts.wu_hourly.model_run_at %}
-               <div class="flex justify-between w-full"><span style="color:var(--text-muted)">Model Run</span><span class="mono">{{ forecasts.wu_hourly.model_run_at }} ({{ forecasts.wu_hourly.lead_time_hours }}h lead) — {{ forecasts.wu_hourly.model_run_age }}</span></div>
+               {% if forecasts.wu_hourly.model_run_at or forecasts.wu_hourly.lead_time_hours is not none %}
+               <div class="flex justify-between w-full">
+                 <span style="color:var(--text-muted)">{% if forecasts.wu_hourly.model_run_at %}Model Run{% else %}Fetched Reference{% endif %}</span>
+                 <span class="mono">
+                   {% if forecasts.wu_hourly.model_run_at %}{{ forecasts.wu_hourly.model_run_at }}{% else %}{{ forecasts.wu_hourly.collected_at or '—' }}{% endif %}
+                   {% if forecasts.wu_hourly.lead_time_hours is not none %} ({{ forecasts.wu_hourly.lead_time_hours }}h lead){% endif %}
+                   {% if forecasts.wu_hourly.model_run_age %} — {{ forecasts.wu_hourly.model_run_age }}{% endif %}
+                 </span>
+               </div>
                {% endif %}
              </div>
              {% if forecasts.wu_hourly.url %}
@@ -1253,8 +1260,17 @@
     </span>
     <span style="color:var(--text-muted)">{{ station_cal.n_samples }} samples</span>
     <span style="color:var(--text-muted)">{{ "%.0f"|format(station_cal.pct_days_traded) }}% traded</span>
-    {% if station_cal.best_source %}
-    <span style="color:var(--text-muted)">Best: <span class="mono">{{ station_cal.best_source|upper }}</span>{% if station_cal.best_source_mae %} ({{ "%.1f"|format(station_cal.best_source_mae) }}°){% endif %}</span>
+    {% if station_cal.best_overall_source %}
+    <span style="color:var(--text-muted)">Best overall: <span class="mono">{{ station_cal.best_overall_source|upper }}</span>{% if station_cal.best_overall_source_mae %} ({{ "%.1f"|format(station_cal.best_overall_source_mae) }}°{% if station_cal.n_samples %}, {{ station_cal.n_samples }} samples{% endif %}){% endif %}</span>
+    {% endif %}
+    {% if station_cal.best_current_lead %}
+    <span style="color:var(--text-muted)"
+          title="Lead-time-specific skill from SourceLeadTimeSkill. Buckets with n < 30 are provisional and should not be treated as high-confidence.">
+      Best at current lead:
+      <span class="mono">{{ station_cal.best_current_lead.source|upper }}</span>
+      {{ station_cal.best_current_lead.lead_time_bucket_hours }}h
+      (MAE {{ "%.1f"|format(station_cal.best_current_lead.mae_f) }}°, n={{ station_cal.best_current_lead.n_obs }}{% if station_cal.best_current_lead.n_obs < 30 %}, prov{% endif %})
+    </span>
     {% endif %}
   </div>
 </div>
@@ -1659,15 +1675,18 @@
       </div>
       <div class="overflow-x-auto">
         {% if buckets %}
-        <table class="w-full text-xs" style="min-width:32rem">
+        <table class="w-full text-xs" style="min-width:58rem">
           <thead>
             <tr class="text-[10px] uppercase tracking-widest" style="color:var(--text-muted);border-bottom:1px solid var(--border)">
               <th class="px-3 py-2 text-left">Range</th>
               <th class="px-2 py-2 text-right">Mkt</th>
               <th class="px-2 py-2 text-right">Model</th>
               <th class="px-2 py-2 text-right" style="color:#FBBF24" title="M1 BMA shadow probability — Gaussian-mixture predictive over the same per-source forecasts. Read-only; does not affect trade decisions during shadow phase.">BMA</th>
-              <th class="px-2 py-2 text-right" style="color:var(--cyan)">EV</th>
-              <th class="px-2 py-2 text-right">Kelly</th>
+              <th class="px-2 py-2 text-right" title="Best bid / ask / spread from the latest stored orderbook snapshot.">Book</th>
+              <th class="px-2 py-2 text-right" title="Bid depth / ask depth in shares at the top of book.">Depth</th>
+              <th class="px-2 py-2 text-right" style="color:var(--cyan)" title="After-cost edge: calibrated model probability minus market probability minus estimated spread/slippage cost.">True Edge</th>
+              <th class="px-2 py-2 text-right" title="Conservative size cap based on the configured max liquidity participation.">Max Size</th>
+              <th class="px-2 py-2 text-left">Trade State</th>
               <th class="px-2 py-2 text-center">▶</th>
             </tr>
           </thead>
@@ -1751,18 +1770,48 @@
                   {% endif %}
                 {% else %}<span style="color:var(--text-muted)">—</span>{% endif %}
               </td>
-              <td class="px-2 py-2.5 text-right mono font-bold">
-                {% if b.ev is not none %}
-                  {% if b.ev >= 0.20 %}<span class="text-green-400">+{{ "%.2f"|format(b.ev) }}</span>
-                  {% elif b.ev >= 0.10 %}<span class="text-yellow-400">+{{ "%.2f"|format(b.ev) }}</span>
-                  {% elif b.ev > 0 %}<span class="text-yellow-600">+{{ "%.2f"|format(b.ev) }}</span>
-                  {% else %}<span style="color:var(--text-muted)">{{ "%.2f"|format(b.ev) }}</span>{% endif %}
-                {% else %}—{% endif %}
+              <td class="px-2 py-2.5 text-right mono text-[10px]">
+                {% if b.yes_bid is not none or b.yes_ask is not none %}
+                <div><span style="color:var(--text-muted)">bid</span> {{ "%.1f"|format((b.yes_bid or 0) * 100) }}¢ / <span style="color:var(--text-muted)">ask</span> {{ "%.1f"|format((b.yes_ask or 0) * 100) }}¢</div>
+                <div style="color:var(--text-muted)">
+                  spr {{ "%.1f"|format((b.spread or 0) * 100) }}¢{% if b.market_snapshot_age_s is not none %} · {{ b.market_snapshot_age_s }}s{% endif %}
+                </div>
+                {% else %}<span style="color:var(--text-muted)">—</span>{% endif %}
               </td>
-              <td class="px-2 py-2.5 text-right mono">
-                {% if b.kelly_f is not none and b.kelly_f > 0 %}
-                  <span class="text-cyan-400 font-bold">{{ "%.1f"|format(b.kelly_f * 100) }}%</span>
-                {% else %}—{% endif %}
+              <td class="px-2 py-2.5 text-right mono text-[10px]">
+                {% if b.bid_depth is not none or b.ask_depth is not none %}
+                <div><span style="color:var(--text-muted)">bid</span> {{ "%.0f"|format(b.bid_depth or 0) }}</div>
+                <div><span style="color:var(--text-muted)">ask</span> {{ "%.0f"|format(b.ask_depth or 0) }}</div>
+                {% else %}<span style="color:var(--text-muted)">—</span>{% endif %}
+              </td>
+              <td class="px-2 py-2.5 text-right mono font-bold">
+                {% if b.impact_adjusted_ev is not none %}
+                  {% if b.impact_adjusted_ev >= 0.10 %}<span class="text-green-400">+{{ "%.2f"|format(b.impact_adjusted_ev) }}</span>
+                  {% elif b.impact_adjusted_ev > 0 %}<span class="text-yellow-400">+{{ "%.2f"|format(b.impact_adjusted_ev) }}</span>
+                  {% else %}<span style="color:var(--text-muted)">{{ "%.2f"|format(b.impact_adjusted_ev) }}</span>{% endif %}
+                  {% if b.exec_cost is not none %}<div class="text-[9px] font-normal" style="color:var(--text-muted)">cost {{ "%.1f"|format(b.exec_cost * 100) }}¢</div>{% endif %}
+                {% else %}<span style="color:var(--text-muted)">—</span>{% endif %}
+              </td>
+              <td class="px-2 py-2.5 text-right mono text-[10px]">
+                {% if b.max_safe_shares is not none %}
+                <div>{{ "%.0f"|format(b.max_safe_shares) }} sh</div>
+                {% if b.target_trade_shares is not none %}<div style="color:var(--text-muted)">target {{ "%.0f"|format(b.target_trade_shares) }}</div>{% endif %}
+                {% else %}<span style="color:var(--text-muted)">—</span>{% endif %}
+              </td>
+              <td class="px-2 py-2.5 text-left text-[10px]">
+                {% if b.actionable %}
+                <span class="px-1.5 py-0.5 rounded font-bold" style="background:rgba(34,197,94,0.14);color:#86EFAC;border:1px solid rgba(34,197,94,0.28)">Tradable</span>
+                {% elif b.why_not_tradable %}
+                <div class="mono leading-tight" style="color:var(--text-muted)" title="{{ b.why_not_tradable|join('; ') }}">
+                  {{ b.why_not_tradable[0].replace('_', ' ') }}
+                  {% if b.why_not_tradable|length > 1 %}<span class="opacity-60">+{{ b.why_not_tradable|length - 1 }}</span>{% endif %}
+                </div>
+                {% else %}
+                <span style="color:var(--text-muted)">Monitor</span>
+                {% endif %}
+                {% if b.ev_at_bid is not none %}
+                <div class="mono text-[9px]" style="color:{% if b.ev_at_bid >= 0 %}#86EFAC{% else %}var(--text-muted){% endif %}" title="Exit-side EV if selling held shares into current bid.">exit EV {{ "%+.2f"|format(b.ev_at_bid) }}</div>
+                {% endif %}
               </td>
               <td class="px-2 py-2.5 text-center">
                 {# U5 — two-button popover. ▶ uses normal signal gates (the existing
@@ -1966,6 +2015,30 @@
           <span style="color:var(--text-muted)">Ask Depth</span>
           <span class="mono font-medium" x-text="obAskDepth ? obAskDepth.toFixed(0) + ' shares' : '—'"></span>
         </div>
+        <div class="flex justify-between">
+          <span style="color:var(--text-muted)">Bid Depth</span>
+          <span class="mono font-medium" x-text="obBidDepth ? obBidDepth.toFixed(0) + ' shares' : '—'"></span>
+        </div>
+        <template x-if="selectedBucket">
+          <div class="pt-1 mt-1 border-t space-y-1.5" style="border-color:var(--border)">
+            <div class="flex justify-between">
+              <span style="color:var(--text-muted)">After-Cost Edge</span>
+              <span class="mono font-medium" :style="selectedBucket.impact_adjusted_ev >= 0.10 ? 'color:var(--green)' : 'color:var(--text-muted)'" x-text="selectedBucket.impact_adjusted_ev != null ? (selectedBucket.impact_adjusted_ev >= 0 ? '+' : '') + selectedBucket.impact_adjusted_ev.toFixed(3) : '—'"></span>
+            </div>
+            <div class="flex justify-between">
+              <span style="color:var(--text-muted)">Est. Fill Cost</span>
+              <span class="mono font-medium" x-text="selectedBucket.exec_cost != null ? (selectedBucket.exec_cost * 100).toFixed(1) + '¢' : '—'"></span>
+            </div>
+            <div class="flex justify-between">
+              <span style="color:var(--text-muted)">Max Safe Size</span>
+              <span class="mono font-medium" x-text="selectedBucket.max_safe_shares != null ? selectedBucket.max_safe_shares.toFixed(0) + ' shares' : '—'"></span>
+            </div>
+            <div x-show="selectedBucket.why_not_tradable && selectedBucket.why_not_tradable.length"
+                 class="text-[10px] leading-snug" style="color:#FDE047">
+              Blocked: <span class="mono" x-text="selectedBucket.why_not_tradable.join('; ')"></span>
+            </div>
+          </div>
+        </template>
         <!-- Liquidity warning -->
         <div x-show="shares > 0 && obAskDepth > 0 && shares > obAskDepth && side === 'buy'"
              class="mt-2 p-2 rounded-lg text-[10px] font-medium" style="background:rgba(249,115,22,0.1);color:#FB923C;border:1px solid rgba(249,115,22,0.3)">

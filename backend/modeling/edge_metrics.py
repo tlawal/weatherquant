@@ -9,9 +9,9 @@ Three forecasting paths are scored against settled outcomes:
 - **Legacy model** — `ModelSnapshot.probs_json` (drives trades today).
 - **BMA shadow** — `ModelSnapshot.inputs_json["bma_shadow"]["probs"]`
   (computed since `e4835da`, does not drive trades).
-- **Market** — latest `MarketSnapshot.yes_mid` per bucket.
+- **Market** — `MarketSnapshot.yes_mid` per bucket at a fixed checkpoint.
 
-For each settled `Event` (`winning_bucket_idx IS NOT NULL`):
+For each scored `Event` (Gamma-confirmed or provisional local settlement):
 
   outcome_b = 1 if b.bucket_idx == event.winning_bucket_idx else 0
   brier_b   = (prob_b − outcome_b)²
@@ -30,11 +30,14 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.backtesting.metrics import compute_brier
+from backend.modeling.calibration_engine import resolve_canonical_settlement_high
+from backend.modeling.settlement import canonical_bucket_ranges, find_bucket_idx_for_value
 from backend.storage.db import get_session
 from backend.storage.models import (
     Bucket,
@@ -55,6 +58,11 @@ DEFAULT_MIN_N_BUCKETS = 10
 # Brier difference of 0.0036 → "+36 bps".
 BPS = 10000
 
+# Score what the model/market knew before the event was effectively settled.
+# Noon local is late enough to include same-day forecast updates and market
+# liquidity, but early enough to avoid scoring post-lock/settlement hindsight.
+SCORE_CHECKPOINT_HOUR_LOCAL = 12
+
 
 @dataclass
 class _BucketScore:
@@ -68,6 +76,8 @@ class _BucketScore:
     bma_prob: Optional[float]        # None if no bma_shadow yet
     market_prob: Optional[float]     # None if no MarketSnapshot
     bma_between_share: Optional[float] = None  # for per-regime breakouts
+    settlement_status: str = "gamma_confirmed"  # gamma_confirmed | provisional_local
+    score_checkpoint_utc: Optional[str] = None
 
 
 # ───────────────────────── Aggregation helpers ──────────────────────────────
@@ -146,6 +156,8 @@ def _score_event(
     bma_probs: Optional[list[float]],
     market_by_bucket: dict[int, Optional[float]],
     bma_between_share: Optional[float] = None,
+    settlement_status: str = "gamma_confirmed",
+    score_checkpoint_utc: Optional[str] = None,
 ) -> list[_BucketScore]:
     """Pure scoring helper — no DB. Used directly by unit tests.
 
@@ -174,56 +186,158 @@ def _score_event(
             bma_prob=bma_prob,
             market_prob=market_prob,
             bma_between_share=bma_between_share,
+            settlement_status=settlement_status,
+            score_checkpoint_utc=score_checkpoint_utc,
         ))
     return scores
 
 
 # ───────────────────────── DB-backed entry point ────────────────────────────
 
+def _empty_diagnostics() -> dict:
+    return {
+        "score_checkpoint_hour_local": SCORE_CHECKPOINT_HOUR_LOCAL,
+        "past_events": 0,
+        "local_settled_events": 0,
+        "gamma_confirmed_events": 0,
+        "provisional_local_events": 0,
+        "scored_events": 0,
+        "events_without_local_settlement": 0,
+        "events_without_buckets": 0,
+        "events_missing_model_snapshot": 0,
+        "events_with_any_missing_market_snapshot": 0,
+        "missing_market_snapshot_buckets": 0,
+    }
+
+
+def _event_score_checkpoint_utc(event: Event, city: City) -> datetime:
+    city_tz = ZoneInfo(getattr(city, "tz", None) or "America/New_York")
+    local_day = datetime.strptime(event.date_et, "%Y-%m-%d").replace(
+        hour=SCORE_CHECKPOINT_HOUR_LOCAL,
+        minute=0,
+        second=0,
+        microsecond=0,
+        tzinfo=city_tz,
+    )
+    return local_day.astimezone(timezone.utc)
+
+
+def _is_past_local_event(event: Event, city: City, *, now_utc: datetime) -> bool:
+    city_tz = ZoneInfo(getattr(city, "tz", None) or "America/New_York")
+    today_local = now_utc.astimezone(city_tz).date()
+    event_date = datetime.strptime(event.date_et, "%Y-%m-%d").date()
+    return event_date < today_local
+
+
+async def _derive_provisional_winner(
+    sess: AsyncSession,
+    *,
+    event: Event,
+    city: City,
+    buckets: list[Bucket],
+) -> Optional[int]:
+    settlement = await resolve_canonical_settlement_high(
+        sess,
+        city=city,
+        event=event,
+        validate_polymarket_winner=False,
+    )
+    high_f = settlement.get("high_f")
+    if high_f is None:
+        return None
+    ranges = canonical_bucket_ranges([(b.low_f, b.high_f) for b in buckets])
+    return find_bucket_idx_for_value(ranges, float(high_f))
+
+
+async def _latest_model_snapshot_before(
+    sess: AsyncSession,
+    *,
+    event_id: int,
+    checkpoint_utc: datetime,
+) -> Optional[ModelSnapshot]:
+    result = await sess.execute(
+        select(ModelSnapshot)
+        .where(
+            ModelSnapshot.event_id == event_id,
+            ModelSnapshot.computed_at <= checkpoint_utc,
+        )
+        .order_by(desc(ModelSnapshot.computed_at), desc(ModelSnapshot.id))
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def _latest_market_snapshots_before(
+    sess: AsyncSession,
+    *,
+    bucket_ids: list[int],
+    checkpoint_utc: datetime,
+) -> dict[int, MarketSnapshot]:
+    if not bucket_ids:
+        return {}
+    sub = (
+        select(
+            MarketSnapshot.bucket_id,
+            func.max(MarketSnapshot.fetched_at).label("max_ts"),
+        )
+        .where(
+            MarketSnapshot.bucket_id.in_(bucket_ids),
+            MarketSnapshot.fetched_at <= checkpoint_utc,
+        )
+        .group_by(MarketSnapshot.bucket_id)
+        .subquery()
+    )
+    rows = (
+        await sess.execute(
+            select(MarketSnapshot).join(
+                sub,
+                (MarketSnapshot.bucket_id == sub.c.bucket_id)
+                & (MarketSnapshot.fetched_at == sub.c.max_ts),
+            )
+        )
+    ).scalars().all()
+    return {row.bucket_id: row for row in rows}
+
+
 async def _score_resolved_events(
     sess: AsyncSession,
     *,
     cutoff: datetime,
-) -> list[_BucketScore]:
-    """Iterate settled events since `cutoff` and produce one _BucketScore
-    per (event, bucket). Skips events without a model snapshot."""
+) -> tuple[list[_BucketScore], dict]:
+    """Score past events since `cutoff`.
+
+    Gamma-confirmed outcomes are preferred when available. Otherwise, past
+    events with a canonical local settlement high are scored as
+    `provisional_local` so the alpha dashboard can work before UMA/Gamma has
+    closed every market. Model and market probabilities are taken from a fixed
+    pre-resolution checkpoint to avoid hindsight.
+    """
+    diagnostics = _empty_diagnostics()
+    cutoff_date = cutoff.date().isoformat()
+    now_utc = datetime.now(timezone.utc)
+
     result = await sess.execute(
         select(Event, City)
         .join(City, City.id == Event.city_id)
-        .where(
-            Event.winning_bucket_idx.isnot(None),
-            Event.resolved_at.isnot(None),
-            Event.resolved_at >= cutoff,
-        )
-        .order_by(Event.resolved_at.asc())
+        .where(Event.date_et >= cutoff_date)
+        .order_by(Event.date_et.asc(), City.city_slug.asc())
     )
     rows = list(result.all())
     if not rows:
-        return []
+        return [], diagnostics
 
-    events = [event for event, _ in rows]
-    city_by_event_id = {event.id: city for event, city in rows}
+    past_rows = [
+        (event, city)
+        for event, city in rows
+        if _is_past_local_event(event, city, now_utc=now_utc)
+    ]
+    diagnostics["past_events"] = len(past_rows)
+    if not past_rows:
+        return [], diagnostics
+
+    events = [event for event, _ in past_rows]
+    city_by_event_id = {event.id: city for event, city in past_rows}
     event_ids = [event.id for event in events]
-
-    latest_snap_sub = (
-        select(
-            ModelSnapshot.event_id,
-            func.max(ModelSnapshot.id).label("max_snap_id"),
-        )
-        .where(ModelSnapshot.event_id.in_(event_ids))
-        .group_by(ModelSnapshot.event_id)
-        .subquery()
-    )
-    snap_rows = (
-        await sess.execute(
-            select(ModelSnapshot).join(
-                latest_snap_sub,
-                ModelSnapshot.id == latest_snap_sub.c.max_snap_id,
-            )
-        )
-    ).scalars().all()
-    snap_by_event_id = {snap.event_id: snap for snap in snap_rows}
-
     bucket_rows = (
         await sess.execute(
             select(Bucket)
@@ -232,40 +346,44 @@ async def _score_resolved_events(
         )
     ).scalars().all()
     buckets_by_event_id: dict[int, list[Bucket]] = {}
-    bucket_ids: list[int] = []
     for bucket in bucket_rows:
         buckets_by_event_id.setdefault(bucket.event_id, []).append(bucket)
-        bucket_ids.append(bucket.id)
-
-    market_by_bucket_id: dict[int, Optional[float]] = {}
-    if bucket_ids:
-        latest_market_sub = (
-            select(
-                MarketSnapshot.bucket_id,
-                func.max(MarketSnapshot.id).label("max_market_id"),
-            )
-            .where(MarketSnapshot.bucket_id.in_(bucket_ids))
-            .group_by(MarketSnapshot.bucket_id)
-            .subquery()
-        )
-        market_rows = (
-            await sess.execute(
-                select(MarketSnapshot).join(
-                    latest_market_sub,
-                    MarketSnapshot.id == latest_market_sub.c.max_market_id,
-                )
-            )
-        ).scalars().all()
-        market_by_bucket_id = {
-            m.bucket_id: m.yes_mid if m.yes_mid is not None else None
-            for m in market_rows
-        }
 
     scores: list[_BucketScore] = []
     for event in events:
         city = city_by_event_id[event.id]
-        snap = snap_by_event_id.get(event.id)
+        buckets = buckets_by_event_id.get(event.id, [])
+        if not buckets:
+            diagnostics["events_without_buckets"] += 1
+            continue
+
+        if event.winning_bucket_idx is not None and event.resolved_at is not None:
+            winning_bucket_idx = event.winning_bucket_idx
+            settlement_status = "gamma_confirmed"
+            diagnostics["gamma_confirmed_events"] += 1
+            diagnostics["local_settled_events"] += 1
+        else:
+            winning_bucket_idx = await _derive_provisional_winner(
+                sess,
+                event=event,
+                city=city,
+                buckets=buckets,
+            )
+            if winning_bucket_idx is None:
+                diagnostics["events_without_local_settlement"] += 1
+                continue
+            settlement_status = "provisional_local"
+            diagnostics["provisional_local_events"] += 1
+            diagnostics["local_settled_events"] += 1
+
+        checkpoint_utc = _event_score_checkpoint_utc(event, city)
+        snap = await _latest_model_snapshot_before(
+            sess,
+            event_id=event.id,
+            checkpoint_utc=checkpoint_utc,
+        )
         if snap is None:
+            diagnostics["events_missing_model_snapshot"] += 1
             continue
 
         try:
@@ -285,27 +403,44 @@ async def _score_resolved_events(
         except Exception:
             log.debug("edge_metrics: bad inputs_json on snapshot id=%s", snap.id)
 
-        buckets = buckets_by_event_id.get(event.id, [])
+        market_rows_by_bucket_id = await _latest_market_snapshots_before(
+            sess,
+            bucket_ids=[b.id for b in buckets],
+            checkpoint_utc=checkpoint_utc,
+        )
+        missing_market = 0
         market_by_bucket = {
-            b.bucket_idx: market_by_bucket_id.get(b.id)
+            b.bucket_idx: (
+                market_rows_by_bucket_id[b.id].yes_mid
+                if b.id in market_rows_by_bucket_id else None
+            )
             for b in buckets
         }
+        for b in buckets:
+            if b.id not in market_rows_by_bucket_id:
+                missing_market += 1
+        if missing_market:
+            diagnostics["events_with_any_missing_market_snapshot"] += 1
+            diagnostics["missing_market_snapshot_buckets"] += missing_market
 
         scores.extend(_score_event(
             event={
                 "id": event.id,
                 "city_slug": city.city_slug,
                 "date_et": event.date_et,
-                "winning_bucket_idx": event.winning_bucket_idx,
+                "winning_bucket_idx": winning_bucket_idx,
                 "buckets": [{"bucket_idx": b.bucket_idx} for b in buckets],
             },
             legacy_probs=legacy_probs,
             bma_probs=bma_probs,
             market_by_bucket=market_by_bucket,
             bma_between_share=bma_between,
+            settlement_status=settlement_status,
+            score_checkpoint_utc=checkpoint_utc.isoformat(),
         ))
+        diagnostics["scored_events"] += 1
 
-    return scores
+    return scores, diagnostics
 
 
 # ───────────────────────── Public API ───────────────────────────────────────
@@ -325,14 +460,30 @@ async def compute_edge_metrics(
     """
     cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
 
+    diagnostics = _empty_diagnostics()
+
     if sess is None:
         async with get_session() as s:
-            scores = await _score_resolved_events(s, cutoff=cutoff)
+            scored = await _score_resolved_events(s, cutoff=cutoff)
     else:
-        scores = await _score_resolved_events(sess, cutoff=cutoff)
+        scored = await _score_resolved_events(sess, cutoff=cutoff)
+
+    if isinstance(scored, tuple):
+        scores, diagnostics = scored
+    else:
+        # Backward-compatible with older tests/mocks that return just scores.
+        scores = scored
+        diagnostics["scored_events"] = len({s.event_id for s in scores})
 
     # Aggregate overall
     overall = _aggregate(scores)
+    event_ids_by_status: dict[str, set[int]] = {}
+    for s in scores:
+        event_ids_by_status.setdefault(s.settlement_status, set()).add(s.event_id)
+    settlement_status_counts = {
+        status: len(event_ids)
+        for status, event_ids in sorted(event_ids_by_status.items())
+    }
 
     # Per-city
     by_city: dict[str, dict] = {}
@@ -394,6 +545,8 @@ async def compute_edge_metrics(
         "lookback_days": days_back,
         "n_events": len({s.event_id for s in scores}),
         "n_buckets": len(scores),
+        "settlement_status_counts": settlement_status_counts,
+        "diagnostics": diagnostics,
         "by_source": overall,
         "by_city": by_city,
         "by_day": by_day,

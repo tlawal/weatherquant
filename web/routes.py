@@ -18,7 +18,7 @@ from backend.config import Config
 from backend.city_registry import get_city_priority, CITY_REGISTRY_BY_SLUG
 from backend.market_context.service import serialize_market_context_snapshot, _resolve_realized_high_with_source
 from backend.tz_utils import city_local_date, city_local_now, city_local_tomorrow, city_local_day_after_tomorrow, et_today
-from backend.strategy.kelly import calculate_expected_value, calculate_kelly_fraction
+from backend.strategy.kelly import calculate_ev_per_share, calculate_expected_value, calculate_kelly_fraction
 from backend.modeling.calibration_engine import get_reliability_metrics, get_reliability_diagnostics
 from backend.ingestion.model_metadata import fetch_openmeteo_metadata, _OM_META_ENDPOINTS
 from collections import defaultdict
@@ -576,6 +576,7 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
         get_resolution_high_metar,
         get_avg_peak_timing,
         get_todays_extended_obs,
+        bucket_lead_time,
     )
 
     async with get_session() as sess:
@@ -750,11 +751,24 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                 sess, bucket_ids, snapshot_id=snapshot_id,
             )
             markets_by_bucket = await get_latest_market_snapshots_bulk(sess, bucket_ids)
+            now_for_market_age = datetime.now(timezone.utc)
             for bucket in buckets:
                 sig = signals_by_bucket.get(bucket.id)
                 if model and sig and sig.computed_at < model.computed_at:
                     sig = None
                 mkt = markets_by_bucket.get(bucket.id)
+                sig_reason = {}
+                gate_failures = []
+                if sig and sig.reason_json:
+                    try:
+                        sig_reason = json.loads(sig.reason_json)
+                    except Exception:
+                        sig_reason = {}
+                if sig and sig.gate_failures_json:
+                    try:
+                        gate_failures = json.loads(sig.gate_failures_json)
+                    except Exception:
+                        gate_failures = []
 
                 probs = json.loads(model.probs_json) if model and model.probs_json else []
                 model_prob = probs[bucket.bucket_idx] if bucket.bucket_idx < len(probs) else None
@@ -769,6 +783,65 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                     fractional_kelly=Config.KELLY_FRACTION,
                     max_position_size=Config.MAX_POSITION_PCT
                 ) if model_prob is not None and yes_price else None
+                market_age_s = None
+                if mkt and mkt.fetched_at:
+                    fetched_at = mkt.fetched_at
+                    if fetched_at.tzinfo is None:
+                        fetched_at = fetched_at.replace(tzinfo=timezone.utc)
+                    market_age_s = max(0, int((now_for_market_age - fetched_at).total_seconds()))
+
+                ask_depth = mkt.yes_ask_depth if mkt else None
+                bid_depth = mkt.yes_bid_depth if mkt else None
+                spread = mkt.spread if mkt else None
+                exec_cost = sig.exec_cost if sig else None
+                true_edge = sig.true_edge if sig else None
+                max_safe_shares = (
+                    round(max(0.0, ask_depth * Config.MAX_LIQUIDITY_PCT), 2)
+                    if ask_depth is not None else None
+                )
+                target_trade_shares = (
+                    round(min(max_safe_shares, 25.0), 2)
+                    if max_safe_shares is not None else None
+                )
+                impact_adjusted_ev = true_edge
+                why_not_tradable = list(gate_failures or [])
+                if mkt is None:
+                    why_not_tradable.append("no_market_snapshot")
+                if market_age_s is not None and market_age_s > 300:
+                    why_not_tradable.append(f"market_snapshot_stale_{market_age_s}s")
+                if spread is not None and spread > Config.MAX_SPREAD:
+                    why_not_tradable.append(
+                        f"spread_{spread:.3f}_gt_{Config.MAX_SPREAD:.3f}"
+                    )
+                if ask_depth is not None and ask_depth < Config.MIN_LIQUIDITY_SHARES:
+                    why_not_tradable.append(
+                        f"ask_depth_{ask_depth:.0f}_lt_{Config.MIN_LIQUIDITY_SHARES:.0f}"
+                    )
+                if true_edge is not None and true_edge < Config.MIN_TRUE_EDGE:
+                    why_not_tradable.append(
+                        f"true_edge_{true_edge:.3f}_lt_{Config.MIN_TRUE_EDGE:.3f}"
+                    )
+                if mkt and mkt.yes_ask is not None and mkt.yes_ask >= Config.MAX_ENTRY_PRICE:
+                    why_not_tradable.append(
+                        f"ask_{mkt.yes_ask:.3f}_gte_max_entry_{Config.MAX_ENTRY_PRICE:.3f}"
+                    )
+                display_ev_per_share = sig_reason.get("ev_per_share")
+                if display_ev_per_share is None and model_prob is not None and mkt and mkt.yes_mid is not None:
+                    display_ev_per_share = calculate_ev_per_share(model_prob, mkt.yes_mid)
+                display_ev_at_bid = sig_reason.get("ev_at_bid")
+                if display_ev_at_bid is None and model_prob is not None and mkt and mkt.yes_bid is not None:
+                    display_ev_at_bid = calculate_ev_per_share(model_prob, mkt.yes_bid)
+                # Preserve order while avoiding duplicate reasons from the signal
+                # engine and this route-level display layer.
+                why_not_tradable = list(dict.fromkeys(why_not_tradable))
+                actionable = (
+                    true_edge is not None
+                    and true_edge >= Config.MIN_TRUE_EDGE
+                    and mkt is not None
+                    and (mkt.yes_mid is not None and 0.02 <= mkt.yes_mid <= 0.98)
+                    and (ask_depth or 0.0) >= Config.MIN_LIQUIDITY_SHARES
+                    and not why_not_tradable
+                )
 
                 buckets_with_signals.append({
                     "bucket_idx": bucket.bucket_idx,
@@ -782,14 +855,38 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                     "mkt_prob": mkt.yes_mid if mkt else None,
                     "yes_bid": mkt.yes_bid if mkt else None,
                     "yes_ask": mkt.yes_ask if mkt else None,
-                    "spread": mkt.spread if mkt else None,
-                    "ask_depth": mkt.yes_ask_depth if mkt else None,
-                    "bid_depth": mkt.yes_bid_depth if mkt else None,
-                    "true_edge": sig.true_edge if sig else None,
+                    "spread": spread,
+                    "ask_depth": ask_depth,
+                    "bid_depth": bid_depth,
+                    "market_snapshot_age_s": market_age_s,
+                    "market_snapshot_at": mkt.fetched_at.isoformat() if mkt and mkt.fetched_at else None,
+                    "true_edge": true_edge,
+                    "raw_edge": sig.raw_edge if sig else None,
                     "ev": ev,
                     "kelly_f": kelly_f,
-                    "exec_cost": sig.exec_cost if sig else None,
-                    "actionable": (sig.true_edge >= 0.10) if sig else False,
+                    "exec_cost": exec_cost,
+                    "ev_per_share": display_ev_per_share,
+                    "ev_at_bid": display_ev_at_bid,
+                    "impact_adjusted_ev": impact_adjusted_ev,
+                    "max_safe_shares": max_safe_shares,
+                    "target_trade_shares": target_trade_shares,
+                    "entry_ladder": {
+                        "passive_bid": mkt.yes_bid if mkt else None,
+                        "inside": (
+                            round(((mkt.yes_bid or 0) + (mkt.yes_ask or 0)) / 2, 4)
+                            if mkt and mkt.yes_bid is not None and mkt.yes_ask is not None
+                            else None
+                        ),
+                        "marketable_ask": mkt.yes_ask if mkt else None,
+                    },
+                    "exit_ladder": {
+                        "bid": mkt.yes_bid if mkt else None,
+                        "bid_depth": bid_depth,
+                        "ev_at_bid": display_ev_at_bid,
+                    },
+                    "why_not_tradable": why_not_tradable,
+                    "gate_failures": gate_failures,
+                    "actionable": actionable,
                 })
 
     model_inputs = json.loads(model.inputs_json) if model and model.inputs_json else {}
@@ -841,15 +938,63 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
         days = hours // 24
         return f"{days} day{'s' if days != 1 else ''} ago"
 
+    def _forecast_reference_time(fc) -> datetime | None:
+        if not fc:
+            return None
+        return getattr(fc, "model_run_at", None) or getattr(fc, "fetched_at", None)
+
     def _lead_time_hours(model_run_at: datetime | None) -> int | None:
         if not model_run_at:
             return None
         if model_run_at.tzinfo is None:
             model_run_at = model_run_at.replace(tzinfo=timezone.utc)
         event_end = datetime.strptime(target_date_et, "%Y-%m-%d").replace(
-            hour=23, minute=59, second=59, tzinfo=et_tz
+            hour=23, minute=59, second=59, tzinfo=_city_tz
         )
-        return max(0, int((event_end - model_run_at).total_seconds() // 3600))
+        return max(0, int((event_end.astimezone(timezone.utc) - model_run_at).total_seconds() // 3600))
+
+    lead_skill_by_key = {
+        (row["source"], row["lead_time_bucket_hours"]): row
+        for row in lead_time_skills
+    }
+
+    forecast_obs_for_lead = {
+        "nws": primary_fc if city.is_us else None,
+        "wu_hourly": wu_h,
+        "hrrr": hrrr_fc,
+        "hrrr_15min": hrrr_15min_fc,
+        "nbm": nbm_fc,
+        "ecmwf_ifs": ecmwf_ifs_fc,
+        "ecmwf_aifs": ecmwf_aifs_fc,
+        "gfs_graphcast": gfs_graphcast_fc,
+        "pangu_weather": pangu_weather_fc,
+        "fourcastnet_v2": fourcastnet_v2_fc,
+        "aurora": aurora_fc,
+    }
+    current_lead_skills = []
+    for src, fc in forecast_obs_for_lead.items():
+        if not fc or getattr(fc, "high_f", None) is None:
+            continue
+        ref_time = _forecast_reference_time(fc)
+        lead_hours = _lead_time_hours(ref_time)
+        if lead_hours is None:
+            continue
+        lead_bucket = bucket_lead_time(lead_hours)
+        skill = lead_skill_by_key.get((src, lead_bucket))
+        if not skill or skill.get("mae_f") is None:
+            continue
+        current_lead_skills.append({
+            "source": src,
+            "lead_time_hours": lead_hours,
+            "lead_time_bucket_hours": lead_bucket,
+            "mae_f": skill.get("mae_f"),
+            "bias_f": skill.get("bias_f"),
+            "n_obs": skill.get("n_obs") or 0,
+        })
+    best_current_lead_skill = (
+        min(current_lead_skills, key=lambda s: s["mae_f"])
+        if current_lead_skills else None
+    )
 
     # `_format_current_temp_dual` lives at module scope (testable) — see above.
 
@@ -1059,6 +1204,9 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                 "tradeability": station_cal_row.tradeability,
                 "best_source": station_cal_row.best_source,
                 "best_source_mae": station_cal_row.best_source_mae,
+                "best_overall_source": station_cal_row.best_source,
+                "best_overall_source_mae": station_cal_row.best_source_mae,
+                "best_current_lead": best_current_lead_skill,
                 "mae_ecmwf_f": station_cal_row.mae_ecmwf_f,
                 "mae_gfs_hrrr_f": station_cal_row.mae_gfs_hrrr_f,
                 "mae_nws_f": station_cal_row.mae_nws_f,
@@ -1140,8 +1288,8 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                     "age_s": _age(primary_fc.fetched_at if primary_fc else None),
                     "collected_at": _fmt_time_et(primary_fc.fetched_at if primary_fc else None),
                     "model_run_at": _fmt_utc(primary_fc.model_run_at if primary_fc else None),
-                    "lead_time_hours": _lead_time_hours(primary_fc.model_run_at if primary_fc else None),
-                    "model_run_age": _model_run_age(primary_fc.model_run_at if primary_fc else None),
+                    "lead_time_hours": _lead_time_hours(_forecast_reference_time(primary_fc)),
+                    "model_run_age": _model_run_age(_forecast_reference_time(primary_fc)),
                     "url": f"https://api.weather.gov/gridpoints/{city.nws_office}/{city.nws_grid_x},{city.nws_grid_y}/forecast" if city.is_us else f"https://api.open-meteo.com/v1/forecast?latitude={city.lat}&longitude={city.lon}&hourly=temperature_2m&start_date={target_date_et}&end_date={target_date_et}",
                     "skill": source_skill.get("nws"),
                 },
@@ -1152,8 +1300,8 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                     "peak_hour": wu_hourly_raw.get("peak_hour"),
                     "collected_at": _fmt_time_et(wu_h.fetched_at if wu_h else None),
                     "model_run_at": _fmt_utc(wu_h.model_run_at if wu_h else None),
-                    "lead_time_hours": _lead_time_hours(wu_h.model_run_at if wu_h else None),
-                    "model_run_age": _model_run_age(wu_h.model_run_at if wu_h else None),
+                    "lead_time_hours": _lead_time_hours(_forecast_reference_time(wu_h)),
+                    "model_run_age": _model_run_age(_forecast_reference_time(wu_h)),
                     "skill": source_skill.get("wu_hourly"),
                 },
                 "wu_history": {
@@ -1163,16 +1311,16 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                     "obs_time": wu_history_raw.get("obs_time"),
                     "collected_at": _fmt_time_et(wu_history.fetched_at if wu_history else None),
                     "model_run_at": _fmt_utc(wu_history.model_run_at if wu_history else None),
-                    "lead_time_hours": _lead_time_hours(wu_history.model_run_at if wu_history else None),
-                    "model_run_age": _model_run_age(wu_history.model_run_at if wu_history else None),
+                    "lead_time_hours": _lead_time_hours(_forecast_reference_time(wu_history)),
+                    "model_run_age": _model_run_age(_forecast_reference_time(wu_history)),
                 },
                 "hrrr": {
                     "high_f": hrrr_fc.high_f if hrrr_fc else None,
                     "age_s": _age(hrrr_fc.fetched_at if hrrr_fc else None),
                     "collected_at": _fmt_time_et(hrrr_fc.fetched_at if hrrr_fc else None),
                     "model_run_at": _fmt_utc(hrrr_fc.model_run_at if hrrr_fc else None),
-                    "lead_time_hours": _lead_time_hours(hrrr_fc.model_run_at if hrrr_fc else None),
-                    "model_run_age": _model_run_age(hrrr_fc.model_run_at if hrrr_fc else None),
+                    "lead_time_hours": _lead_time_hours(_forecast_reference_time(hrrr_fc)),
+                    "model_run_age": _model_run_age(_forecast_reference_time(hrrr_fc)),
                     "url": f"https://open-meteo.com/en/docs?latitude={city.lat}&longitude={city.lon}&hourly=temperature_2m&models=gfs_hrrr&temperature_unit=fahrenheit&start_date={target_date_et}&end_date={target_date_et}" if city.lat else None,
                     "skill": source_skill.get("hrrr"),
                 },
@@ -1181,8 +1329,8 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                     "age_s": _age(nbm_fc.fetched_at if nbm_fc else None),
                     "collected_at": _fmt_time_et(nbm_fc.fetched_at if nbm_fc else None),
                     "model_run_at": _fmt_utc(nbm_fc.model_run_at if nbm_fc else None),
-                    "lead_time_hours": _lead_time_hours(nbm_fc.model_run_at if nbm_fc else None),
-                    "model_run_age": _model_run_age(nbm_fc.model_run_at if nbm_fc else None),
+                    "lead_time_hours": _lead_time_hours(_forecast_reference_time(nbm_fc)),
+                    "model_run_age": _model_run_age(_forecast_reference_time(nbm_fc)),
                     "url": f"https://open-meteo.com/en/docs?latitude={city.lat}&longitude={city.lon}&hourly=temperature_2m&models=ncep_nbm_conus&temperature_unit=fahrenheit&start_date={target_date_et}&end_date={target_date_et}" if city.lat else None,
                     "skill": source_skill.get("nbm"),
                 },
@@ -1191,8 +1339,8 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                     "age_s": _age(ecmwf_ifs_fc.fetched_at if ecmwf_ifs_fc else None),
                     "collected_at": _fmt_time_et(ecmwf_ifs_fc.fetched_at if ecmwf_ifs_fc else None),
                     "model_run_at": _fmt_utc(ecmwf_ifs_fc.model_run_at if ecmwf_ifs_fc else None),
-                    "lead_time_hours": _lead_time_hours(ecmwf_ifs_fc.model_run_at if ecmwf_ifs_fc else None),
-                    "model_run_age": _model_run_age(ecmwf_ifs_fc.model_run_at if ecmwf_ifs_fc else None),
+                    "lead_time_hours": _lead_time_hours(_forecast_reference_time(ecmwf_ifs_fc)),
+                    "model_run_age": _model_run_age(_forecast_reference_time(ecmwf_ifs_fc)),
                     "url": (
                         f"https://api.open-meteo.com/v1/forecast?latitude={city.lat}"
                         f"&longitude={city.lon}&hourly=temperature_2m&models=ecmwf_ifs"
@@ -1205,8 +1353,8 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                     "age_s": _age(ecmwf_aifs_fc.fetched_at if ecmwf_aifs_fc else None),
                     "collected_at": _fmt_time_et(ecmwf_aifs_fc.fetched_at if ecmwf_aifs_fc else None),
                     "model_run_at": _fmt_utc(ecmwf_aifs_fc.model_run_at if ecmwf_aifs_fc else None),
-                    "lead_time_hours": _lead_time_hours(ecmwf_aifs_fc.model_run_at if ecmwf_aifs_fc else None),
-                    "model_run_age": _model_run_age(ecmwf_aifs_fc.model_run_at if ecmwf_aifs_fc else None),
+                    "lead_time_hours": _lead_time_hours(_forecast_reference_time(ecmwf_aifs_fc)),
+                    "model_run_age": _model_run_age(_forecast_reference_time(ecmwf_aifs_fc)),
                     "url": (
                         f"https://api.open-meteo.com/v1/forecast?latitude={city.lat}"
                         f"&longitude={city.lon}&hourly=temperature_2m&models=ecmwf_aifs025_single"
@@ -1220,8 +1368,8 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                     "age_s": _age(hrrr_15min_fc.fetched_at if hrrr_15min_fc else None),
                     "collected_at": _fmt_time_et(hrrr_15min_fc.fetched_at if hrrr_15min_fc else None),
                     "model_run_at": _fmt_utc(hrrr_15min_fc.model_run_at if hrrr_15min_fc else None),
-                    "lead_time_hours": _lead_time_hours(hrrr_15min_fc.model_run_at if hrrr_15min_fc else None),
-                    "model_run_age": _model_run_age(hrrr_15min_fc.model_run_at if hrrr_15min_fc else None),
+                    "lead_time_hours": _lead_time_hours(_forecast_reference_time(hrrr_15min_fc)),
+                    "model_run_age": _model_run_age(_forecast_reference_time(hrrr_15min_fc)),
                     "url": (
                         f"https://api.open-meteo.com/v1/forecast?latitude={city.lat}"
                         f"&longitude={city.lon}&hourly=temperature_2m&models=ncep_hrrr_conus_15min"
@@ -1235,8 +1383,8 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                     "age_s": _age(gfs_graphcast_fc.fetched_at if gfs_graphcast_fc else None),
                     "collected_at": _fmt_time_et(gfs_graphcast_fc.fetched_at if gfs_graphcast_fc else None),
                     "model_run_at": _fmt_utc(gfs_graphcast_fc.model_run_at if gfs_graphcast_fc else None),
-                    "lead_time_hours": _lead_time_hours(gfs_graphcast_fc.model_run_at if gfs_graphcast_fc else None),
-                    "model_run_age": _model_run_age(gfs_graphcast_fc.model_run_at if gfs_graphcast_fc else None),
+                    "lead_time_hours": _lead_time_hours(_forecast_reference_time(gfs_graphcast_fc)),
+                    "model_run_age": _model_run_age(_forecast_reference_time(gfs_graphcast_fc)),
                     "url": (
                         f"https://api.open-meteo.com/v1/forecast?latitude={city.lat}"
                         f"&longitude={city.lon}&hourly=temperature_2m&models=gfs_graphcast025"
@@ -1253,8 +1401,8 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                     "age_s": _age(pangu_weather_fc.fetched_at if pangu_weather_fc else None),
                     "collected_at": _fmt_time_et(pangu_weather_fc.fetched_at if pangu_weather_fc else None),
                     "model_run_at": _fmt_utc(pangu_weather_fc.model_run_at if pangu_weather_fc else None),
-                    "lead_time_hours": _lead_time_hours(pangu_weather_fc.model_run_at if pangu_weather_fc else None),
-                    "model_run_age": _model_run_age(pangu_weather_fc.model_run_at if pangu_weather_fc else None),
+                    "lead_time_hours": _lead_time_hours(_forecast_reference_time(pangu_weather_fc)),
+                    "model_run_age": _model_run_age(_forecast_reference_time(pangu_weather_fc)),
                     "url": "https://registry.opendata.aws/aiwp/",
                     "skill": source_skill.get("pangu_weather"),
                     "experimental": True,
@@ -1265,8 +1413,8 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                     "age_s": _age(fourcastnet_v2_fc.fetched_at if fourcastnet_v2_fc else None),
                     "collected_at": _fmt_time_et(fourcastnet_v2_fc.fetched_at if fourcastnet_v2_fc else None),
                     "model_run_at": _fmt_utc(fourcastnet_v2_fc.model_run_at if fourcastnet_v2_fc else None),
-                    "lead_time_hours": _lead_time_hours(fourcastnet_v2_fc.model_run_at if fourcastnet_v2_fc else None),
-                    "model_run_age": _model_run_age(fourcastnet_v2_fc.model_run_at if fourcastnet_v2_fc else None),
+                    "lead_time_hours": _lead_time_hours(_forecast_reference_time(fourcastnet_v2_fc)),
+                    "model_run_age": _model_run_age(_forecast_reference_time(fourcastnet_v2_fc)),
                     "url": "https://registry.opendata.aws/aiwp/",
                     "skill": source_skill.get("fourcastnet_v2"),
                     "experimental": True,
@@ -1277,8 +1425,8 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                     "age_s": _age(aurora_fc.fetched_at if aurora_fc else None),
                     "collected_at": _fmt_time_et(aurora_fc.fetched_at if aurora_fc else None),
                     "model_run_at": _fmt_utc(aurora_fc.model_run_at if aurora_fc else None),
-                    "lead_time_hours": _lead_time_hours(aurora_fc.model_run_at if aurora_fc else None),
-                    "model_run_age": _model_run_age(aurora_fc.model_run_at if aurora_fc else None),
+                    "lead_time_hours": _lead_time_hours(_forecast_reference_time(aurora_fc)),
+                    "model_run_age": _model_run_age(_forecast_reference_time(aurora_fc)),
                     "url": "https://registry.opendata.aws/aiwp/",
                     "skill": source_skill.get("aurora"),
                     "experimental": True,

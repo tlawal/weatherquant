@@ -292,6 +292,8 @@ function alphaChip() {
         if (!r.ok) return;
         const d = await r.json();
         const sig = d.promotion_signal || {};
+        const statusCounts = d.settlement_status_counts || {};
+        const diag = d.diagnostics || {};
         this.legacyBps = sig.current_edge_legacy_bps;
         this.bmaBps = sig.current_edge_bma_bps;
         this.streak = sig.consecutive_days_bma_wins || 0;
@@ -300,7 +302,7 @@ function alphaChip() {
           this.legacyLabel = 'Lgcy no data';
           this.bmaLabel = 'BMA no data';
           this.streakLabel = '';
-          this.tooltip = `Alpha over market — no settled events in the last ${d.lookback_days || 30} days.`;
+          this.tooltip = `Alpha over market — no scored events in the last ${d.lookback_days || 30} days. Past events: ${diag.past_events || 0}; missing model events: ${diag.events_missing_model_snapshot || 0}; missing market buckets: ${diag.missing_market_snapshot_buckets || 0}.`;
           return;
         }
         this.legacyLabel = (this.legacyBps === null || this.legacyBps === undefined)
@@ -308,7 +310,8 @@ function alphaChip() {
         this.bmaLabel = (this.bmaBps === null || this.bmaBps === undefined)
           ? 'BMA no data' : `BMA ${this.bmaBps >= 0 ? '+' : ''}${this.bmaBps.toFixed(1)}`;
         this.streakLabel = (this.streak >= 14) ? '▲ READY' : (this.streak > 0 ? `(${this.streak}d)` : '');
-        this.tooltip = `Alpha over market — last 30 days, ${this.nEvents} events.\n` +
+        this.tooltip = `Alpha over market — last 30 days, ${this.nEvents} scored events.\n` +
+          `Status: ${statusCounts.provisional_local || 0} provisional, ${statusCounts.gamma_confirmed || 0} gamma-confirmed.\n` +
           `Legacy: ${this.legacyBps !== null ? this.legacyBps.toFixed(1) + ' bps' : 'no data'}\n` +
           `BMA shadow: ${this.bmaBps !== null ? this.bmaBps.toFixed(1) + ' bps' : 'no data'}\n` +
           `BMA winning streak: ${this.streak} day(s). Click for full dashboard.`;
