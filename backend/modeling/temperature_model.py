@@ -563,18 +563,20 @@ def _late_day_lock_active(
     adaptive,
     hour_local: int,
     unit_mult: float,
+    trusted_consensus_high: Optional[float] = None,
 ) -> bool:
     """Decide whether to engage the late-day lock regime.
 
     The lock concentrates probability on the bucket containing the observed
     high once we are confident the day's peak is in. We do not require the
     adaptive engine to have flagged peak_already_passed — that detector can
-    lag by an hour or more in sparse-METAR cities. Instead we add an
-    observation-grounded fallback path so the lock still engages once it is
-    physically clear we are post-peak (after 18:00 local, no residual rise,
-    current temp at least 0.5°F below observed high, trend non-rising).
+    lag by an hour or false-trigger during intraday dips. Instead we require
+    late-day timing plus observation-grounded evidence that the observed high
+    is plausibly final.
     """
     if observed_high is None or current_temp_f is None:
+        return False
+    if hour_local < 15:
         return False
     if remaining_rise > 0.25 * unit_mult:
         return False
@@ -586,12 +588,10 @@ def _late_day_lock_active(
         if adaptive is not None and adaptive.kalman is not None
         else None
     )
+    n_obs = adaptive.kalman.n_observations if adaptive is not None and adaptive.kalman is not None else 0
+    deficit = observed_high - current_temp_f
 
-    # Path 1 — adaptive engine declared peak passed (existing behavior).
-    if adaptive is not None and adaptive.peak_already_passed:
-        return hour_local >= 18 or trend_per_hr is None or trend_per_hr <= 0.25
-
-    # Path 2 — observation fallback: physically post-peak even if adaptive lags.
+    # Path 1 — observation fallback: physically post-peak even if adaptive lags.
     # All four floor checks above already passed, so we know:
     #   - observed_high and current_temp_f exist
     #   - remaining_rise <= 0.25°F
@@ -602,21 +602,23 @@ def _late_day_lock_active(
     if hour_local >= 18 and (trend_per_hr is None or trend_per_hr <= 0.25):
         return True
 
-    # Path 3 — strong-cooling override for west-coast / late-peak cities.
+    # Path 2 — strong-cooling override for west-coast / late-peak cities.
     # Seattle regression: at 17:47 local with observed 55°F, current 53.6°F
     # (deficit 1.4°F) and a clearly negative Kalman trend, `peak_already_passed`
     # hadn't flipped and path 2's 18:00 gate was too late. When the trend is
-    # firmly negative with reliable observations and we are at/past 15:00
-    # local (after solar noon for all continental US cities), the physics is
-    # unambiguous — lock.
-    n_obs = adaptive.kalman.n_observations if adaptive is not None and adaptive.kalman is not None else 0
-    deficit = observed_high - current_temp_f
+    # firmly negative with reliable observations, the observed high is near
+    # trusted consensus, and we are at/past 15:00 local, the physics is
+    # unambiguous enough to lock before the 18:00 fallback.
+    observed_near_consensus = True
+    if trusted_consensus_high is not None:
+        observed_near_consensus = observed_high >= trusted_consensus_high - 2.0 * unit_mult
     if (
-        hour_local >= 15
+        15 <= hour_local < 18
         and trend_per_hr is not None
         and trend_per_hr <= -0.25
         and n_obs >= 10
         and deficit >= 1.0 * unit_mult
+        and observed_near_consensus
     ):
         return True
 
@@ -1368,6 +1370,28 @@ def compute_model(
     else:
         prob_hotter_bucket = prob_new_high_raw
 
+    trusted_consensus_high = source_quality.get("trusted_reference_median")
+    if trusted_consensus_high is None:
+        trusted_consensus_high = mu_forecast
+    lock_suppressed_reason: Optional[str] = None
+    if (
+        hour_local < 15
+        and adaptive is not None
+        and getattr(adaptive, "peak_already_passed", False)
+        and observed_high is not None
+        and current_temp_f is not None
+        and remaining_rise <= 0.25 * unit_mult
+        and current_temp_f <= observed_high - 0.5 * unit_mult
+    ):
+        lock_suppressed_reason = "pre_15_adaptive_peak_passed"
+        log.warning(
+            "model: suppressing impossible pre-15 lock hour=%s observed=%.1f current=%.1f consensus=%.1f",
+            hour_local,
+            observed_high,
+            current_temp_f,
+            trusted_consensus_high,
+        )
+
     lock_regime = _late_day_lock_active(
         observed_high=observed_high,
         current_temp_f=current_temp_f,
@@ -1375,6 +1399,7 @@ def compute_model(
         adaptive=adaptive,
         hour_local=hour_local,
         unit_mult=unit_mult,
+        trusted_consensus_high=trusted_consensus_high,
     )
 
     if lock_regime and observed_high is not None and observed_bucket_idx is not None:
@@ -1447,6 +1472,7 @@ def compute_model(
         "prob_hotter_bucket": round(prob_hotter_bucket, 4),
         "prob_new_high_raw": round(prob_new_high_raw, 4),
         "lock_regime": lock_regime,
+        "lock_suppressed_reason": lock_suppressed_reason,
         "observed_high": observed_high,
         "observed_bucket_idx": observed_bucket_idx,
         "observed_bucket_upper_f": observed_bucket_upper_f,

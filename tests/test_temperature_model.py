@@ -34,6 +34,15 @@ class _MorningDateTime(datetime):
         return fixed.astimezone(tz) if tz else fixed
 
 
+class _NoonDateTime(datetime):
+    """12:27 local — false peak-passed/late-lock regression window."""
+
+    @classmethod
+    def now(cls, tz=None):
+        fixed = cls(2026, 5, 13, 12, 27, tzinfo=ZoneInfo("America/New_York"))
+        return fixed.astimezone(tz) if tz else fixed
+
+
 def test_compute_model_locks_current_bucket_after_peak(monkeypatch):
     monkeypatch.setattr(temperature_model, "datetime", _FixedDateTime)
 
@@ -99,6 +108,79 @@ def test_compute_model_locks_current_bucket_after_peak(monkeypatch):
     assert model.prob_hotter_bucket < 0.01
     assert model.prob_new_high_raw > 0.2
     assert classify_city_state(model.prob_hotter_bucket) == "resolved"
+
+
+def test_noon_false_peak_passed_does_not_lock_cold_tail(monkeypatch):
+    """Atlanta noon regression: a temporary cooling dip can set
+    adaptive.peak_already_passed=True while trusted consensus remains near
+    80°F. That must not trigger the late-day lock or concentrate mass in the
+    cold observed bucket."""
+    monkeypatch.setattr(temperature_model, "datetime", _NoonDateTime)
+
+    local_tz = ZoneInfo("America/New_York")
+    adaptive = AdaptiveResult(
+        kalman=KalmanState(
+            smoothed_temp=73.8,
+            temp_trend_per_min=-0.010,
+            uncertainty=0.4,
+            n_observations=45,
+            process_noise_factor=1.0,
+        ),
+        regression_slope=-0.006,
+        regression_r2=0.5,
+        regression_features_used=["time"],
+        station_predictions=[],
+        predicted_daily_high=74.8,
+        predicted_high_time=datetime(2026, 5, 13, 11, 52, tzinfo=local_tz),
+        sigma_adjustment=1.0,
+        peak_already_passed=True,
+        composite_peak_timing="11:52 AM",
+        peak_timing_source="actual_observed",
+    )
+
+    model = compute_model(
+        nws_high=81.0,
+        wu_hourly_peak=79.0,
+        daily_high_metar=74.8,
+        current_temp_f=73.8,
+        calibration={
+            "station_rmse_f": 1.3,
+            "station_mae_f": 1.1,
+            "station_n_samples": 8,
+        },
+        buckets=[
+            (None, 75.0),
+            (76.0, 77.0),
+            (78.0, 79.0),
+            (80.0, 81.0),
+            (82.0, 83.0),
+            (84.0, None),
+        ],
+        forecast_quality="ok",
+        unit="F",
+        city_tz="America/New_York",
+        observed_high=74.8,
+        ml_features={
+            "temp_slope_3h": -0.5,
+            "avg_peak_timing_mins": 960.0,
+            "day_of_year": 133,
+        },
+        adaptive=adaptive,
+        latest_weather=None,
+        hrrr_high=80.0,
+        hrrr_15min_high=80.0,
+        nbm_high=79.2,
+        ecmwf_ifs_high=80.2,
+        gfs_graphcast_high=80.9,
+        now_utc=datetime(2026, 5, 13, 16, 27, tzinfo=timezone.utc),
+        event_settlement_utc=datetime(2026, 5, 14, 3, 59, tzinfo=timezone.utc),
+        regime_label="normal",
+    )
+
+    assert model is not None
+    assert model.lock_regime is False
+    assert model.inputs["lock_suppressed_reason"] == "pre_15_adaptive_peak_passed"
+    assert model.probs[0] < 0.10
 
 
 def test_compute_model_includes_hrrr_15min_source(monkeypatch):

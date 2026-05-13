@@ -447,7 +447,7 @@
       {% if model.inputs.get('observed_bucket_upper_f') is not none %}
       <span>Next Hotter: {{ "%.1f"|format(model.inputs.get('observed_bucket_upper_f')) }}°{{ city.unit|default('F') }}</span>
       {% endif %}
-      {% if model.inputs.get('lock_regime') %}
+      {% if model.inputs.get('lock_regime') and not model.inputs.get('lock_suppressed_reason') %}
       <span class="font-semibold" style="color:var(--cyan)">Late-Day Lock</span>
       {% endif %}
     </div>
@@ -530,42 +530,41 @@
   {% set excluded_sources = model.inputs.excluded_sources if model and model.inputs and model.inputs.excluded_sources else {} %}
   {% set source_quality_gates = model.inputs.source_quality_gates if model and model.inputs and model.inputs.source_quality_gates else {} %}
 
-  {% if excluded_sources or source_quality_gates %}
-  <div class="card p-3 mb-4 border-l-4" style="border-left-color:#FBBF24;background:rgba(234,179,8,0.08)">
-    <div class="flex items-center justify-between gap-2 mb-2">
-      <div class="flex items-center gap-2">
-        <span class="text-[10px] uppercase tracking-widest font-bold" style="color:#FBBF24">Forecast Source Excluded</span>
-        <span class="text-[10px]" style="color:var(--text-muted)">not used in live probabilities</span>
-      </div>
-      {% if model.inputs.trusted_reference_median is not none %}
-      <span class="mono text-[10px]" style="color:var(--text-muted)">trusted median {{ "%.1f"|format(model.inputs.trusted_reference_median) }}°{{ city.unit|default('F') }}</span>
-      {% endif %}
-    </div>
-    <div class="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
-      {% for src, reason in excluded_sources.items() %}
-      {% set gate = source_quality_gates.get(src) if source_quality_gates else none %}
-      <div class="panel rounded p-2 text-[11px]">
-        <div class="flex items-center justify-between gap-2">
-          <span class="font-semibold">{{ src.replace('_', ' ')|title }}</span>
-          <span class="text-[9px] uppercase tracking-widest px-1.5 py-0.5 rounded" style="background:rgba(234,179,8,0.14);color:#FDE047;border:1px solid rgba(234,179,8,0.28)">{{ reason }}</span>
-        </div>
-        {% if gate %}
-        <div class="mt-1 grid grid-cols-2 gap-x-3 gap-y-0.5 mono text-[10px]" style="color:var(--text-muted)">
-          {% if gate.value is not none %}<span>value {{ "%.1f"|format(gate.value) }}°</span>{% endif %}
-          {% if gate.reference is not none %}<span>ref {{ "%.1f"|format(gate.reference) }}°</span>{% endif %}
-          {% if gate.delta is not none %}<span>Δ {{ "%.1f"|format(gate.delta) }}°</span>{% endif %}
-          {% if gate.threshold is not none %}<span>limit {{ "%.1f"|format(gate.threshold) }}°</span>{% endif %}
-        </div>
-        {% endif %}
-      </div>
-      {% endfor %}
-    </div>
-  </div>
-  {% endif %}
-
   <!-- Forecast Sources Summary -->
   <div class="card p-4">
     <div class="text-[10px] uppercase tracking-widest mb-3" style="color:var(--text-muted)">Forecast Sources</div>
+    {% if excluded_sources or source_quality_gates %}
+    <div class="panel rounded p-2 mb-3 border-l-4" style="border-left-color:#FBBF24;background:rgba(234,179,8,0.08)">
+      <div class="flex items-center justify-between gap-2 mb-2">
+        <div class="flex items-center gap-2">
+          <span class="text-[10px] uppercase tracking-widest font-bold" style="color:#FBBF24">Forecast Source Excluded</span>
+          <span class="text-[10px]" style="color:var(--text-muted)">not used in live probabilities</span>
+        </div>
+        {% if model.inputs.trusted_reference_median is not none %}
+        <span class="mono text-[10px]" style="color:var(--text-muted)">trusted median {{ "%.1f"|format(model.inputs.trusted_reference_median) }}°{{ city.unit|default('F') }}</span>
+        {% endif %}
+      </div>
+      <div class="grid gap-2">
+        {% for src, reason in excluded_sources.items() %}
+        {% set gate = source_quality_gates.get(src) if source_quality_gates else none %}
+        <div class="rounded p-2 text-[11px]" style="background:var(--bg-card);border:1px solid var(--border)">
+          <div class="flex items-center justify-between gap-2">
+            <span class="font-semibold">{{ src.replace('_', ' ')|title }}</span>
+            <span class="text-[9px] uppercase tracking-widest px-1.5 py-0.5 rounded" style="background:rgba(234,179,8,0.14);color:#FDE047;border:1px solid rgba(234,179,8,0.28)">{{ reason }}</span>
+          </div>
+          {% if gate %}
+          <div class="mt-1 grid grid-cols-2 gap-x-3 gap-y-0.5 mono text-[10px]" style="color:var(--text-muted)">
+            {% if gate.value is not none %}<span>value {{ "%.1f"|format(gate.value) }}°</span>{% endif %}
+            {% if gate.reference is not none %}<span>ref {{ "%.1f"|format(gate.reference) }}°</span>{% endif %}
+            {% if gate.delta is not none %}<span>Δ {{ "%.1f"|format(gate.delta) }}°</span>{% endif %}
+            {% if gate.threshold is not none %}<span>limit {{ "%.1f"|format(gate.threshold) }}°</span>{% endif %}
+          </div>
+          {% endif %}
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
     {% macro skill_block(skill) %}
       {% if skill %}
       <div class="w-full mt-1 pt-2 border-t" style="border-color:var(--border)">
