@@ -222,6 +222,7 @@ Tiered exits track `original_qty`, `tier_1_exited`, `tier_2_exited`, `moon_bag_q
 
 - **Model Forecast box** — legacy μ ± σ. Below it, a yellow **BMA shadow** row shows mixture μ ± σ, between-source variance share, fallback indicator, Δμ/Δσ vs legacy, and (click ⓘ) a per-component breakdown (source · μ · σ · weight · n_obs).
 - **Forecast Sources box** — per-source value, model_run_at age, lead time, asterisk badge for experimental sources (AIFS, GraphCast, Pangu, FCN-v2). Per-station skill block shows weight, MAE 7d/30d.
+- **Lead-Time Skill panel** — collapsed by default when populated; expands to show per-source/lead MAE, bias, and sample count. Empty state stays open with the manual refresh diagnostic.
 - **Buckets & Edges table** — Range / Mkt / Model / **BMA** / EV / Kelly / actions. The BMA column shows mixture probability with an inline ±pp delta when |BMA − Model| > 5pp. A `multimodal` chip appears in the table header when between-source variance share > 50%. Action buttons: ▶ for normal-gate trade, ⚡ for override-trade (writes audit row).
 - **Station-time predictions table** — predicted ASOS reading at each remaining observation minute, with Kalman trend arrow and ±confidence.
 - **Temperature timeline chart** — Plotly. Blue dots = 5-min obs, gold diamonds = station-minute obs, cyan dashed = future predictions.

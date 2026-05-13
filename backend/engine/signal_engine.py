@@ -59,6 +59,64 @@ log = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")
 
 
+def _forecast_skill_reference_time(obs) -> Optional[datetime]:
+    """Timestamp used for live lead-skill and freshness lookups.
+
+    Most NWP sources expose a model initialization time. API-style sources
+    such as WU hourly do not, but their historical skill is scored by when the
+    forecast was fetched, so use fetched_at as the live fallback.
+    """
+    for attr in ("model_run_at", "fetched_at"):
+        ts = getattr(obs, attr, None)
+        if ts is None:
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return ts.astimezone(timezone.utc)
+    return None
+
+
+def _build_source_timing_metadata(
+    src_to_obs: dict[str, object],
+    lead_skills_by_key: dict,
+    settlement_utc: datetime,
+) -> tuple[dict[str, datetime], dict[str, Optional[float]], dict[str, int], dict[str, int]]:
+    """Build per-source timestamps and lead-skill maps for compute_model().
+
+    The returned timestamp map is passed to compute_model's legacy
+    `model_run_at_by_source` argument, but it is intentionally a freshness
+    reference time: model_run_at when available, fetched_at otherwise.
+    """
+    freshness_time_by_source: dict[str, datetime] = {}
+    lead_skill_mae_by_source: dict[str, Optional[float]] = {}
+    lead_skill_n_obs_by_source: dict[str, int] = {}
+    lead_bucket_by_source: dict[str, int] = {}
+
+    for src, obs in src_to_obs.items():
+        if obs is None or getattr(obs, "high_f", None) is None:
+            continue
+        ref_time = _forecast_skill_reference_time(obs)
+        if ref_time is None:
+            continue
+
+        freshness_time_by_source[src] = ref_time
+        lead_h = max(0.0, (settlement_utc - ref_time).total_seconds() / 3600.0)
+        bucket = bucket_lead_time(lead_h)
+        lead_bucket_by_source[src] = bucket
+
+        skill = lead_skills_by_key.get((src, bucket))
+        if skill is not None:
+            lead_skill_mae_by_source[src] = skill.mae_f
+            lead_skill_n_obs_by_source[src] = skill.n_obs
+
+    return (
+        freshness_time_by_source,
+        lead_skill_mae_by_source,
+        lead_skill_n_obs_by_source,
+        lead_bucket_by_source,
+    )
+
+
 @dataclass
 class BucketSignal:
     city_slug: str
@@ -485,27 +543,16 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         "fourcastnet_v2": fourcastnet_v2_obs,
         "aurora": aurora_obs,
     }
-    model_run_at_by_source: dict[str, datetime] = {}
-    lead_skill_mae_by_source: dict[str, Optional[float]] = {}
-    lead_skill_n_obs_by_source: dict[str, int] = {}
-    # M1 Phase 2 — track each source's lead-bucket so we can pick a
-    # representative bucket for the BMA fitted-weights fetch below.
-    lead_bucket_by_source: dict[str, int] = {}
-    for _src, _obs in _src_to_obs.items():
-        if _obs is None or _obs.high_f is None:
-            continue
-        _mr = getattr(_obs, "model_run_at", None)
-        if _mr is not None:
-            if _mr.tzinfo is None:
-                _mr = _mr.replace(tzinfo=timezone.utc)
-            model_run_at_by_source[_src] = _mr
-            _lead_h = max(0.0, (_settlement_utc - _mr).total_seconds() / 3600.0)
-            _bucket = bucket_lead_time(_lead_h)
-            lead_bucket_by_source[_src] = _bucket
-            _skill = lead_skills_by_key.get((_src, _bucket))
-            if _skill is not None:
-                lead_skill_mae_by_source[_src] = _skill.mae_f
-                lead_skill_n_obs_by_source[_src] = _skill.n_obs
+    (
+        model_run_at_by_source,
+        lead_skill_mae_by_source,
+        lead_skill_n_obs_by_source,
+        lead_bucket_by_source,
+    ) = _build_source_timing_metadata(
+        _src_to_obs,
+        lead_skills_by_key,
+        _settlement_utc,
+    )
 
     # M1 Phase 2 — fetch EM-fit BMA weights for the operative lead bucket.
     # Pick the median lead bucket across active sources; that single fit

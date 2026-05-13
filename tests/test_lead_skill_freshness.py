@@ -18,6 +18,8 @@ from backend.modeling.temperature_model import (
     _lead_skill_factors,
     compute_model,
 )
+from backend.engine.signal_engine import _build_source_timing_metadata
+from backend.storage.models import ForecastObs, SourceLeadTimeSkill
 
 
 # ── _lead_skill_factors: pure-logic tests ───────────────────────────────
@@ -118,6 +120,59 @@ def test_freshness_tau_differs_per_source():
     hrrr = _freshness_factor("hrrr", age)
     ecmwf = _freshness_factor("ecmwf_ifs", age)
     assert ecmwf > hrrr
+
+
+def test_wu_hourly_uses_fetched_at_for_lead_skill_and_bma_sigma_note():
+    """WU hourly has no model_run_at, but should still find lead-skill rows."""
+    settlement_utc = datetime(2026, 5, 13, 23, 59, 59, tzinfo=timezone.utc)
+    fetched_at = settlement_utc - timedelta(hours=24, minutes=5)
+    wu_forecast = ForecastObs(
+        city_id=1,
+        source="wu_hourly",
+        date_et="2026-05-13",
+        high_f=85.4,
+        model_run_at=None,
+        fetched_at=fetched_at,
+    )
+    wu_skill = SourceLeadTimeSkill(
+        city_id=1,
+        source="wu_hourly",
+        lead_time_bucket_hours=24,
+        mae_f=2.4,
+        n_obs=5,
+    )
+
+    freshness_times, skill_mae, skill_n, lead_buckets = _build_source_timing_metadata(
+        {"wu_hourly": wu_forecast},
+        {("wu_hourly", 24): wu_skill},
+        settlement_utc,
+    )
+
+    assert freshness_times["wu_hourly"] == fetched_at
+    assert lead_buckets["wu_hourly"] == 24
+    assert skill_mae["wu_hourly"] == 2.4
+    assert skill_n["wu_hourly"] == 5
+
+    model = compute_model(
+        nws_high=77.5,
+        wu_hourly_peak=85.4,
+        hrrr_high=None,
+        nbm_high=None,
+        ecmwf_ifs_high=None,
+        daily_high_metar=None,
+        current_temp_f=70.0,
+        calibration={"weight_nws": 0.5, "weight_wu_hourly": 0.5},
+        buckets=[(74.0, 76.0), (76.0, 78.0), (78.0, 80.0), (80.0, None)],
+        model_run_at_by_source=freshness_times,
+        lead_skill_mae_by_source=skill_mae,
+        lead_skill_n_obs_by_source=skill_n,
+        now_utc=settlement_utc - timedelta(hours=20),
+    )
+
+    assert model is not None
+    bma_notes = model.inputs["bma_shadow"]["notes"]
+    assert "wu_hourly: no SourceLeadTimeSkill row, σ=prior" not in bma_notes
+    assert "wu_hourly: n=5<30, σ=prior" in bma_notes
 
 
 # ── compute_model end-to-end shape checks ───────────────────────────────

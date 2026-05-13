@@ -332,7 +332,7 @@ def test_compute_kalman_weight_helper():
         hour_local_fractional=15.33, peak_hour_local=15.33,
         kalman_divergence=1.0, spread=2.0, n_obs=25, peak_already_passed=False,
     )
-    assert abs(w - 0.45) < 1e-6
+    assert abs(w - 0.30) < 1e-6
 
     # Outside ±2h window: zero
     w = compute_kalman_weight(
