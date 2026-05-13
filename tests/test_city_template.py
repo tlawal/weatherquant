@@ -13,3 +13,7 @@ def test_source_exclusion_alert_stays_inside_forecast_sources_card():
     assert forecast_card.index("Forecast Sources</div>") < forecast_card.index(
         "Forecast Source Excluded"
     )
+    assert forecast_card.index("HRRR 15min") < forecast_card.index(
+        "Forecast Source Excluded"
+    )
+    assert forecast_card.rindex("<details", 0, forecast_card.index("Forecast Source Excluded")) > 0
