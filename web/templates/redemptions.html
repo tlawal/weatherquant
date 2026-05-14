@@ -111,6 +111,31 @@
 </a>
 </details>
 
+<!-- Closed Trade Analytics -->
+<details class="mb-6" id="performance-details">
+  <summary class="cursor-pointer text-xs font-bold uppercase tracking-wider mb-2" style="color:var(--text-muted)">
+    Closed trade analytics
+  </summary>
+  <div class="card p-4">
+    <div class="flex items-start justify-between gap-3 flex-wrap mb-3">
+      <div>
+        <div class="text-[0.6rem] font-bold tracking-wider uppercase" style="color:var(--text-muted)">Performance ledger</div>
+        <div id="perf-status" class="text-xs font-mono text-gray-500">Loading closed trades...</div>
+      </div>
+      <a href="/api/performance/trades" target="_blank" class="text-xs font-mono text-cyan-400 hover:underline">Raw trades JSON</a>
+    </div>
+    <div class="grid grid-cols-2 md:grid-cols-6 gap-2 mb-4">
+      <div class="rounded border border-[var(--border)] p-3 bg-black/20"><div class="text-[0.55rem] uppercase text-gray-500 font-bold">Trades</div><div id="perf-trades" class="text-lg font-mono font-bold">--</div></div>
+      <div class="rounded border border-[var(--border)] p-3 bg-black/20"><div class="text-[0.55rem] uppercase text-gray-500 font-bold">P&L</div><div id="perf-pnl" class="text-lg font-mono font-bold">--</div></div>
+      <div class="rounded border border-[var(--border)] p-3 bg-black/20"><div class="text-[0.55rem] uppercase text-gray-500 font-bold">Win Rate</div><div id="perf-win" class="text-lg font-mono font-bold">--</div></div>
+      <div class="rounded border border-[var(--border)] p-3 bg-black/20"><div class="text-[0.55rem] uppercase text-gray-500 font-bold">Profit Factor</div><div id="perf-pf" class="text-lg font-mono font-bold">--</div></div>
+      <div class="rounded border border-[var(--border)] p-3 bg-black/20"><div class="text-[0.55rem] uppercase text-gray-500 font-bold">Sharpe</div><div id="perf-sharpe" class="text-lg font-mono font-bold">--</div></div>
+      <div class="rounded border border-[var(--border)] p-3 bg-black/20"><div class="text-[0.55rem] uppercase text-gray-500 font-bold">Foregone</div><div id="perf-foregone" class="text-lg font-mono font-bold">--</div></div>
+    </div>
+    <div id="perf-breakdowns" class="grid md:grid-cols-3 gap-3 text-xs font-mono"></div>
+  </div>
+</details>
+
 <!-- FILTER TABS -->
 <div class="flex items-center gap-2 mb-4 border-b border-[var(--border)] pb-2 font-mono text-sm" id="filter-tabs">
   <button onclick="setFilter('ALL')" class="filter-tab px-3 py-1 rounded bg-[var(--bg-panel)] text-[var(--cyan)] font-bold border border-[var(--cyan)]" data-filter="ALL">ALL POSITIONS</button>
@@ -318,6 +343,49 @@ function syncBadge(status) {
   return `<span class="text-[0.58rem] px-1.5 py-0.5 rounded font-bold uppercase border" style="color:${s.color};border-color:${s.color}">${s.text}</span>`;
 }
 
+function planBadge(plan) {
+  const state = (plan && plan.state) || 'monitoring';
+  const label = (plan && plan.label) || 'MONITORING';
+  const colors = {
+    hold_winner: 'var(--green)',
+    passive_sell: 'var(--yellow)',
+    risk_exit_armed: 'var(--red)',
+    exit_blocked: 'var(--cyan)',
+    redeemable: 'var(--green)',
+    stale_db: 'var(--red)',
+    awaiting_resolution: 'var(--yellow)',
+    monitoring: 'var(--text-muted)',
+  };
+  const color = colors[state] || 'var(--text-muted)';
+  return `<span class="text-[0.58rem] px-1.5 py-0.5 rounded font-bold uppercase border" style="color:${color};border-color:${color}">${esc(label)}</span>`;
+}
+
+function exitPlanDetails(b) {
+  const p = b.exit_plan || {};
+  const journal = (b.exit_events || []).map(e => `
+    <div class="border-t border-[rgba(255,255,255,0.08)] pt-1 mt-1">
+      <div class="text-gray-300">${esc(e.level)} · ${esc(e.reason)} · ${esc(e.execution_status || '')}</div>
+      <div class="text-gray-500">${e.ts ? new Date(e.ts).toLocaleString() : '--'} · exited ${Number(e.shares_exited || 0).toFixed(2)} · bid ${e.market_bid == null ? '--' : '$' + Number(e.market_bid).toFixed(3)}</div>
+    </div>
+  `).join('') || '<div class="text-gray-500">No exit events recorded yet.</div>';
+  const sellNow = p.sell_now_pnl === null || p.sell_now_pnl === undefined ? '--' : `${Number(p.sell_now_pnl) >= 0 ? '+' : ''}${fmtUsd(p.sell_now_pnl)}`;
+  const holdWin = p.hold_to_redeem_pnl_if_win === null || p.hold_to_redeem_pnl_if_win === undefined ? '--' : `${Number(p.hold_to_redeem_pnl_if_win) >= 0 ? '+' : ''}${fmtUsd(p.hold_to_redeem_pnl_if_win)}`;
+  return `
+    <details class="mt-2 text-[0.58rem] font-normal text-gray-400">
+      <summary class="cursor-pointer text-cyan-400 font-bold">Exit plan</summary>
+      <div class="mt-2 space-y-1">
+        <div>${planBadge(p)} <span class="text-gray-500">${esc(p.next_trigger || '')}</span></div>
+        <div>Prob ${p.model_prob == null ? '--' : (Number(p.model_prob) * 100).toFixed(1) + '%'} · EV@bid ${p.ev_at_bid == null ? '--' : Number(p.ev_at_bid).toFixed(3)} · edge ${p.true_edge == null ? '--' : Number(p.true_edge).toFixed(3)}</div>
+        <div>Bid ${p.live_bid == null ? '--' : '$' + Number(p.live_bid).toFixed(3)} · Ask ${p.live_ask == null ? '--' : '$' + Number(p.live_ask).toFixed(3)} · Spread ${p.spread == null ? '--' : (Number(p.spread) * 100).toFixed(1) + 'c'} · Age ${p.snapshot_age_s == null ? '--' : Math.round(Number(p.snapshot_age_s)) + 's'}</div>
+        <div>Observed high ${p.observed_high_f == null ? '--' : Number(p.observed_high_f).toFixed(1) + '\u00B0F'} · Bucket ${esc(p.bucket_lock_status || '--')}</div>
+        <div>Sell now P&L ${sellNow} · Hold-if-win P&L ${holdWin}</div>
+        <div class="mt-2 text-gray-500 font-bold uppercase tracking-wider">Journal</div>
+        ${journal}
+      </div>
+    </details>
+  `;
+}
+
 function esc(v) {
   return String(v ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 }
@@ -473,6 +541,15 @@ function sectionTable(rows) {
     const statText = b.current_exit_status || b.action_reason || (evt.status !== 'open' ? 'Awaiting operator reconciliation' : 'Monitoring');
     const statColor = statText.includes('triggered') || statText.includes('absent') ? 'text-red-400' : statText.includes('Monitoring') ? 'text-green-400' : 'text-gray-400';
     const staleTint = b.sync_status === 'missing_on_chain' ? 'bg-red-950/20' : '';
+    const entryStrategy = b.entry_strategy || b.strategy || (bType === 'MANUAL' ? 'manual' : 'auto');
+    const plan = b.exit_plan || {};
+    const planHtml = `
+      <div class="space-y-1">
+        ${planBadge(plan)}
+        <div class="${statColor}">${esc(statText)}</div>
+        ${exitPlanDetails(b)}
+      </div>
+    `;
 
     return `
       <tr class="hover:bg-[rgba(255,255,255,0.02)] transition-colors ${staleTint}">
@@ -486,6 +563,7 @@ function sectionTable(rows) {
         <td class="py-2 px-2 lg:py-3 lg:px-4 align-top">
           <div class="text-gray-300 text-[0.75rem] font-semibold">$${Number(b.avg_cost || 0).toFixed(3)} at ${eTime}</div>
           <div class="mt-1 flex items-center gap-2">${typeBadge} <span class="font-bold text-[0.65rem]" style="color:var(--cyan)">${qtyStr}</span></div>
+          <div class="mt-1 text-[0.55rem] text-gray-500 uppercase tracking-wider">${esc(entryStrategy)}</div>
         </td>
         <td class="py-2 px-2 lg:py-3 lg:px-4 align-top hidden lg:table-cell">
           <div class="font-bold text-purple-400 text-[0.7rem] uppercase tracking-wider">${esc(b.strategy || (bType === 'MANUAL' ? 'Ungoverned' : 'Default-Cascade'))}</div>
@@ -501,7 +579,7 @@ function sectionTable(rows) {
           <div class="text-[0.8rem]" style="color:${pnlColor}">${pnl > 0 ? '+' : ''}${fmtUsd(pnl)}<br/><span class="text-[0.6rem] font-normal">(${pnl > 0 ? '+' : ''}${pnlPct.toFixed(1)}%)</span></div>
         </td>
         <td class="py-2 px-2 lg:py-3 lg:px-4 w-52 align-top text-[0.65rem] font-bold tracking-tight whitespace-normal leading-tight h-full bg-[rgba(255,255,255,0.01)] border-l border-[rgba(255,255,255,0.03)] hidden lg:table-cell ${statColor}">
-          ${esc(statText)}
+          ${planHtml}
         </td>
         <td class="py-2 px-2 lg:py-3 lg:px-4 align-top text-center w-28">
           <div class="mb-1">${badge(evt.status)}</div>
@@ -571,6 +649,46 @@ function renderSections() {
 
   root.classList.remove('hidden');
   document.getElementById('empty').classList.add('hidden');
+}
+
+async function loadPerformance() {
+  try {
+    const res = await fetch('/api/performance/summary');
+    if (!res.ok) throw new Error(String(res.status));
+    const d = await res.json();
+    const status = d.sample_status === 'provisional'
+      ? `Provisional until 30 trades · ${d.total_trades || 0} closed trades`
+      : `${d.total_trades || 0} closed trades`;
+    document.getElementById('perf-status').textContent = status;
+    document.getElementById('perf-trades').textContent = d.total_trades || 0;
+    const pnl = Number(d.total_pnl || 0);
+    document.getElementById('perf-pnl').innerHTML = `${pnl >= 0 ? '+' : ''}${fmtUsd(pnl)}`;
+    document.getElementById('perf-pnl').className = `text-lg font-mono font-bold ${pnl >= 0 ? 'text-green-400' : 'text-red-400'}`;
+    document.getElementById('perf-win').textContent = `${((d.win_rate || 0) * 100).toFixed(1)}%`;
+    document.getElementById('perf-pf').textContent = Number.isFinite(Number(d.profit_factor)) ? Number(d.profit_factor).toFixed(2) : 'inf';
+    document.getElementById('perf-sharpe').textContent = Number(d.sharpe_ratio || 0).toFixed(2);
+    const foregone = Number(d.total_foregone_pnl || 0);
+    document.getElementById('perf-foregone').innerHTML = `${foregone >= 0 ? '+' : ''}${fmtUsd(foregone)}`;
+    const bd = d.breakdowns || {};
+    const blocks = [
+      ['By City', bd.city || []],
+      ['By Entry', bd.entry_strategy || []],
+      ['By Exit', bd.exit_reason || []],
+    ].map(([title, rows]) => `
+      <div class="rounded border border-[var(--border)] p-3 bg-black/20">
+        <div class="text-[0.58rem] font-bold uppercase tracking-wider mb-2" style="color:var(--text-muted)">${title}</div>
+        ${(rows || []).slice(0, 5).map(r => `
+          <div class="flex justify-between gap-2 border-t border-[rgba(255,255,255,0.06)] py-1">
+            <span class="truncate">${esc(r.key)}</span>
+            <span class="${Number(r.total_pnl || 0) >= 0 ? 'text-green-400' : 'text-red-400'}">${Number(r.total_pnl || 0) >= 0 ? '+' : ''}${fmtUsd(r.total_pnl || 0)}</span>
+          </div>
+        `).join('') || '<div class="text-gray-500">No closed trades yet.</div>'}
+      </div>
+    `).join('');
+    document.getElementById('perf-breakdowns').innerHTML = blocks;
+  } catch (e) {
+    document.getElementById('perf-status').textContent = `Performance unavailable: ${e.message}`;
+  }
 }
 
 // ── Data Loading ─────────────────────────────────────────────────────────────
@@ -755,5 +873,6 @@ async function marketSell(conditionId, qty, citySlug, bucketId, btn) {
 }
 
 loadEvents();
+loadPerformance();
 </script>
 {% endblock %}

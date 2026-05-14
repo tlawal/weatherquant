@@ -1282,7 +1282,7 @@ async def _build_redemptions_payload(
     is down or slow.
     """
     from sqlalchemy import select
-    from backend.storage.models import Bucket, City, Event, Position
+    from backend.storage.models import Bucket, City, Event, ExitEvent, Position
     from backend.storage.repos import get_all_station_calibrations, get_heartbeat
 
     total_t0 = time.perf_counter()
@@ -1303,8 +1303,18 @@ async def _build_redemptions_payload(
         )
         pos_rows = list(result.all())
         bucket_ids = [bucket.id for _, bucket, _, _ in pos_rows]
+        position_ids = [pos.id for pos, _, _, _ in pos_rows if pos.id]
         snap_map = await get_latest_market_snapshots_bulk(sess, bucket_ids)
         sig_map = await get_latest_signals_for_buckets(sess, bucket_ids)
+        exit_events_by_pos: dict[int, list[ExitEvent]] = {}
+        if position_ids:
+            exit_rows = (await sess.execute(
+                select(ExitEvent)
+                .where(ExitEvent.position_id.in_(position_ids))
+                .order_by(ExitEvent.position_id.asc(), ExitEvent.ts.desc())
+            )).scalars().all()
+            for exit_event in exit_rows:
+                exit_events_by_pos.setdefault(exit_event.position_id, []).append(exit_event)
         all_cals = await get_all_station_calibrations(sess)
         arming = await get_arming_state(sess)
         hb = await get_heartbeat(sess, "run_exit_engine")
@@ -1367,6 +1377,12 @@ async def _build_redemptions_payload(
         api_price = api_price_by_cid.get(cid, 0.0)
         snap = snap_map.get(bucket.id)
         sig = sig_map.get(bucket.id)
+        sig_reason = {}
+        if sig and sig.reason_json:
+            try:
+                sig_reason = json.loads(sig.reason_json)
+            except Exception:
+                sig_reason = {}
         cal = cal_by_slug.get(city.city_slug)
 
         snap_price = _float_or_zero(snap.yes_mid) if snap else 0.0
@@ -1439,6 +1455,81 @@ async def _build_redemptions_payload(
             action_reason = "No live bid/liquidity available for direct exit."
 
         exit_strategy = None
+        exit_events_payload = []
+        for exit_event in exit_events_by_pos.get(pos.id, [])[:8]:
+            try:
+                event_reason = json.loads(exit_event.reason_json) if exit_event.reason_json else {}
+            except Exception:
+                event_reason = {}
+            exit_events_payload.append({
+                "ts": exit_event.ts.isoformat() if exit_event.ts else None,
+                "level": exit_event.trigger_level,
+                "reason": exit_event.trigger_reason,
+                "execution_status": event_reason.get("execution_status"),
+                "shares_exited": exit_event.shares_exited,
+                "shares_remaining": exit_event.shares_remaining,
+                "market_bid": exit_event.market_bid,
+                "market_ask": exit_event.market_ask,
+                "ev_at_bid_pre": exit_event.ev_at_bid_pre,
+            })
+
+        entry_decision = {}
+        if pos.entry_decision_json:
+            try:
+                entry_decision = json.loads(pos.entry_decision_json)
+            except Exception:
+                entry_decision = {}
+
+        observed_high = (
+            sig_reason.get("resolution_high_f")
+            or sig_reason.get("resolution_high")
+            or sig_reason.get("ground_truth_high_f")
+            or sig_reason.get("ground_truth_high")
+            or sig_reason.get("raw_high")
+            or sig_reason.get("observed_high_f")
+        )
+        held_prob = _float_or_zero(sig.model_prob) if sig else None
+        ev_at_bid = sig.ev_at_bid if sig else None
+        sell_now_pnl = _float_or_zero(pos.net_qty) * (live_bid - _float_or_zero(pos.avg_cost)) if live_bid > 0 else None
+        hold_to_redeem_pnl = _float_or_zero(pos.net_qty) * (1.0 - _float_or_zero(pos.avg_cost))
+        exit_plan = {
+            "state": "monitoring",
+            "label": "Monitoring",
+            "next_trigger": "Tier target, consensus shift, edge decay, or expiry decision",
+            "reason": None,
+            "model_prob": held_prob,
+            "market_prob": _float_or_zero(sig.mkt_prob) if sig else None,
+            "true_edge": sig.true_edge if sig else None,
+            "ev_at_bid": ev_at_bid,
+            "live_bid": live_bid,
+            "live_ask": _float_or_zero(snap.yes_ask) if snap else 0.0,
+            "spread": live_spread,
+            "bid_depth": _float_or_zero(snap.yes_bid_depth) if snap else 0.0,
+            "ask_depth": _float_or_zero(snap.yes_ask_depth) if snap else 0.0,
+            "snapshot_age_s": _age_seconds(snap.fetched_at) if snap else None,
+            "observed_high_f": observed_high,
+            "bucket_lock_status": "winner" if is_winner else ("resolved_other_bucket" if evt.winning_bucket_idx is not None else event_status),
+            "sell_now_pnl": round(sell_now_pnl, 4) if sell_now_pnl is not None else None,
+            "hold_to_redeem_pnl_if_win": round(hold_to_redeem_pnl, 4),
+            "entry_strategy": pos.entry_strategy or entry_decision.get("entry_strategy") or pos.strategy,
+        }
+        if sync_status == "redeemable":
+            exit_plan.update({"state": "redeemable", "label": "REDEEMABLE", "next_trigger": "Redeem or sweep winners"})
+        elif sync_status == "missing_on_chain":
+            exit_plan.update({"state": "stale_db", "label": "STALE DB", "next_trigger": "Sync wallet or mark closed"})
+        elif pos.current_exit_status and "HOLD_TO_REDEEM" in pos.current_exit_status:
+            exit_plan.update({"state": "hold_winner", "label": "HOLD WINNER", "next_trigger": "Redeem after UMA/Gamma determination"})
+        elif pos.current_exit_status and "EXIT_BLOCKED" in pos.current_exit_status:
+            exit_plan.update({"state": "exit_blocked", "label": "EXIT BLOCKED", "next_trigger": "Re-evaluate when EV or observations change"})
+        elif held_prob is not None and held_prob >= Config.EXPIRY_WINNER_HOLD_MIN_PROB:
+            exit_plan.update({"state": "hold_winner", "label": "HOLD WINNER", "next_trigger": f"Passive sell only if bid >= ${Config.EXPIRY_PASSIVE_SELL_MIN_BID:.2f}"})
+        elif live_bid >= Config.EXPIRY_PASSIVE_SELL_MIN_BID:
+            exit_plan.update({"state": "passive_sell", "label": f"PASSIVE SELL @ {live_bid:.2f}", "next_trigger": "Profit-taking limit at current bid"})
+        elif ev_at_bid is not None and ev_at_bid > 0:
+            exit_plan.update({"state": "exit_blocked", "label": "EXIT BLOCKED", "next_trigger": "Positive EV at bid blocks non-emergency loss exits"})
+        elif event_status != "open":
+            exit_plan.update({"state": "awaiting_resolution", "label": "AWAIT UMA", "next_trigger": "Check UMA/Gamma determination"})
+
         if sig:
             exit_strategy = {
                 "type": "default",
@@ -1446,6 +1537,7 @@ async def _build_redemptions_payload(
                 "cut_loss_temp_low": bucket.low_f - 3.0 if bucket.low_f is not None else None,
                 "take_profit_price": round(_float_or_zero(pos.avg_cost) + Config.QUICK_FLIP_TARGET, 3),
                 "expiry_time": "19:30 Local",
+                "expiry_policy": "Hold likely winners; passive sell near par; risk-exit ambiguous buckets only.",
             }
 
         event_payload = grouped.setdefault(evt.id, {
@@ -1499,8 +1591,12 @@ async def _build_redemptions_payload(
             "is_winner": is_winner,
             "on_chain_determined": on_chain_determined,
             "exit_strategy": exit_strategy,
+            "exit_plan": exit_plan,
+            "exit_events": exit_events_payload,
+            "entry_decision": entry_decision,
             "entry_type": pos.entry_type,
             "strategy": pos.strategy,
+            "entry_strategy": pos.entry_strategy or entry_decision.get("entry_strategy"),
             "governing_exit_conditions": pos.governing_exit_conditions,
             "current_exit_status": pos.current_exit_status,
             "entry_time": pos.entry_time.isoformat() if pos.entry_time and hasattr(pos.entry_time, "isoformat") else pos.entry_time,
@@ -1551,7 +1647,17 @@ async def _build_redemptions_payload(
                     "snapshot_stale": True,
                     "is_winner": cur_price >= 0.999,
                     "on_chain_determined": None,
+                    "exit_plan": {
+                        "state": "redeemable" if api_pos.get("redeemable") else "monitoring",
+                        "label": "REDEEMABLE" if api_pos.get("redeemable") else "WALLET ONLY",
+                        "next_trigger": "Redeem or reconcile wallet-only position",
+                        "sell_now_pnl": None,
+                        "hold_to_redeem_pnl_if_win": round(size * (1.0 - avg_price), 4),
+                    },
+                    "exit_events": [],
+                    "entry_decision": {},
                     "entry_type": "MANUAL",
+                    "entry_strategy": None,
                     "strategy": None,
                     "governing_exit_conditions": None,
                     "current_exit_status": None,
@@ -1624,6 +1730,23 @@ async def redemptions_onchain():
         include_missing_wallet_positions=True,
         include_onchain=True,
     )
+
+
+@router.get("/api/performance/trades")
+async def performance_trades(limit: int = 200):
+    from backend.execution.performance import get_closed_trade_rows
+
+    limit = max(1, min(limit, 1000))
+    async with get_session() as sess:
+        return {"trades": await get_closed_trade_rows(sess, limit=limit)}
+
+
+@router.get("/api/performance/summary")
+async def performance_summary():
+    from backend.execution.performance import get_performance_summary
+
+    async with get_session() as sess:
+        return await get_performance_summary(sess)
 
 
 @router.post("/api/positions/{position_id}/mark-closed")
@@ -2595,6 +2718,10 @@ class ConfigUpdate(BaseModel):
     urgent_exit_max_spread: Optional[float] = None
     consensus_debounce_runs: Optional[int] = None
     expiry_discount: Optional[float] = None
+    expiry_winner_hold_min_prob: Optional[float] = None
+    expiry_passive_sell_min_bid: Optional[float] = None
+    expiry_market_win_min_bid: Optional[float] = None
+    expiry_risk_exit_max_discount: Optional[float] = None
 
 
 @router.post("/config")
@@ -2661,6 +2788,30 @@ async def update_config(body: ConfigUpdate, actor: str = Depends(require_admin))
         Config.EXPIRY_DISCOUNT = body.expiry_discount
         updates["expiry_discount"] = body.expiry_discount
 
+    if body.expiry_winner_hold_min_prob is not None:
+        if not (0.50 <= body.expiry_winner_hold_min_prob <= 0.99):
+            raise HTTPException(status_code=400, detail="expiry_winner_hold_min_prob must be in [0.50, 0.99]")
+        Config.EXPIRY_WINNER_HOLD_MIN_PROB = body.expiry_winner_hold_min_prob
+        updates["expiry_winner_hold_min_prob"] = body.expiry_winner_hold_min_prob
+
+    if body.expiry_passive_sell_min_bid is not None:
+        if not (0.80 <= body.expiry_passive_sell_min_bid <= 1.00):
+            raise HTTPException(status_code=400, detail="expiry_passive_sell_min_bid must be in [0.80, 1.00]")
+        Config.EXPIRY_PASSIVE_SELL_MIN_BID = body.expiry_passive_sell_min_bid
+        updates["expiry_passive_sell_min_bid"] = body.expiry_passive_sell_min_bid
+
+    if body.expiry_market_win_min_bid is not None:
+        if not (0.80 <= body.expiry_market_win_min_bid <= 1.00):
+            raise HTTPException(status_code=400, detail="expiry_market_win_min_bid must be in [0.80, 1.00]")
+        Config.EXPIRY_MARKET_WIN_MIN_BID = body.expiry_market_win_min_bid
+        updates["expiry_market_win_min_bid"] = body.expiry_market_win_min_bid
+
+    if body.expiry_risk_exit_max_discount is not None:
+        if not (0.0 <= body.expiry_risk_exit_max_discount <= 0.05):
+            raise HTTPException(status_code=400, detail="expiry_risk_exit_max_discount must be in [0.0, 0.05]")
+        Config.EXPIRY_RISK_EXIT_MAX_DISCOUNT = body.expiry_risk_exit_max_discount
+        updates["expiry_risk_exit_max_discount"] = body.expiry_risk_exit_max_discount
+
     async with get_session() as sess:
         await append_audit(sess, actor=actor, action="config_updated", payload=updates)
 
@@ -2677,6 +2828,10 @@ async def update_config(body: ConfigUpdate, actor: str = Depends(require_admin))
             "urgent_exit_max_spread": Config.URGENT_EXIT_MAX_SPREAD,
             "consensus_debounce_runs": Config.CONSENSUS_DEBOUNCE_RUNS,
             "expiry_discount": Config.EXPIRY_DISCOUNT,
+            "expiry_winner_hold_min_prob": Config.EXPIRY_WINNER_HOLD_MIN_PROB,
+            "expiry_passive_sell_min_bid": Config.EXPIRY_PASSIVE_SELL_MIN_BID,
+            "expiry_market_win_min_bid": Config.EXPIRY_MARKET_WIN_MIN_BID,
+            "expiry_risk_exit_max_discount": Config.EXPIRY_RISK_EXIT_MAX_DISCOUNT,
         }
         try:
             from backend.storage.repos import save_runtime_config

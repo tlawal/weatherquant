@@ -87,6 +87,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 from backend.engine.signal_engine import BucketSignal
 
@@ -281,3 +282,89 @@ def test_cascade_no_action_when_signal_has_no_ev_at_bid(stub_db):
 
     result = _run(ee._run_exit_cascade_for_position(pos, signal, None, None))
     assert result is None
+
+
+def test_expiry_likely_winner_passive_sell_not_ten_cent_dump(stub_db, monkeypatch):
+    """Near close, a likely winner may be passively offered near par, not dumped 10c below bid."""
+    now = datetime(2026, 5, 13, 19, 49, tzinfo=ZoneInfo("America/New_York"))
+    monkeypatch.setattr("backend.execution.exit_engine.city_local_now", lambda city: now)
+    pos = _make_position(avg_cost=0.95, net_qty=2.0, age_seconds=9000)
+    signal = _make_signal(
+        low_f=80.0,
+        high_f=81.0,
+        yes_bid=0.995,
+        spread=0.003,
+        model_prob=0.90,
+    )
+    signal.reason = {"raw_high": 80.6}
+
+    result = _run(ee._run_exit_cascade_for_position(pos, signal, None, None))
+    assert result is not None
+    assert result["level"] == "PROFIT"
+    assert result["reason"] == "expiry_passive_winner"
+    assert result["price"] >= 0.99
+
+
+def test_expiry_likely_winner_holds_when_bid_below_passive_floor(stub_db, monkeypatch):
+    """A likely winner with a sub-par bid is held to redeem instead of force-sold."""
+    now = datetime(2026, 5, 13, 19, 49, tzinfo=ZoneInfo("America/New_York"))
+    monkeypatch.setattr("backend.execution.exit_engine.city_local_now", lambda city: now)
+    pos = _make_position(avg_cost=0.95, net_qty=2.0, age_seconds=9000)
+    signal = _make_signal(
+        low_f=80.0,
+        high_f=81.0,
+        yes_bid=0.970,
+        spread=0.005,
+        model_prob=0.90,
+    )
+    signal.reason = {"raw_high": 80.6}
+
+    result = _run(ee._run_exit_cascade_for_position(pos, signal, None, None))
+    assert result is not None
+    assert result["level"] == "HOLD"
+    assert result["no_order"] is True
+    assert result["status"] == "HOLD_TO_REDEEM"
+
+
+def test_expiry_ambiguous_risk_exit_uses_small_discount(stub_db, monkeypatch):
+    """Ambiguous near-close buckets can risk-exit, but use the 1-2c cap, not the old 10c dump."""
+    now = datetime(2026, 5, 13, 19, 49, tzinfo=ZoneInfo("America/New_York"))
+    monkeypatch.setattr("backend.execution.exit_engine.city_local_now", lambda city: now)
+    pos = _make_position(avg_cost=0.60, net_qty=10.0, age_seconds=9000)
+    signal = _make_signal(
+        low_f=80.0,
+        high_f=81.0,
+        yes_bid=0.50,
+        spread=0.02,
+        model_prob=0.20,
+        ev_at_bid=-0.05,
+    )
+    signal.reason = {"raw_high": 75.0}
+
+    result = _run(ee._run_exit_cascade_for_position(pos, signal, None, None))
+    assert result is not None
+    assert result["level"] == "EXPIRY"
+    assert result["reason"] == "market_close_risk_exit"
+    assert result["price"] == pytest.approx(0.48)
+
+
+def test_expiry_loss_exit_blocked_when_bucket_still_positive_ev(stub_db, monkeypatch):
+    """Positive EV at bid blocks non-emergency expiry loss exits."""
+    now = datetime(2026, 5, 13, 19, 49, tzinfo=ZoneInfo("America/New_York"))
+    monkeypatch.setattr("backend.execution.exit_engine.city_local_now", lambda city: now)
+    pos = _make_position(avg_cost=0.60, net_qty=10.0, age_seconds=9000)
+    signal = _make_signal(
+        low_f=80.0,
+        high_f=81.0,
+        yes_bid=0.50,
+        spread=0.02,
+        model_prob=0.20,
+        ev_at_bid=0.05,
+    )
+    signal.reason = {"raw_high": 75.0}
+
+    result = _run(ee._run_exit_cascade_for_position(pos, signal, None, None))
+    assert result is not None
+    assert result["level"] == "HOLD"
+    assert result["no_order"] is True
+    assert result["status"] == "EXIT_BLOCKED"

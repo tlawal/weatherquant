@@ -233,6 +233,8 @@ async def init_db() -> None:
     # positions
     await _run_ddl("ALTER TABLE positions ADD COLUMN entry_type VARCHAR(16)")
     await _run_ddl("ALTER TABLE positions ADD COLUMN strategy VARCHAR(64)")
+    await _run_ddl("ALTER TABLE positions ADD COLUMN entry_strategy VARCHAR(64)")
+    await _run_ddl("ALTER TABLE positions ADD COLUMN entry_decision_json TEXT")
     await _run_ddl("ALTER TABLE positions ADD COLUMN governing_exit_conditions TEXT")
     await _run_ddl("ALTER TABLE positions ADD COLUMN current_exit_status VARCHAR(256)")
     await _run_ddl("ALTER TABLE positions ADD COLUMN entry_time TIMESTAMP WITH TIME ZONE")
@@ -245,6 +247,49 @@ async def init_db() -> None:
     await _run_ddl("ALTER TABLE positions ADD COLUMN moon_bag_qty FLOAT NOT NULL DEFAULT 0.0")
     await _run_ddl("ALTER TABLE positions ADD COLUMN trailing_stop_price FLOAT")
     await _run_ddl("ALTER TABLE positions ADD COLUMN max_bid_seen FLOAT")
+
+    # closed_trades — durable lifecycle ledger for performance attribution
+    await _run_ddl("""
+        CREATE TABLE IF NOT EXISTS closed_trades (
+            id SERIAL PRIMARY KEY,
+            position_id INTEGER NOT NULL UNIQUE REFERENCES positions(id),
+            bucket_id INTEGER NOT NULL REFERENCES buckets(id),
+            event_id INTEGER NOT NULL REFERENCES events(id),
+            city_slug VARCHAR(64) NOT NULL,
+            date_et VARCHAR(10) NOT NULL,
+            bucket_idx INTEGER NOT NULL,
+            bucket_label VARCHAR(256) NOT NULL,
+            entry_type VARCHAR(16),
+            entry_strategy VARCHAR(64),
+            exit_level VARCHAR(16),
+            exit_reason VARCHAR(64),
+            entry_time TIMESTAMPTZ,
+            exit_time TIMESTAMPTZ,
+            shares FLOAT NOT NULL DEFAULT 0.0,
+            avg_entry_price FLOAT NOT NULL DEFAULT 0.0,
+            avg_exit_price FLOAT,
+            fees FLOAT NOT NULL DEFAULT 0.0,
+            realized_pnl FLOAT NOT NULL DEFAULT 0.0,
+            final_outcome VARCHAR(16),
+            hold_to_redeem_value FLOAT,
+            foregone_pnl FLOAT,
+            hold_time_hours FLOAT,
+            entry_model_prob FLOAT,
+            entry_market_prob FLOAT,
+            entry_true_edge FLOAT,
+            exit_market_bid FLOAT,
+            exit_market_ask FLOAT,
+            station_mae_f FLOAT,
+            time_window VARCHAR(32),
+            source_json TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    """)
+    await _run_ddl("CREATE INDEX IF NOT EXISTS ix_closed_trade_city_date ON closed_trades (city_slug, date_et)")
+    await _run_ddl("CREATE INDEX IF NOT EXISTS ix_closed_trade_strategy ON closed_trades (entry_strategy)")
+    await _run_ddl("CREATE INDEX IF NOT EXISTS ix_closed_trade_exit_reason ON closed_trades (exit_reason)")
+    await _run_ddl("CREATE INDEX IF NOT EXISTS ix_closed_trade_exit_time ON closed_trades (exit_time)")
 
     # signals — generation tag to filter to "latest snapshot only"
     await _run_ddl("ALTER TABLE signals ADD COLUMN model_snapshot_id INTEGER")

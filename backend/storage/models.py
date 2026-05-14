@@ -503,6 +503,8 @@ class Position(Base):
     # Traceability and execution logging
     entry_type: Mapped[Optional[str]] = mapped_column(String(16)) # "AUTOMATIC" | "MANUAL"
     strategy: Mapped[Optional[str]] = mapped_column(String(64))
+    entry_strategy: Mapped[Optional[str]] = mapped_column(String(64))
+    entry_decision_json: Mapped[Optional[str]] = mapped_column(Text)
     governing_exit_conditions: Mapped[Optional[str]] = mapped_column(Text)
     current_exit_status: Mapped[Optional[str]] = mapped_column(String(256))
     entry_time: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
@@ -603,7 +605,7 @@ class ExitEvent(Base):
     position_id: Mapped[int] = mapped_column(Integer, ForeignKey("positions.id"), nullable=False)
     bucket_id: Mapped[int] = mapped_column(Integer, nullable=False)
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
-    # EMERGENCY | URGENT | EDGE_DECAY | PROFIT | EXPIRY
+    # EMERGENCY | URGENT | EDGE_DECAY | PROFIT | EXPIRY | HOLD
     trigger_level: Mapped[str] = mapped_column(String(16), nullable=False)
     # busted_high | consensus_shifted | ev_decayed | tier_1_50pct | tier_2_75pct | trailing_stop | expiry | ...
     trigger_reason: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -617,6 +619,51 @@ class ExitEvent(Base):
     shares_remaining: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     model_snapshot_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("model_snapshots.id"))
     reason_json: Mapped[Optional[str]] = mapped_column(Text)
+
+
+class ClosedTrade(Base):
+    """Durable completed-trade lifecycle record for performance learning."""
+    __tablename__ = "closed_trades"
+    __table_args__ = (
+        Index("ix_closed_trade_city_date", "city_slug", "date_et"),
+        Index("ix_closed_trade_strategy", "entry_strategy"),
+        Index("ix_closed_trade_exit_reason", "exit_reason"),
+        Index("ix_closed_trade_exit_time", "exit_time"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    position_id: Mapped[int] = mapped_column(Integer, ForeignKey("positions.id"), unique=True, nullable=False)
+    bucket_id: Mapped[int] = mapped_column(Integer, ForeignKey("buckets.id"), nullable=False)
+    event_id: Mapped[int] = mapped_column(Integer, ForeignKey("events.id"), nullable=False)
+    city_slug: Mapped[str] = mapped_column(String(64), nullable=False)
+    date_et: Mapped[str] = mapped_column(String(10), nullable=False)
+    bucket_idx: Mapped[int] = mapped_column(Integer, nullable=False)
+    bucket_label: Mapped[str] = mapped_column(String(256), nullable=False)
+    entry_type: Mapped[Optional[str]] = mapped_column(String(16))
+    entry_strategy: Mapped[Optional[str]] = mapped_column(String(64))
+    exit_level: Mapped[Optional[str]] = mapped_column(String(16))
+    exit_reason: Mapped[Optional[str]] = mapped_column(String(64))
+    entry_time: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    exit_time: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    shares: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    avg_entry_price: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    avg_exit_price: Mapped[Optional[float]] = mapped_column(Float)
+    fees: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    realized_pnl: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    final_outcome: Mapped[Optional[str]] = mapped_column(String(16))
+    hold_to_redeem_value: Mapped[Optional[float]] = mapped_column(Float)
+    foregone_pnl: Mapped[Optional[float]] = mapped_column(Float)
+    hold_time_hours: Mapped[Optional[float]] = mapped_column(Float)
+    entry_model_prob: Mapped[Optional[float]] = mapped_column(Float)
+    entry_market_prob: Mapped[Optional[float]] = mapped_column(Float)
+    entry_true_edge: Mapped[Optional[float]] = mapped_column(Float)
+    exit_market_bid: Mapped[Optional[float]] = mapped_column(Float)
+    exit_market_ask: Mapped[Optional[float]] = mapped_column(Float)
+    station_mae_f: Mapped[Optional[float]] = mapped_column(Float)
+    time_window: Mapped[Optional[str]] = mapped_column(String(32))
+    source_json: Mapped[Optional[str]] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
 
 
 class HerbieForecastTiming(Base):

@@ -18,8 +18,9 @@ import asyncio
 import json
 import logging
 import math
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from backend.config import Config
 from backend.engine.gating import run_all_gates, GateResult
@@ -63,6 +64,100 @@ def _rewrite_balance_error(raw: str) -> str | None:
     )
 
 
+def _default_entry_strategy(manual: bool, strategy: str, limit_price: float) -> str:
+    if not manual:
+        return "auto_edge" if strategy == "default" else strategy
+    normalized = (strategy or "").strip().lower()
+    if normalized in {"manual_override", "override"}:
+        return "manual_override"
+    if limit_price >= 0.90:
+        return "manual_hold_to_redeem"
+    if normalized in {"manual_scalp", "scalp"}:
+        return "manual_scalp"
+    return "manual_scalp"
+
+
+def _entry_time_window(city, event) -> tuple[str | None, float | None]:
+    try:
+        tz = ZoneInfo(city.tz or "America/New_York")
+        now_local = datetime.now(timezone.utc).astimezone(tz)
+        event_date = event.date_et if isinstance(event.date_et, date) else date.fromisoformat(str(event.date_et))
+        close_local = datetime.combine(event_date, time(20, 0), tzinfo=tz)
+        hours_to_close = (close_local - now_local).total_seconds() / 3600.0
+        hour = now_local.hour
+        if hour < 12:
+            window = "morning"
+        elif hour < 16:
+            window = "midday"
+        elif hour < 19:
+            window = "late_day"
+        else:
+            window = "near_close"
+        return window, round(hours_to_close, 2)
+    except Exception:
+        return None, None
+
+
+def _build_entry_decision_snapshot(
+    *,
+    signal: BucketSignal,
+    limit_price: float,
+    shares: float,
+    side: str,
+    outcome: str,
+    manual: bool,
+    strategy: str,
+    entry_strategy: str,
+    order_type: str,
+    actor: str,
+    city,
+    event,
+    gate_failures: list[str],
+    operator_reason: str | None = None,
+) -> dict:
+    window, hours_to_close = _entry_time_window(city, event)
+    spread = signal.spread
+    reason = signal.reason or {}
+    source_quality = reason.get("source_quality") or reason.get("source_quality_gates")
+    return {
+        "entry_strategy": entry_strategy,
+        "entry_type": "MANUAL" if manual else "AUTOMATIC",
+        "strategy": strategy,
+        "actor": actor,
+        "operator_reason": operator_reason,
+        "order_type": order_type,
+        "side": side,
+        "outcome": outcome,
+        "shares": shares,
+        "limit_price": limit_price,
+        "model_prob": signal.model_prob,
+        "market_prob": signal.mkt_prob,
+        "raw_edge": signal.raw_edge,
+        "true_edge": signal.true_edge,
+        "ev_per_share": signal.ev_per_share,
+        "ev_at_bid": signal.ev_at_bid,
+        "exec_cost": signal.exec_cost,
+        "yes_bid": signal.yes_bid,
+        "yes_ask": signal.yes_ask,
+        "yes_mid": signal.yes_mid,
+        "spread": spread,
+        "yes_bid_depth": signal.yes_bid_depth,
+        "yes_ask_depth": signal.yes_ask_depth,
+        "city_state": signal.city_state,
+        "lock_regime": signal.lock_regime,
+        "regime_score": signal.regime_score,
+        "regime_label": signal.regime_label,
+        "time_window": window,
+        "hours_to_close": hours_to_close,
+        "station_mae_f": reason.get("station_mae_f"),
+        "observed_high_f": reason.get("raw_high") or reason.get("observed_high_f"),
+        "source_quality": source_quality,
+        "excluded_sources": reason.get("excluded_sources"),
+        "consensus_bucket_idx": reason.get("consensus_bucket_idx"),
+        "gate_failures": gate_failures,
+    }
+
+
 async def execute_signal(
     signal: BucketSignal,
     bankroll: float,
@@ -74,6 +169,8 @@ async def execute_signal(
     limit_price_override: float | None = None,
     strategy: str = "default",
     outcome: str = "yes",
+    entry_strategy: str | None = None,
+    operator_reason: str | None = None,
 ) -> dict:
     """
     Attempt to execute a trade for the given signal.
@@ -268,6 +365,16 @@ async def execute_signal(
     result["shares"] = shares
     result["limit_price"] = limit_price
     result["estimated_cost"] = cost
+    resolved_entry_strategy = entry_strategy
+    if side == "BUY":
+        resolved_entry_strategy = resolved_entry_strategy or _default_entry_strategy(
+            manual, strategy, limit_price
+        )
+        result["entry_strategy"] = resolved_entry_strategy
+        if limit_price >= 0.90 and resolved_entry_strategy == "manual_hold_to_redeem":
+            result["warning"] = (
+                (result.get("warning") + "; ") if result.get("warning") else ""
+            ) + "High-price entry defaults to hold-to-redeem exit policy"
 
     log.info(
         "trade: %s bucket=%d %.2f shares @ $%.4f = $%.2f (edge=%.3f)",
@@ -286,7 +393,11 @@ async def execute_signal(
             "cut_temp_high": round(signal.high_f + 1, 1) if signal.high_f is not None else None,
             "cut_temp_low": round(signal.low_f - 3, 1) if signal.low_f is not None else None,
             "take_profit_price": round(limit_price + Config.QUICK_FLIP_TARGET, 3),
-            "expiry_time": "19:30 ET"
+            "expiry_time": "19:30 local",
+            "expiry_policy": "hold_likely_winners_or_passive_sell",
+            "expiry_winner_hold_min_prob": Config.EXPIRY_WINNER_HOLD_MIN_PROB,
+            "expiry_passive_sell_min_bid": Config.EXPIRY_PASSIVE_SELL_MIN_BID,
+            "expiry_risk_exit_max_discount": Config.EXPIRY_RISK_EXIT_MAX_DISCOUNT,
         })
 
     # ── Look up token ID for this bucket ────────────────────────────────────
@@ -587,6 +698,30 @@ async def execute_signal(
                 last_mkt_price=fill_result["price"],
                 entry_type="MANUAL" if manual else "AUTOMATIC",
                 strategy=strategy,
+                entry_strategy=resolved_entry_strategy if side == "BUY" else None,
+                entry_decision_json=(
+                    json.dumps(
+                        _build_entry_decision_snapshot(
+                            signal=signal,
+                            limit_price=limit_price,
+                            shares=shares,
+                            side=side,
+                            outcome=outcome,
+                            manual=manual,
+                            strategy=strategy,
+                            entry_strategy=resolved_entry_strategy or strategy,
+                            order_type=order_type,
+                            actor=actor,
+                            city=city,
+                            event=event,
+                            gate_failures=gate_result.failures,
+                            operator_reason=operator_reason,
+                        ),
+                        default=str,
+                    )
+                    if side == "BUY"
+                    else None
+                ),
                 governing_exit_conditions=governing_exit_conditions,
             )
             await append_audit(

@@ -21,6 +21,7 @@ from backend.storage.models import (
     Bucket,
     CalibrationParams,
     City,
+    ClosedTrade,
     Event,
     Fill,
     ForecastObs,
@@ -1138,6 +1139,8 @@ async def upsert_position(
     last_mkt_price: float | None = None,
     entry_type: str | None = None,
     strategy: str | None = None,
+    entry_strategy: str | None = None,
+    entry_decision_json: str | None = None,
     governing_exit_conditions: str | None = None,
     current_exit_status: str | None = None,
 ) -> Position:
@@ -1153,10 +1156,13 @@ async def upsert_position(
             last_mkt_price=last_mkt_price or fill_price,
             entry_type=entry_type,
             strategy=strategy,
+            entry_strategy=entry_strategy,
+            entry_decision_json=entry_decision_json,
             governing_exit_conditions=governing_exit_conditions,
             current_exit_status=current_exit_status,
             entry_time=now if fill_qty > 0 else None,
             entry_price=fill_price if fill_qty > 0 else None,
+            original_qty=max(fill_qty, 0),
         )
         session.add(pos)
     else:
@@ -1182,10 +1188,15 @@ async def upsert_position(
                 pos.entry_type = entry_type
             if strategy:
                 pos.strategy = strategy
+            if entry_strategy:
+                pos.entry_strategy = entry_strategy
+            if entry_decision_json:
+                pos.entry_decision_json = entry_decision_json
             if governing_exit_conditions:
                 pos.governing_exit_conditions = governing_exit_conditions
             if current_exit_status:
                 pos.current_exit_status = current_exit_status
+            pos.original_qty = (pos.original_qty or 0.0) + fill_qty
 
         if last_mkt_price is not None:
             pos.last_mkt_price = last_mkt_price

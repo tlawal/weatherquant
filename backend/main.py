@@ -52,6 +52,10 @@ async def _load_runtime_config() -> None:
             "quick_flip_target": "QUICK_FLIP_TARGET",
             "urgent_exit_max_spread": "URGENT_EXIT_MAX_SPREAD",
             "expiry_discount": "EXPIRY_DISCOUNT",
+            "expiry_winner_hold_min_prob": "EXPIRY_WINNER_HOLD_MIN_PROB",
+            "expiry_passive_sell_min_bid": "EXPIRY_PASSIVE_SELL_MIN_BID",
+            "expiry_market_win_min_bid": "EXPIRY_MARKET_WIN_MIN_BID",
+            "expiry_risk_exit_max_discount": "EXPIRY_RISK_EXIT_MAX_DISCOUNT",
         }
         _INT_FIELDS = {
             "consensus_debounce_runs": "CONSENSUS_DEBOUNCE_RUNS",

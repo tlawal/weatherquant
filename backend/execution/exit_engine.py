@@ -11,7 +11,8 @@ Interval: 300 seconds (5 min)
        — debounced: requires CONSENSUS_DEBOUNCE_RUNS consecutive shifts
        — spread-guarded: suppressed when spread > URGENT_EXIT_MAX_SPREAD
     3. PROFIT: Quick Flip! Position is at entry + QUICK_FLIP_TARGET (Limit sell at bid)
-    4. EXPIRY: 30 min before market close (Sell at bid - EXPIRY_DISCOUNT)
+    4. EXPIRY: hold likely winners to redeem or passively sell near par; risk-exit
+       ambiguous/losing buckets with a small discount only.
 """
 from __future__ import annotations
 
@@ -223,6 +224,62 @@ def _stable_consensus(event_id: int, held_bucket_id: int, multiplier: int = 1) -
     return None  # noisy or still matches held — suppress URGENT
 
 
+def _bucket_contains_temp(signal: BucketSignal, temp_f: float | None) -> bool:
+    """Return whether a final/observed high is inside the held bucket."""
+    if temp_f is None:
+        return False
+    if signal.low_f is not None and temp_f < signal.low_f:
+        return False
+    if signal.high_f is not None and temp_f > signal.high_f:
+        return False
+    return True
+
+
+def _best_observed_high(signal: BucketSignal, fallback: float | None = None) -> float | None:
+    """Prefer final/canonical highs when present, then live observed highs."""
+    reason = signal.reason or {}
+    for key in (
+        "resolution_high_f",
+        "resolution_high",
+        "ground_truth_high_f",
+        "ground_truth_high",
+        "canonical_high_f",
+        "canonical_high",
+        "raw_high",
+        "observed_high_f",
+        "observed_high",
+    ):
+        val = reason.get(key)
+        if val is None:
+            continue
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            continue
+    return fallback
+
+
+def _is_likely_expiry_winner(signal: BucketSignal, bid: float, obs_high: float | None) -> bool:
+    """Late-session winner classifier used only for exit decisions."""
+    if _bucket_contains_temp(signal, obs_high):
+        return True
+    if signal.model_prob >= Config.EXPIRY_WINNER_HOLD_MIN_PROB:
+        return True
+    model_contradicts = signal.model_prob < Config.URGENT_MIN_EXIT_MODEL_PROB
+    if bid >= Config.EXPIRY_MARKET_WIN_MIN_BID and not model_contradicts:
+        return True
+    return False
+
+
+def _loss_exit_blocked_by_positive_ev(pos, signal: BucketSignal, price: float) -> bool:
+    """Guard against non-emergency loss exits while the held bucket is still +EV."""
+    return (
+        price < (pos.avg_cost or 0.0)
+        and signal.ev_at_bid is not None
+        and signal.ev_at_bid > 0.0
+    )
+
+
 async def _run_exit_cascade_for_position(
     pos, signal: BucketSignal, consensus_bucket_id: Optional[int], consensus_sig: Optional[BucketSignal] = None
 ) -> dict | None:
@@ -251,7 +308,7 @@ async def _run_exit_cascade_for_position(
     # Extract METAR observations
     current_temp = signal.reason.get("current_temp_f")
     raw_high = signal.reason.get("raw_high")
-    obs_high = raw_high if raw_high is not None else current_temp
+    obs_high = _best_observed_high(signal, raw_high if raw_high is not None else current_temp)
     
     # ── 1. EMERGENCY ──
     # METAR obs contradicts bucket by >= 3°F causing impossible situation or deep loss
@@ -410,11 +467,52 @@ async def _run_exit_cascade_for_position(
             return {"level": "PROFIT", "price": bid, "reason": "quick_flip"}
 
     # ── 4. EXPIRY ──
-    # 30 min before market close (7:30 PM local for daily high markets)
-    # Moon-bag exits here too — no position survives past market close
+    # 30 min before market close (7:30 PM local for daily high markets).
+    # Hold likely winners to redeem. Only risk-exit ambiguous/losing buckets,
+    # and never use the old 10c dump unless explicitly configured below the
+    # risk-exit cap.
     if now_local.hour == 19 and now_local.minute >= 30:
-        log.info("exit: EXPIRY %s - 30 min to close. Dumping remaining (including moon-bag).", signal.city_slug)
-        return {"level": "EXPIRY", "price": max(0.01, bid - Config.EXPIRY_DISCOUNT), "reason": "market_close"}
+        likely_winner = _is_likely_expiry_winner(signal, bid, obs_high)
+        if likely_winner:
+            if bid >= Config.EXPIRY_PASSIVE_SELL_MIN_BID:
+                sell_price = max(Config.EXPIRY_PASSIVE_SELL_MIN_BID, bid)
+                log.info(
+                    "exit: EXPIRY_PASSIVE %s — likely winner; passively offering at %.3f "
+                    "(bid=%.3f, model=%.3f, obs_high=%s)",
+                    signal.city_slug, sell_price, bid, signal.model_prob, obs_high,
+                )
+                return {"level": "PROFIT", "price": sell_price, "reason": "expiry_passive_winner"}
+            log.info(
+                "exit: HOLD_TO_REDEEM %s — likely winner; bid %.3f below passive sell floor %.3f",
+                signal.city_slug, bid, Config.EXPIRY_PASSIVE_SELL_MIN_BID,
+            )
+            return {
+                "level": "HOLD",
+                "price": bid,
+                "reason": "likely_winner_hold_to_redeem",
+                "no_order": True,
+                "status": "HOLD_TO_REDEEM",
+            }
+
+        discount = min(Config.EXPIRY_DISCOUNT, Config.EXPIRY_RISK_EXIT_MAX_DISCOUNT)
+        risk_exit_price = max(0.01, bid - discount)
+        if _loss_exit_blocked_by_positive_ev(pos, signal, risk_exit_price):
+            log.info(
+                "exit: EXPIRY suppressed %s — risk price %.3f below avg %.3f while ev_at_bid=%.4f",
+                signal.city_slug, risk_exit_price, pos.avg_cost, signal.ev_at_bid,
+            )
+            return {
+                "level": "HOLD",
+                "price": bid,
+                "reason": "positive_ev_blocks_expiry_loss_exit",
+                "no_order": True,
+                "status": "EXIT_BLOCKED",
+            }
+        log.info(
+            "exit: EXPIRY_RISK %s — ambiguous/losing near close; bid=%.3f discount=%.3f price=%.3f",
+            signal.city_slug, bid, discount, risk_exit_price,
+        )
+        return {"level": "EXPIRY", "price": risk_exit_price, "reason": "market_close_risk_exit"}
 
     return None
 
@@ -487,6 +585,28 @@ async def run_exit_engine() -> None:
 
         cascade = await _run_exit_cascade_for_position(pos, signal, stable_consensus_id, consensus_sig)
         if cascade:
+            if cascade.get("no_order"):
+                status = cascade.get("status") or cascade["level"]
+                exits_triggered += 1
+                log.info(
+                    "exit_engine: %s for bucket %d — no order placed (%s)",
+                    status, pos.bucket_id, cascade["reason"],
+                )
+                async with get_session() as sess:
+                    from sqlalchemy import update
+                    import backend.storage.models as m
+                    await sess.execute(
+                        update(m.Position).where(m.Position.bucket_id == pos.bucket_id)
+                        .values(current_exit_status=f"{status}: {cascade['reason']}")
+                    )
+                    await sess.commit()
+                await _emit_exit_event(
+                    pos, signal, cascade,
+                    shares_exited=0.0,
+                    execution_status="no_order",
+                )
+                continue
+
             exits_triggered += 1
             sell_price = round(cascade["price"], 3)
             exit_qty = cascade.get("qty_override", pos.net_qty)
@@ -598,4 +718,3 @@ async def run_exit_engine() -> None:
                 await sess.commit()
             
     log.info("exit_engine: complete (%d exits triggered)", exits_triggered)
-
