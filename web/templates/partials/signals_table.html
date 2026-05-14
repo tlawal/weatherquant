@@ -54,7 +54,7 @@
 
       <th class="px-3 py-3 text-right relative" x-data="{ showTip: false }">
         <div class="flex items-center gap-1 justify-end">
-          <span>Diff</span>
+          <span>Est. Model Edge</span>
           <button @click.stop="showTip = !showTip" class="opacity-40 hover:opacity-100 transition-opacity text-[10px] cursor-pointer">&#9432;</button>
         </div>
         <div x-show="showTip" x-cloak @click.outside="showTip = false"
@@ -63,8 +63,8 @@
              class="absolute right-0 top-full mt-1 w-72 p-3 rounded-xl shadow-2xl z-50 border text-left"
              style="background:var(--bg-panel);border-color:var(--border)">
           <div class="text-xs normal-case tracking-normal font-normal" style="color:var(--text-muted)">
-            Model probability minus Market probability. Green = model thinks this bucket is
-            underpriced by the market. Red = overpriced. Raw difference before execution costs.
+            Estimated model edge: model probability minus market probability minus execution cost.
+            Green = the model thinks this bucket is underpriced. Red = the model thinks it is overpriced.
           </div>
         </div>
       </th>
@@ -219,7 +219,6 @@
 
     {# ── Bucket sub-rows (first N visible) ─────────────────────────────── #}
     {% for row in group.buckets[:group.max_initial] %}
-    {% set diff = (row.model_prob - row.mkt_prob) if row.mkt_prob else 0 %}
     {% set is_hot = row.city_state == "volatile" and row.true_edge >= 0.10 %}
     <tr class="border-b transition-colors cursor-pointer
       {% if is_hot %}bg-orange-950/30 hover:bg-orange-950/50{% else %}hover:bg-black/5 dark:hover:bg-white/5 opacity-70{% endif %}"
@@ -256,15 +255,15 @@
         </span>
       </td>
 
-      {# Diff #}
+      {# Estimated Model Edge #}
       <td class="px-3 py-2 text-right mono text-sm font-semibold">
-        {% if row.mkt_prob %}
-          {% if diff > 0 %}
-            <span class="text-green-400">+{{ "%.1f"|format(diff * 100) }}%</span>
-          {% elif diff < 0 %}
-            <span class="text-red-400">{{ "%.1f"|format(diff * 100) }}%</span>
+        {% if row.true_edge is not none %}
+          {% if row.true_edge > 0 %}
+            <span class="text-green-400">+{{ "%.1f"|format(row.true_edge * 100) }}pp</span>
+          {% elif row.true_edge < 0 %}
+            <span class="text-red-400">{{ "%.1f"|format(row.true_edge * 100) }}pp</span>
           {% else %}
-            <span style="color:var(--text-muted)">0.0%</span>
+            <span style="color:var(--text-muted)">0.0pp</span>
           {% endif %}
         {% else %}
           <span style="color:var(--text-muted)">&mdash;</span>
@@ -284,7 +283,7 @@
             &#128274; Gated
           </span>
         {% else %}
-          <span class="text-xs" style="color:var(--text-muted)">Low edge</span>
+          <span class="text-xs" style="color:var(--text-muted)">Low est. edge</span>
         {% endif %}
       </td>
     </tr>
@@ -292,7 +291,6 @@
 
     {# ── Hidden bucket rows (expanded) ─────────────────────────────────── #}
     {% for row in group.buckets[group.max_initial:] %}
-    {% set diff = (row.model_prob - row.mkt_prob) if row.mkt_prob else 0 %}
     {% set is_hot = row.city_state == "volatile" and row.true_edge >= 0.10 %}
     <tr x-show="expanded" x-cloak
       class="border-b transition-colors cursor-pointer
@@ -328,13 +326,13 @@
       </td>
 
       <td class="px-3 py-2 text-right mono text-sm font-semibold">
-        {% if row.mkt_prob %}
-          {% if diff > 0 %}
-            <span class="text-green-400">+{{ "%.1f"|format(diff * 100) }}%</span>
-          {% elif diff < 0 %}
-            <span class="text-red-400">{{ "%.1f"|format(diff * 100) }}%</span>
+        {% if row.true_edge is not none %}
+          {% if row.true_edge > 0 %}
+            <span class="text-green-400">+{{ "%.1f"|format(row.true_edge * 100) }}pp</span>
+          {% elif row.true_edge < 0 %}
+            <span class="text-red-400">{{ "%.1f"|format(row.true_edge * 100) }}pp</span>
           {% else %}
-            <span style="color:var(--text-muted)">0.0%</span>
+            <span style="color:var(--text-muted)">0.0pp</span>
           {% endif %}
         {% else %}
           <span style="color:var(--text-muted)">&mdash;</span>
@@ -353,7 +351,7 @@
             &#128274; Gated
           </span>
         {% else %}
-          <span class="text-xs" style="color:var(--text-muted)">Low edge</span>
+          <span class="text-xs" style="color:var(--text-muted)">Low est. edge</span>
         {% endif %}
       </td>
     </tr>

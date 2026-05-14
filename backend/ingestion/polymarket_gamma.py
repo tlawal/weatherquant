@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 
 import aiohttp
 
+from backend.config import Config
 from backend.storage.db import get_session
 from backend.storage.repos import (
     get_all_cities,

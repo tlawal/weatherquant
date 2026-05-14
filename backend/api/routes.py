@@ -1204,6 +1204,15 @@ def _float_or_zero(value) -> float:
         return 0.0
 
 
+def _float_or_none(value) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 async def _fetch_onchain_determined_map(
     condition_ids: set[str],
     cid_to_gamma_event_id: Optional[dict[str, Optional[str]]] = None,
@@ -1489,7 +1498,11 @@ async def _build_redemptions_payload(
             or sig_reason.get("observed_high_f")
         )
         held_prob = _float_or_zero(sig.model_prob) if sig else None
-        ev_at_bid = sig.ev_at_bid if sig else None
+        ev_at_bid = None
+        if sig:
+            ev_at_bid = _float_or_none(getattr(sig, "ev_at_bid", None))
+            if ev_at_bid is None:
+                ev_at_bid = _float_or_none(sig_reason.get("ev_at_bid"))
         sell_now_pnl = _float_or_zero(pos.net_qty) * (live_bid - _float_or_zero(pos.avg_cost)) if live_bid > 0 else None
         hold_to_redeem_pnl = _float_or_zero(pos.net_qty) * (1.0 - _float_or_zero(pos.avg_cost))
         exit_plan = {

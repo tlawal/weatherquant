@@ -682,6 +682,65 @@ def test_redemptions_wallet_timeout_still_returns_db_rows(tmp_path, monkeypatch)
     _run(engine.dispose())
 
 
+def test_redemptions_reads_ev_at_bid_from_signal_reason_json(tmp_path, monkeypatch):
+    engine, session_factory = _run(_setup_test_db(tmp_path, monkeypatch))
+    city = _run(_create_city(session_factory))
+
+    async def seed():
+        async with session_factory() as session:
+            event = Event(city_id=city.id, date_et="2099-05-07", status="ok")
+            session.add(event)
+            await session.flush()
+            bucket = Bucket(
+                event_id=event.id,
+                bucket_idx=0,
+                label="Will the highest temperature in Atlanta be 74-75F?",
+                yes_token_id="yes-token",
+                no_token_id="no-token",
+                condition_id="cond-live",
+            )
+            session.add(bucket)
+            await session.flush()
+            session.add(Position(
+                bucket_id=bucket.id,
+                side="yes",
+                net_qty=6.0,
+                avg_cost=0.66,
+                last_mkt_price=0.63,
+                entry_type="AUTOMATIC",
+            ))
+            session.add(Signal(
+                bucket_id=bucket.id,
+                model_prob=0.3771,
+                mkt_prob=0.63,
+                raw_edge=-0.2529,
+                exec_cost=0.0,
+                true_edge=-0.2529,
+                reason_json='{"ev_at_bid": 0.04}',
+            ))
+            await session.commit()
+
+    async def fake_fetch_wallet_api_positions(*args, **kwargs):
+        return ([{
+            "asset": "yes-token",
+            "conditionId": "cond-live",
+            "outcome": "Yes",
+            "size": 6,
+            "avgPrice": 0.66,
+            "curPrice": 0.63,
+            "title": "Will the highest temperature in Atlanta be 74-75F?",
+        }], "0xwallet")
+
+    _run(seed())
+    monkeypatch.setattr(api_routes, "_fetch_wallet_api_positions", fake_fetch_wallet_api_positions)
+
+    res = _run(api_routes.redemptions_list())
+    bucket = res["events"][0]["buckets"][0]
+    assert bucket["exit_plan"]["ev_at_bid"] == 0.04
+
+    _run(engine.dispose())
+
+
 def test_mark_position_closed_zeroes_stale_position_and_audits(tmp_path, monkeypatch):
     engine, session_factory = _run(_setup_test_db(tmp_path, monkeypatch))
     city = _run(_create_city(session_factory))

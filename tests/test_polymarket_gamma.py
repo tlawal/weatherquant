@@ -68,6 +68,12 @@ def _market(question: str, yes_token: str, no_token: str) -> dict:
     }
 
 
+def test_fetch_gamma_all_has_config_import(tmp_path, monkeypatch):
+    engine, _ = _run(_setup_test_db(tmp_path, monkeypatch))
+    _run(gamma_ingestion.fetch_gamma_all())
+    _run(engine.dispose())
+
+
 def test_process_event_data_normalizes_unsorted_ranges(tmp_path, monkeypatch):
     engine, session_factory = _run(_setup_test_db(tmp_path, monkeypatch))
     city = _run(_create_city(session_factory))

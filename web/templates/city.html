@@ -1684,7 +1684,7 @@
               <th class="px-2 py-2 text-right" style="color:#FBBF24" title="M1 BMA shadow probability — Gaussian-mixture predictive over the same per-source forecasts. Read-only; does not affect trade decisions during shadow phase.">BMA</th>
               <th class="px-2 py-2 text-right" title="Best bid / ask / spread from the latest stored orderbook snapshot.">Book</th>
               <th class="px-2 py-2 text-right" title="Bid depth / ask depth in shares at the top of book.">Depth</th>
-              <th class="px-2 py-2 text-right" style="color:var(--cyan)" title="After-cost edge: calibrated model probability minus market probability minus estimated spread/slippage cost.">True Edge</th>
+              <th class="px-2 py-2 text-right" style="color:var(--cyan)" title="Estimated model edge: model probability - market probability - execution cost.">Est. Model Edge</th>
               <th class="px-2 py-2 text-right" title="Conservative size cap based on the configured max liquidity participation.">Max Size</th>
               <th class="px-2 py-2 text-left">Trade State</th>
               <th class="px-2 py-2 text-center">▶</th>
@@ -1786,9 +1786,10 @@
               </td>
               <td class="px-2 py-2.5 text-right mono font-bold">
                 {% if b.impact_adjusted_ev is not none %}
-                  {% if b.impact_adjusted_ev >= 0.10 %}<span class="text-green-400">+{{ "%.2f"|format(b.impact_adjusted_ev) }}</span>
-                  {% elif b.impact_adjusted_ev > 0 %}<span class="text-yellow-400">+{{ "%.2f"|format(b.impact_adjusted_ev) }}</span>
-                  {% else %}<span style="color:var(--text-muted)">{{ "%.2f"|format(b.impact_adjusted_ev) }}</span>{% endif %}
+                  {% if b.impact_adjusted_ev >= 0.10 %}<span class="text-green-400">+{{ "%.1f"|format(b.impact_adjusted_ev * 100) }}pp</span>
+                  {% elif b.impact_adjusted_ev > 0 %}<span class="text-yellow-400">+{{ "%.1f"|format(b.impact_adjusted_ev * 100) }}pp</span>
+                  {% elif b.impact_adjusted_ev < 0 %}<span class="text-red-400">{{ "%.1f"|format(b.impact_adjusted_ev * 100) }}pp</span>
+                  {% else %}<span style="color:var(--text-muted)">0.0pp</span>{% endif %}
                   {% if b.exec_cost is not none %}<div class="text-[9px] font-normal" style="color:var(--text-muted)">cost {{ "%.1f"|format(b.exec_cost * 100) }}¢</div>{% endif %}
                 {% else %}<span style="color:var(--text-muted)">—</span>{% endif %}
               </td>
@@ -1810,7 +1811,7 @@
                 <span style="color:var(--text-muted)">Monitor</span>
                 {% endif %}
                 {% if b.ev_at_bid is not none %}
-                <div class="mono text-[9px]" style="color:{% if b.ev_at_bid >= 0 %}#86EFAC{% else %}var(--text-muted){% endif %}" title="Exit-side EV if selling held shares into current bid.">exit EV {{ "%+.2f"|format(b.ev_at_bid) }}</div>
+                <div class="mono text-[9px]" style="color:{% if b.ev_at_bid >= 0 %}#86EFAC{% else %}#FCA5A5{% endif %}" title="Estimated hold edge at bid: model fair value minus current bid; negative means selling is favored by the model.">Hold Edge @ Bid {{ "%+.1f"|format(b.ev_at_bid * 100) }}c/share</div>
                 {% endif %}
               </td>
               <td class="px-2 py-2.5 text-center">
@@ -1821,7 +1822,7 @@
                   {% if b.actionable %}
                   <button onclick="quickTrade('{{ city.city_slug }}', {{ b.bucket_idx }}, {{ b.bucket_id }})"
                     class="px-2 py-0.5 rounded text-xs font-semibold"
-                    style="background:#065F46;border:1px solid #22C55E;color:#86EFAC" title="Strong edge — trade through normal gates">▶</button>
+                    style="background:#065F46;border:1px solid #22C55E;color:#86EFAC" title="Strong estimated model edge — trade through normal gates">▶</button>
                   {% elif b.mkt_prob is not none %}
                   <button onclick="quickTrade('{{ city.city_slug }}', {{ b.bucket_idx }}, {{ b.bucket_id }})"
                     class="px-2 py-0.5 rounded text-xs font-semibold hover:opacity-80 transition-opacity"
