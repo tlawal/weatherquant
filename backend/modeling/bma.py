@@ -169,6 +169,49 @@ def bma_bucket_probabilities(
     return probs
 
 
+def bma_conditional_bucket_probabilities(
+    predictive: BMAPredictive,
+    buckets: list[tuple[Optional[float], Optional[float]]],
+    floor: float,
+) -> list[float]:
+    """Compute mixture P(T in bucket | T >= floor).
+
+    Same observed-high semantics as
+    `distribution.conditional_bucket_probabilities`, but integrating the BMA
+    mixture instead of a single Gaussian. This matters intraday: once the
+    settlement high has reached `floor`, BMA shadow probabilities must not
+    continue displaying unconditional low-tail mass.
+    """
+    if not buckets:
+        return []
+    if not predictive.components:
+        probs = [
+            0.0 if hi is not None and floor >= hi else 1.0
+            for _, hi in buckets
+        ]
+        total = sum(probs)
+        return [p / total for p in probs] if total > 0 else probs
+
+    probs: list[float] = []
+    for lo, hi in buckets:
+        if hi is not None and floor >= hi:
+            probs.append(0.0)
+            continue
+
+        effective_lo = max(lo, floor) if lo is not None else floor
+        prob = 0.0
+        for c in predictive.components:
+            lo_cdf = float(norm.cdf(effective_lo, c.mu, c.sigma))
+            hi_cdf = 1.0 if hi is None else float(norm.cdf(hi, c.mu, c.sigma))
+            prob += c.weight * max(0.0, hi_cdf - lo_cdf)
+        probs.append(prob)
+
+    total = sum(probs)
+    if total > 0:
+        probs = [p / total for p in probs]
+    return probs
+
+
 # ───────────────────── Predictive constructor ───────────────────────────────
 
 def build_bma_predictive(

@@ -11,10 +11,12 @@ from backend.modeling.bma import (
     BMA_PRIOR_SIGMA_F,
     BMAComponent,
     BMAPredictive,
+    bma_conditional_bucket_probabilities,
     bma_bucket_probabilities,
     build_bma_predictive,
     predictive_to_dict,
 )
+from backend.modeling.settlement import canonical_bucket_ranges
 
 
 # ─────────────────────── BMAPredictive moments ───────────────────────────────
@@ -135,6 +137,45 @@ def test_bma_bucket_probabilities_bimodal_distributes_mass_to_both_modes():
         "single-Gaussian-on-mean would put all mass in middle bucket; "
         "BMA must spread mass to both modes"
     )
+
+
+def test_bma_conditional_bucket_probabilities_respect_observed_floor():
+    p = BMAPredictive(components=[
+        BMAComponent(source="cool", mu=69.0, sigma=1.0, weight=1.0),
+        BMAComponent(source="warm", mu=75.0, sigma=2.0, weight=1.0),
+    ])
+    buckets = canonical_bucket_ranges([
+        (None, 68.0),
+        (68.0, 69.0),
+        (70.0, 71.0),
+        (72.0, 73.0),
+        (74.0, None),
+    ])
+
+    unconditional = bma_bucket_probabilities(p, buckets)
+    conditional = bma_conditional_bucket_probabilities(p, buckets, floor=69.1)
+
+    assert sum(conditional) == pytest.approx(1.0, abs=1e-9)
+    assert conditional[0] == pytest.approx(0.0)
+    # The 68-69 display bucket is canonical [68, 70), so it can still retain
+    # only the straddling [69.1, 70) mass after conditioning.
+    assert 0.0 < conditional[1] < unconditional[1]
+
+
+def test_bma_conditional_bucket_probabilities_zero_surpassed_bucket():
+    p = BMAPredictive(components=[
+        BMAComponent(source="a", mu=74.0, sigma=2.0, weight=1.0),
+    ])
+    buckets = canonical_bucket_ranges([
+        (68.0, 69.0),
+        (70.0, 71.0),
+        (72.0, None),
+    ])
+
+    conditional = bma_conditional_bucket_probabilities(p, buckets, floor=70.0)
+
+    assert conditional[0] == pytest.approx(0.0)
+    assert sum(conditional) == pytest.approx(1.0, abs=1e-9)
 
 
 # ─────────────────── Predictive constructor ──────────────────────────────────

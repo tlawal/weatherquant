@@ -375,6 +375,18 @@ async def get_city_state(city_slug: str):
     daily_high = wu_hist.high_f if wu_hist and wu_hist.high_f is not None else (metar.daily_high_f if metar else None)
 
     model_inputs = json.loads(model.inputs_json) if model and model.inputs_json else {}
+    model_snapshot_current_temp_lag_s = None
+    if metar and metar.observed_at and model and model.computed_at:
+        metar_obs_at = metar.observed_at
+        model_computed_at = model.computed_at
+        if metar_obs_at.tzinfo is None:
+            metar_obs_at = metar_obs_at.replace(tzinfo=timezone.utc)
+        if model_computed_at.tzinfo is None:
+            model_computed_at = model_computed_at.replace(tzinfo=timezone.utc)
+        model_snapshot_current_temp_lag_s = max(
+            0.0,
+            (metar_obs_at.astimezone(timezone.utc) - model_computed_at.astimezone(timezone.utc)).total_seconds(),
+        )
     reg = CITY_REGISTRY_BY_SLUG.get(city_slug, {})
     prob_hotter_bucket = model_inputs.get("prob_hotter_bucket", model_inputs.get("prob_new_high"))
     city_state = model_inputs.get("city_state") or classify_city_state(
@@ -410,6 +422,11 @@ async def get_city_state(city_slug: str):
         "prob_new_high": prob_hotter_bucket,
         "prob_hotter_bucket": prob_hotter_bucket,
         "prob_new_high_raw": model_inputs.get("prob_new_high_raw"),
+        "model_snapshot_stale_current_temp": (
+            model_snapshot_current_temp_lag_s is not None
+            and model_snapshot_current_temp_lag_s > 30.0
+        ),
+        "model_snapshot_current_temp_lag_s": model_snapshot_current_temp_lag_s,
         "lock_regime": model_inputs.get("lock_regime"),
         "observed_bucket_idx": model_inputs.get("observed_bucket_idx"),
         "observed_bucket_upper_f": model_inputs.get("observed_bucket_upper_f"),

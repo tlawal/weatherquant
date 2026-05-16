@@ -420,6 +420,38 @@ def test_same_day_ai_outlier_is_quarantined_from_spread_and_probabilities(monkey
     assert model.inputs["same_day_sigma_cap_source"] == "station_calibration"
 
 
+def test_bma_shadow_bucket_probs_are_conditioned_on_observed_high(monkeypatch):
+    class _AtlantaNoon(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            fixed = cls(2026, 5, 14, 12, 0, tzinfo=ZoneInfo("America/New_York"))
+            return fixed.astimezone(tz) if tz else fixed
+
+    monkeypatch.setattr(temperature_model, "datetime", _AtlantaNoon)
+    now_utc = datetime(2026, 5, 14, 16, 0, tzinfo=timezone.utc)
+
+    model = compute_model(
+        nws_high=75.0,
+        wu_hourly_peak=76.0,
+        daily_high_metar=70.0,
+        current_temp_f=70.0,
+        calibration={},
+        buckets=[(68.0, 69.0), (70.0, 71.0), (72.0, None)],
+        forecast_quality="ok",
+        observed_high=70.0,
+        hrrr_high=75.0,
+        nbm_high=74.0,
+        now_utc=now_utc,
+        event_settlement_utc=datetime(2026, 5, 15, 3, 59, tzinfo=timezone.utc),
+    )
+
+    assert model is not None
+    bma_shadow = model.inputs["bma_shadow"]
+    assert bma_shadow["conditioned_on_observed_high"] == pytest.approx(70.0)
+    assert bma_shadow["probs"][0] == pytest.approx(0.0)
+    assert sum(bma_shadow["probs"]) == pytest.approx(1.0, abs=1e-6)
+
+
 def test_lock_falls_back_when_adaptive_lags(monkeypatch):
     """Atlanta regression: at 19:17 ET the observed daily high was 78.8°F but
     adaptive.peak_already_passed hadn't flipped yet. The lock regime must

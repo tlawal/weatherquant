@@ -67,6 +67,8 @@ The system's competitive edge is **per-station ensemble post-processing of a 10-
 | **M1 BMA Phase 1.5**     | **Side-by-side BMA vs legacy on city-page UI (Model Forecast box + Buckets column + multimodal chip)** | **✓ live** |
 | **M1 BMA Phase 2** | **Offline EM weight fitter — `BMAWeights` table populated nightly** | **✓ live** |
 | **M1 BMA Phase 3** | **Online-EM updates on settlement (every newly-resolved event nudges weights with lr=0.05)** | **✓ live** |
+| **M1 BMA intraday conditioning** | **Conditional BMA probabilities on observed high floor (fixes intraday low-tail mass display bug)** | **✓ live** |
+| **Intraday threshold shadow model** | **Deterministic threshold-crossing probabilities with monotone survival-to-bucket conversion, shadow-only** | **✓ live (shadow)** |
 | **Alpha dashboard** | **`/calibration/edge` — Brier(model) − Brier(market), per-city/per-day, plus chip on `/` and card on `/redemptions`** | **✓ live** |
 | **Market Context Agent rewrite** | **10-source encyclopedia, calibration MAE per source, adversarial reasoning + trigger conditions sections** | **✓ live** |
 | **AIWP probe** | **Weekly check of NOAA S3 for new AI weather model prefixes (FCN3 watch). One-line integration when detected.** | **✓ live** |

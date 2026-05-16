@@ -20,6 +20,7 @@ from backend.market_context.service import serialize_market_context_snapshot, _r
 from backend.tz_utils import city_local_date, city_local_now, city_local_tomorrow, city_local_day_after_tomorrow, et_today
 from backend.strategy.kelly import calculate_ev_per_share, calculate_expected_value, calculate_kelly_fraction
 from backend.modeling.calibration_engine import get_reliability_metrics, get_reliability_diagnostics
+from backend.modeling.settlement import canonical_bucket_ranges
 from backend.ingestion.model_metadata import fetch_openmeteo_metadata, _OM_META_ENDPOINTS
 from collections import defaultdict
 
@@ -744,6 +745,22 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
             # below can attach a per-bucket bma_prob without reparsing JSON.
             bma_shadow = model_inputs.get("bma_shadow") if isinstance(model_inputs, dict) else None
             bma_probs = (bma_shadow or {}).get("probs") or []
+            intraday_shadow = model_inputs.get("intraday_threshold_shadow") if isinstance(model_inputs, dict) else None
+            intraday_probs = (intraday_shadow or {}).get("probs") or []
+            canonical_ranges = canonical_bucket_ranges([(b.low_f, b.high_f) for b in buckets])
+            observed_high_for_rules = None
+            if isinstance(model_inputs, dict):
+                observed_high_for_rules = model_inputs.get("observed_high")
+                if observed_high_for_rules is None:
+                    observed_high_for_rules = model_inputs.get("ground_truth_high")
+            try:
+                observed_high_for_rules = (
+                    float(observed_high_for_rules)
+                    if observed_high_for_rules is not None
+                    else None
+                )
+            except (TypeError, ValueError):
+                observed_high_for_rules = None
 
             snapshot_id = model.id if model is not None else None
             bucket_ids = [bucket.id for bucket in buckets]
@@ -774,6 +791,23 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                 model_prob = probs[bucket.bucket_idx] if bucket.bucket_idx < len(probs) else None
                 # Per-bucket BMA shadow prob (None when no shadow data or bucket index out of range).
                 bma_prob = bma_probs[bucket.bucket_idx] if bucket.bucket_idx < len(bma_probs) else None
+                intraday_prob = (
+                    intraday_probs[bucket.bucket_idx]
+                    if bucket.bucket_idx < len(intraday_probs)
+                    else None
+                )
+                canonical_low = None
+                canonical_high = None
+                if bucket.bucket_idx < len(canonical_ranges):
+                    canonical_low, canonical_high = canonical_ranges[bucket.bucket_idx]
+                bucket_surpassed = (
+                    observed_high_for_rules is not None
+                    and canonical_high is not None
+                    and observed_high_for_rules >= canonical_high
+                )
+                resolution_rule_label = None
+                if canonical_high is not None:
+                    resolution_rule_label = f"settles below {canonical_high:.1f}°{getattr(city, 'unit', 'F')}"
 
                 yes_price = mkt.yes_ask if mkt else None
                 ev = calculate_expected_value(model_prob, yes_price) if model_prob is not None and yes_price else None
@@ -849,9 +883,15 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                     "label": bucket.label or f"Bucket {bucket.bucket_idx}",
                     "low_f": bucket.low_f,
                     "high_f": bucket.high_f,
+                    "canonical_low_f": canonical_low,
+                    "canonical_high_f": canonical_high,
+                    "observed_high_f": observed_high_for_rules,
+                    "surpassed": bucket_surpassed,
+                    "resolution_rule_label": resolution_rule_label,
                     "yes_token_id": bucket.yes_token_id,
                     "model_prob": round(model_prob, 4) if model_prob is not None else None,
                     "bma_prob": round(bma_prob, 4) if bma_prob is not None else None,
+                    "intraday_prob": round(intraday_prob, 4) if intraday_prob is not None else None,
                     "mkt_prob": mkt.yes_mid if mkt else None,
                     "yes_bid": mkt.yes_bid if mkt else None,
                     "yes_ask": mkt.yes_ask if mkt else None,
@@ -1213,6 +1253,19 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                 "winner": station_cal_row.winner,
             }
 
+    model_snapshot_current_temp_lag_s = None
+    if metar and metar.observed_at and model and model.computed_at:
+        metar_obs_at = metar.observed_at
+        model_computed_at = model.computed_at
+        if metar_obs_at.tzinfo is None:
+            metar_obs_at = metar_obs_at.replace(tzinfo=timezone.utc)
+        if model_computed_at.tzinfo is None:
+            model_computed_at = model_computed_at.replace(tzinfo=timezone.utc)
+        model_snapshot_current_temp_lag_s = max(
+            0.0,
+            (metar_obs_at.astimezone(timezone.utc) - model_computed_at.astimezone(timezone.utc)).total_seconds(),
+        )
+
     return templates.TemplateResponse(
         "city.html",
         {
@@ -1237,6 +1290,11 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
             "active_station_source": model_inputs.get("active_station_source") if isinstance(model_inputs, dict) else None,
             "ground_truth_high": model_inputs.get("ground_truth_high") if isinstance(model_inputs, dict) else None,
             "ground_truth_source": model_inputs.get("ground_truth_source") if isinstance(model_inputs, dict) else None,
+            "model_snapshot_current_temp_lag_s": model_snapshot_current_temp_lag_s,
+            "model_snapshot_stale_current_temp": (
+                model_snapshot_current_temp_lag_s is not None
+                and model_snapshot_current_temp_lag_s > 30.0
+            ),
             "settlement_source_verified": event.settlement_source_verified if event else None,
             "settlement_high": {
                 "high_f": settlement_result.get("high_f"),

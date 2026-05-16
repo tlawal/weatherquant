@@ -30,7 +30,11 @@ def test_station_calibration_card_separates_overall_and_current_lead_skill():
 def test_buckets_table_surfaces_execution_microstructure():
     template = Path("web/templates/city.html").read_text()
 
-    assert "True Edge" in template
+    assert "Est. Model Edge" in template
+    assert "Intraday" in template
+    assert "Legacy Daily-High PDF" in template
+    assert "Intraday Threshold" in template
+    assert "settles below" in template
     assert "Max Size" in template
     assert "Trade State" in template
     assert "After-Cost Edge" in template

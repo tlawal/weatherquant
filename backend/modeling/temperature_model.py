@@ -39,11 +39,13 @@ from zoneinfo import ZoneInfo
 from scipy.stats import norm as _norm
 
 from backend.modeling.bma import (
+    bma_conditional_bucket_probabilities,
     bma_bucket_probabilities,
     build_bma_predictive,
     predictive_to_dict,
 )
 from backend.modeling.distribution import bucket_probabilities, conditional_bucket_probabilities
+from backend.modeling.intraday_threshold import predict_intraday_threshold_probabilities
 from backend.modeling.settlement import (
     bucket_upper_bound,
     canonical_bucket_ranges,
@@ -1420,6 +1422,31 @@ def compute_model(
         projected_high_for_blend = projected_high
         projected_high_raw = projected_high
 
+    intraday_threshold_out = None
+    if canonical_buckets and observed_high is not None:
+        try:
+            trend_per_hr = None
+            if adaptive is not None and adaptive.kalman is not None:
+                trend_per_hr = adaptive.kalman.temp_trend_per_min * 60.0
+            intraday_threshold_out = predict_intraday_threshold_probabilities(
+                buckets=canonical_buckets,
+                observed_high=observed_high,
+                current_temp_f=current_temp_f,
+                projected_high=float(projected_high_for_blend),
+                consensus_high=float(mu_forecast),
+                sigma=float(sigma_final),
+                remaining_rise=float(remaining_rise),
+                hour_local=float(hour_local_fractional),
+                peak_hour_local=peak_hour_local,
+                trend_per_hr=trend_per_hr,
+                trusted_spread=float(trusted_spread),
+                forecast_quality=forecast_quality,
+                lock_regime=lock_regime,
+            )
+        except Exception:
+            log.exception("model: intraday threshold shadow failed; legacy path unaffected")
+            intraday_threshold_out = None
+
     inputs = {
         "nws_high": nws_high,
         "wu_hourly_peak": wu_hourly_peak,
@@ -1479,6 +1506,9 @@ def compute_model(
         "next_hotter_bucket_floor_f": hotter_bucket_floor(canonical_buckets, observed_bucket_idx),
     }
 
+    if intraday_threshold_out is not None:
+        inputs["intraday_threshold_shadow"] = intraday_threshold_out.to_dict()
+
     # Adaptive engine audit data
     if adaptive is not None:
         inputs["adaptive"] = {
@@ -1507,8 +1537,16 @@ def compute_model(
             bma_mu_out = float(bma_predictive.mean)
             bma_sigma_out = float(bma_predictive.sigma)
             if canonical_buckets:
-                bma_probs_out = bma_bucket_probabilities(bma_predictive, canonical_buckets)
+                if observed_high is not None:
+                    bma_probs_out = bma_conditional_bucket_probabilities(
+                        bma_predictive, canonical_buckets, floor=observed_high
+                    )
+                else:
+                    bma_probs_out = bma_bucket_probabilities(bma_predictive, canonical_buckets)
             bma_meta_out = predictive_to_dict(bma_predictive)
+            bma_meta_out["conditioned_on_observed_high"] = (
+                round(float(observed_high), 3) if observed_high is not None else None
+            )
             # Diagnostic: how far the mixture mean drifts from the live legacy
             # weighted mean. This can be non-zero while BMA remains a shadow
             # diagnostic over sources that live probabilities exclude or cap.
