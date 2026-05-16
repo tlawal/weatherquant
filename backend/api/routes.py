@@ -2752,6 +2752,13 @@ class ConfigUpdate(BaseModel):
     expiry_passive_sell_min_bid: Optional[float] = None
     expiry_market_win_min_bid: Optional[float] = None
     expiry_risk_exit_max_discount: Optional[float] = None
+    obs_exit_enabled: Optional[bool] = None
+    obs_exit_window_minutes: Optional[int] = None
+    temp_sensitivity_threshold_f: Optional[float] = None
+    obs_min_profit_cents: Optional[float] = None
+    obs_reentry_cooldown_minutes: Optional[int] = None
+    obs_min_depth_usd: Optional[float] = None
+    obs_max_orderbook_imbalance: Optional[float] = None
 
 
 @router.post("/config")
@@ -2842,6 +2849,46 @@ async def update_config(body: ConfigUpdate, actor: str = Depends(require_admin))
         Config.EXPIRY_RISK_EXIT_MAX_DISCOUNT = body.expiry_risk_exit_max_discount
         updates["expiry_risk_exit_max_discount"] = body.expiry_risk_exit_max_discount
 
+    if body.obs_exit_enabled is not None:
+        Config.OBS_EXIT_ENABLED = bool(body.obs_exit_enabled)
+        updates["obs_exit_enabled"] = Config.OBS_EXIT_ENABLED
+
+    if body.obs_exit_window_minutes is not None:
+        if not (1 <= body.obs_exit_window_minutes <= 60):
+            raise HTTPException(status_code=400, detail="obs_exit_window_minutes must be in [1, 60]")
+        Config.OBS_EXIT_WINDOW_MINUTES = body.obs_exit_window_minutes
+        updates["obs_exit_window_minutes"] = body.obs_exit_window_minutes
+
+    if body.temp_sensitivity_threshold_f is not None:
+        if not (0.1 <= body.temp_sensitivity_threshold_f <= 3.0):
+            raise HTTPException(status_code=400, detail="temp_sensitivity_threshold_f must be in [0.1, 3.0]")
+        Config.TEMP_SENSITIVITY_THRESHOLD_F = body.temp_sensitivity_threshold_f
+        updates["temp_sensitivity_threshold_f"] = body.temp_sensitivity_threshold_f
+
+    if body.obs_min_profit_cents is not None:
+        if not (0.0 <= body.obs_min_profit_cents <= 50.0):
+            raise HTTPException(status_code=400, detail="obs_min_profit_cents must be in [0, 50]")
+        Config.OBS_MIN_PROFIT_CENTS = body.obs_min_profit_cents
+        updates["obs_min_profit_cents"] = body.obs_min_profit_cents
+
+    if body.obs_reentry_cooldown_minutes is not None:
+        if not (1 <= body.obs_reentry_cooldown_minutes <= 60):
+            raise HTTPException(status_code=400, detail="obs_reentry_cooldown_minutes must be in [1, 60]")
+        Config.OBS_REENTRY_COOLDOWN_MINUTES = body.obs_reentry_cooldown_minutes
+        updates["obs_reentry_cooldown_minutes"] = body.obs_reentry_cooldown_minutes
+
+    if body.obs_min_depth_usd is not None:
+        if not (0.0 <= body.obs_min_depth_usd <= 10000.0):
+            raise HTTPException(status_code=400, detail="obs_min_depth_usd must be in [0, 10000]")
+        Config.OBS_MIN_DEPTH_USD = body.obs_min_depth_usd
+        updates["obs_min_depth_usd"] = body.obs_min_depth_usd
+
+    if body.obs_max_orderbook_imbalance is not None:
+        if not (0.50 <= body.obs_max_orderbook_imbalance <= 1.0):
+            raise HTTPException(status_code=400, detail="obs_max_orderbook_imbalance must be in [0.50, 1.0]")
+        Config.OBS_MAX_ORDERBOOK_IMBALANCE = body.obs_max_orderbook_imbalance
+        updates["obs_max_orderbook_imbalance"] = body.obs_max_orderbook_imbalance
+
     async with get_session() as sess:
         await append_audit(sess, actor=actor, action="config_updated", payload=updates)
 
@@ -2862,6 +2909,13 @@ async def update_config(body: ConfigUpdate, actor: str = Depends(require_admin))
             "expiry_passive_sell_min_bid": Config.EXPIRY_PASSIVE_SELL_MIN_BID,
             "expiry_market_win_min_bid": Config.EXPIRY_MARKET_WIN_MIN_BID,
             "expiry_risk_exit_max_discount": Config.EXPIRY_RISK_EXIT_MAX_DISCOUNT,
+            "obs_exit_enabled": Config.OBS_EXIT_ENABLED,
+            "obs_exit_window_minutes": Config.OBS_EXIT_WINDOW_MINUTES,
+            "temp_sensitivity_threshold_f": Config.TEMP_SENSITIVITY_THRESHOLD_F,
+            "obs_min_profit_cents": Config.OBS_MIN_PROFIT_CENTS,
+            "obs_reentry_cooldown_minutes": Config.OBS_REENTRY_COOLDOWN_MINUTES,
+            "obs_min_depth_usd": Config.OBS_MIN_DEPTH_USD,
+            "obs_max_orderbook_imbalance": Config.OBS_MAX_ORDERBOOK_IMBALANCE,
         }
         try:
             from backend.storage.repos import save_runtime_config

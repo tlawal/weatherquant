@@ -404,6 +404,54 @@ class MarketContextSnapshot(Base):
     city_ref: Mapped[City] = relationship("City", back_populates="market_context_snapshots")
 
 
+class WalletStat(Base):
+    """Read-only public-wallet analytics for city weather markets.
+
+    Informational only. This table is never used by execution code.
+    """
+    __tablename__ = "wallet_stats"
+    __table_args__ = (
+        UniqueConstraint(
+            "wallet_address",
+            "city_slug",
+            "condition_id",
+            "date",
+            name="uq_wallet_stats_wallet_city_condition_date",
+        ),
+        Index("ix_wallet_stats_city_slug", "city_slug"),
+        Index("ix_wallet_stats_wallet_address", "wallet_address"),
+        Index("ix_wallet_stats_date", "date"),
+        Index("ix_wallet_stats_consistency_score", "consistency_score"),
+        Index("ix_wallet_stats_condition_id", "condition_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    wallet_address: Mapped[str] = mapped_column(String(64), nullable=False)
+    city_slug: Mapped[str] = mapped_column(String(64), nullable=False)
+    market_slug: Mapped[Optional[str]] = mapped_column(String(256))
+    condition_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    date: Mapped[str] = mapped_column(String(10), nullable=False)
+    trade_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    volume_usd: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    realized_pnl: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    unrealized_pnl: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    win_rate: Mapped[Optional[float]] = mapped_column(Float)
+    avg_hold_minutes: Mapped[Optional[float]] = mapped_column(Float)
+    avg_entry_price: Mapped[Optional[float]] = mapped_column(Float)
+    avg_exit_price: Mapped[Optional[float]] = mapped_column(Float)
+    profitable_days_pct: Mapped[Optional[float]] = mapped_column(Float)
+    sharpe_like: Mapped[Optional[float]] = mapped_column(Float)
+    consistency_score: Mapped[Optional[float]] = mapped_column(Float)
+    regime: Mapped[Optional[str]] = mapped_column(String(32))
+    inferred_style: Mapped[Optional[str]] = mapped_column(String(32))
+    bucket_idx: Mapped[Optional[int]] = mapped_column(Integer)
+    bucket_label: Mapped[Optional[str]] = mapped_column(String(256))
+    net_position_qty: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    net_flow_usd: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    last_trade_ts: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    last_updated_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+
 # ─── Signals ──────────────────────────────────────────────────────────────────
 
 class Signal(Base):

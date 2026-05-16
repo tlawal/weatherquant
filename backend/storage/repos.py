@@ -38,6 +38,7 @@ from backend.storage.models import (
     SourceLeadTimeSkill,
     StationCalibration,
     StationProfile,
+    WalletStat,
     WorkerHeartbeat,
 )
 
@@ -848,6 +849,67 @@ async def get_market_snapshots_for_event(
     )
     if since:
         q = q.where(MarketSnapshot.fetched_at >= since)
+    result = await session.execute(q)
+    return list(result.scalars().all())
+
+
+# ─── Wallet Stats ─────────────────────────────────────────────────────────────
+
+async def upsert_wallet_stat(session: AsyncSession, **kwargs) -> WalletStat:
+    """Postgres-safe idempotent upsert for read-only wallet analytics."""
+    wallet_address = str(kwargs["wallet_address"]).lower()
+    city_slug = str(kwargs["city_slug"])
+    condition_id = str(kwargs["condition_id"])
+    date_value = str(kwargs["date"])
+
+    clean_kwargs = {
+        key: value
+        for key, value in kwargs.items()
+        if hasattr(WalletStat, key)
+    }
+    clean_kwargs.update(
+        {
+            "wallet_address": wallet_address,
+            "city_slug": city_slug,
+            "condition_id": condition_id,
+            "date": date_value,
+        }
+    )
+
+    result = await session.execute(
+        select(WalletStat).where(
+            WalletStat.wallet_address == wallet_address,
+            WalletStat.city_slug == city_slug,
+            WalletStat.condition_id == condition_id,
+            WalletStat.date == date_value,
+        )
+    )
+    row = result.scalar_one_or_none()
+    if row is None:
+        row = WalletStat(**clean_kwargs)
+        session.add(row)
+    else:
+        for key, value in clean_kwargs.items():
+            setattr(row, key, value)
+    await session.commit()
+    await session.refresh(row)
+    return row
+
+
+async def get_wallet_stats_for_city(
+    session: AsyncSession,
+    city_slug: str,
+    date_et: str | None = None,
+    limit: int = 100,
+) -> list[WalletStat]:
+    q = select(WalletStat).where(WalletStat.city_slug == city_slug)
+    if date_et:
+        q = q.where(WalletStat.date == date_et)
+    q = q.order_by(
+        WalletStat.consistency_score.desc().nullslast(),
+        WalletStat.volume_usd.desc(),
+        WalletStat.last_trade_ts.desc().nullslast(),
+    ).limit(limit)
     result = await session.execute(q)
     return list(result.scalars().all())
 

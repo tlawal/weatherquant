@@ -56,9 +56,18 @@ async def _load_runtime_config() -> None:
             "expiry_passive_sell_min_bid": "EXPIRY_PASSIVE_SELL_MIN_BID",
             "expiry_market_win_min_bid": "EXPIRY_MARKET_WIN_MIN_BID",
             "expiry_risk_exit_max_discount": "EXPIRY_RISK_EXIT_MAX_DISCOUNT",
+            "temp_sensitivity_threshold_f": "TEMP_SENSITIVITY_THRESHOLD_F",
+            "obs_min_profit_cents": "OBS_MIN_PROFIT_CENTS",
+            "obs_min_depth_usd": "OBS_MIN_DEPTH_USD",
+            "obs_max_orderbook_imbalance": "OBS_MAX_ORDERBOOK_IMBALANCE",
         }
         _INT_FIELDS = {
             "consensus_debounce_runs": "CONSENSUS_DEBOUNCE_RUNS",
+            "obs_exit_window_minutes": "OBS_EXIT_WINDOW_MINUTES",
+            "obs_reentry_cooldown_minutes": "OBS_REENTRY_COOLDOWN_MINUTES",
+        }
+        _BOOL_FIELDS = {
+            "obs_exit_enabled": "OBS_EXIT_ENABLED",
         }
         for key, attr in _FLOAT_FIELDS.items():
             if key in params:
@@ -66,6 +75,9 @@ async def _load_runtime_config() -> None:
         for key, attr in _INT_FIELDS.items():
             if key in params:
                 setattr(Config, attr, int(params[key]))
+        for key, attr in _BOOL_FIELDS.items():
+            if key in params:
+                setattr(Config, attr, bool(params[key]))
         log.info("startup: loaded runtime config overrides: %s", list(params.keys()))
     except Exception as e:
         log.warning("startup: could not load runtime config from DB (safe to ignore on first boot): %s", e)

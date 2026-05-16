@@ -1110,6 +1110,72 @@
 </div>
 {% endif %}
 
+<!-- ── OBSERVATION-PROXIMITY EXIT READOUT ────────────────────────────────── -->
+{% if obs_proximity %}
+<div class="card p-4 mb-6">
+  <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between mb-3">
+    <div>
+      <div class="flex items-center gap-2 flex-wrap">
+        <span class="text-[10px] uppercase tracking-widest font-bold" style="color:var(--text-muted)">OBS Proximity Exit</span>
+        {% set obs_badge = obs_proximity.sensitivity_badge %}
+        <span class="text-[10px] px-2 py-0.5 rounded-full font-bold"
+              style="{% if obs_badge == 'HIGH' %}background:rgba(239,68,68,0.15);color:#fca5a5{% elif obs_badge == 'MEDIUM' %}background:rgba(234,179,8,0.15);color:#fde047{% else %}background:rgba(34,197,94,0.15);color:#86efac{% endif %}">
+          {{ obs_badge }}
+        </span>
+        {% if obs_proximity.armed %}
+          <span class="text-[10px] px-2 py-0.5 rounded-full font-bold" style="background:rgba(34,211,238,0.12);color:var(--cyan)">Armed</span>
+        {% else %}
+          <span class="text-[10px] px-2 py-0.5 rounded-full font-bold" style="background:var(--bg-panel);color:var(--text-muted);border:1px solid var(--border)">Inactive</span>
+        {% endif %}
+      </div>
+      <div class="mt-1 text-[10px]" style="color:var(--text-muted)">
+        Station observation risk around the held or reference bucket.
+      </div>
+    </div>
+    <div class="text-left sm:text-right">
+      <div class="text-[10px]" style="color:var(--text-muted)">Next Obs</div>
+      <div class="mono text-sm font-semibold">{{ obs_proximity.next_observation_label or "—" }}</div>
+      <div class="mono text-[10px]" style="color:var(--text-muted)">Countdown {{ obs_proximity.countdown_label or "—" }}</div>
+    </div>
+  </div>
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-[11px]">
+    <div>
+      <div style="color:var(--text-muted)" class="mb-1">Station</div>
+      <div class="mono font-medium">{{ obs_proximity.station or "—" }}</div>
+    </div>
+    <div>
+      <div style="color:var(--text-muted)" class="mb-1">Nearest Boundary</div>
+      <div class="mono font-medium">
+        {% if obs_proximity.boundary_distance_f is not none %}{{ "%.2f"|format(obs_proximity.boundary_distance_f) }}°F{% else %}—{% endif %}
+      </div>
+    </div>
+    <div>
+      <div style="color:var(--text-muted)" class="mb-1">Reference Bucket</div>
+      <div class="mono font-medium truncate" title="{{ obs_proximity.reference_bucket or '' }}">{{ obs_proximity.reference_bucket or "—" }}</div>
+    </div>
+    <div>
+      <div style="color:var(--text-muted)" class="mb-1">±1°F Buckets</div>
+      <div class="mono font-medium truncate" title="{{ obs_proximity.minus_1f_bucket or '' }} / {{ obs_proximity.plus_1f_bucket or '' }}">
+        {{ obs_proximity.minus_1f_bucket or "—" }} / {{ obs_proximity.plus_1f_bucket or "—" }}
+      </div>
+    </div>
+  </div>
+  {% if not obs_proximity.enabled or not obs_proximity.is_us or not obs_proximity.observation_minutes or obs_proximity.current_temp is none %}
+  <div class="mt-3 pt-3 border-t text-[10px] mono" style="border-color:var(--border);color:var(--text-muted)">
+    {% if not obs_proximity.enabled %}
+      OBS_PROXIMITY disabled in strategy config.
+    {% elif not obs_proximity.is_us %}
+      OBS_PROXIMITY applies only to US high-temperature markets.
+    {% elif not obs_proximity.observation_minutes %}
+      Station observation pattern unavailable.
+    {% elif obs_proximity.current_temp is none %}
+      Current temperature or nowcast unavailable.
+    {% endif %}
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+
 <!-- ── MARKET CONTEXT ─────────────────────────────────────────────────────── -->
 <div class="card p-5 mb-6">
   <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between mb-4">
@@ -1198,6 +1264,128 @@
   {% else %}
   <div class="text-sm leading-relaxed" style="color:var(--text-muted)">
     Market Context has not been generated for this city/date yet. Use <span class="mono">REFRESH</span> to synthesize the latest stored backend observations, forecast comparisons, pricing context, and deterministic final bucket call.
+  </div>
+  {% endif %}
+</div>
+
+<!-- ── TOP WEATHER WALLETS ───────────────────────────────────────────────── -->
+<div class="card p-5 mb-6">
+  <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between mb-4">
+    <div>
+      <div class="flex items-center gap-2">
+        <h2 class="font-semibold text-sm">Top Weather Wallets</h2>
+        {% if wallet_leaderboard and wallet_leaderboard.enabled %}
+        <span class="text-[10px] px-2 py-0.5 rounded-full font-bold"
+              style="background:rgba(34,211,238,0.12);color:var(--cyan)">
+          READ ONLY
+        </span>
+        {% else %}
+        <span class="text-[10px] px-2 py-0.5 rounded-full font-bold"
+              style="background:var(--bg-panel);color:var(--text-muted);border:1px solid var(--border)">
+          DISABLED
+        </span>
+        {% endif %}
+      </div>
+      <p class="text-[11px] mt-1" style="color:var(--text-muted)">
+        {{ wallet_leaderboard.disclaimer if wallet_leaderboard else "Wallet leaderboard is read-only public-market analytics. It is not a copy-trading signal and does not trigger automated trades." }}
+      </p>
+    </div>
+    <div class="text-[10px] mono text-right" style="color:var(--text-muted)">
+      {% if wallet_leaderboard and wallet_leaderboard.rows %}
+        {{ wallet_leaderboard.rows|length }} wallet{{ '' if wallet_leaderboard.rows|length == 1 else 's' }}
+      {% else %}
+        no wallet data
+      {% endif %}
+    </div>
+  </div>
+
+  {% if smart_money_context and smart_money_context.status == 'available' %}
+  <div class="mb-4 p-3 rounded-lg border" style="background:rgba(34,211,238,0.06);border-color:rgba(34,211,238,0.20)">
+    <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px]">
+      <span class="uppercase tracking-widest font-bold" style="color:var(--cyan)">Smart Money vs Model</span>
+      <span>Model favored bucket: <span class="mono">{{ smart_money_context.model_bucket_label or ('Bucket ' ~ smart_money_context.model_bucket_idx) }}</span></span>
+      <span>Top-wallet net flow: <span class="mono">{{ smart_money_context.smart_money_bucket_label or ('Bucket ' ~ smart_money_context.smart_money_bucket_idx) }}</span></span>
+      <span>Divergence:
+        <span class="mono font-bold"
+              style="color:{% if smart_money_context.divergence == 'HIGH' %}#FCA5A5{% elif smart_money_context.divergence == 'MEDIUM' %}#FBBF24{% else %}#86EFAC{% endif %}">
+          {{ smart_money_context.divergence }}
+        </span>
+      </span>
+    </div>
+  </div>
+  {% elif wallet_leaderboard and wallet_leaderboard.enabled %}
+  <div class="mb-4 p-3 rounded-lg text-[11px]" style="background:var(--bg-panel);border:1px solid var(--border);color:var(--text-muted)">
+    Smart Money vs Model is unavailable: {{ smart_money_context.reason|replace('_', ' ') if smart_money_context else 'missing data' }}.
+  </div>
+  {% endif %}
+
+  {% if wallet_leaderboard and wallet_leaderboard.rows %}
+  <div class="overflow-x-auto">
+    <table class="w-full text-xs" style="min-width:58rem">
+      <thead>
+        <tr class="text-[10px] uppercase tracking-widest" style="color:var(--text-muted);border-bottom:1px solid var(--border)">
+          <th class="px-2 py-2 text-left">Wallet</th>
+          <th class="px-2 py-2 text-right">Score</th>
+          <th class="px-2 py-2 text-right">Realized PnL</th>
+          <th class="px-2 py-2 text-right">Win Rate</th>
+          <th class="px-2 py-2 text-right">Volume</th>
+          <th class="px-2 py-2 text-right">Avg Hold</th>
+          <th class="px-2 py-2 text-left">Style</th>
+          <th class="px-2 py-2 text-left">Recent Exposure</th>
+          <th class="px-2 py-2 text-left">Last Active</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in wallet_leaderboard.rows %}
+        <tr class="border-b hover:bg-white/5 transition-colors" style="border-color:rgba(26,58,107,0.4)">
+          <td class="px-2 py-2.5 mono">
+            {% if row.profile_url %}
+            <a href="{{ row.profile_url }}" target="_blank" rel="noopener" class="hover:underline" style="color:var(--cyan)">{{ row.display_address }}</a>
+            {% else %}
+            {{ row.display_address }}
+            {% endif %}
+          </td>
+          <td class="px-2 py-2.5 text-right mono font-bold">
+            {% if row.consistency_score is not none %}{{ "%.2f"|format(row.consistency_score) }}{% else %}—{% endif %}
+          </td>
+          <td class="px-2 py-2.5 text-right mono" style="color:{% if row.realized_pnl > 0 %}#86EFAC{% elif row.realized_pnl < 0 %}#FCA5A5{% else %}var(--text-muted){% endif %}">
+            {{ "%+.2f"|format(row.realized_pnl) }}
+          </td>
+          <td class="px-2 py-2.5 text-right mono">
+            {% if row.win_rate is not none %}{{ "%.0f"|format(row.win_rate * 100) }}%{% else %}—{% endif %}
+          </td>
+          <td class="px-2 py-2.5 text-right mono">${{ "%.0f"|format(row.volume_usd) }}</td>
+          <td class="px-2 py-2.5 text-right mono">
+            {% if row.avg_hold_minutes is not none %}
+              {% if row.avg_hold_minutes >= 60 %}{{ "%.1f"|format(row.avg_hold_minutes / 60) }}h{% else %}{{ "%.0f"|format(row.avg_hold_minutes) }}m{% endif %}
+            {% else %}—{% endif %}
+          </td>
+          <td class="px-2 py-2.5">{{ row.inferred_style or 'Unknown' }}</td>
+          <td class="px-2 py-2.5">
+            {% if row.bucket_label %}
+              <span class="mono">{{ row.bucket_label }}</span>
+            {% elif row.bucket_idx is not none %}
+              <span class="mono">Bucket {{ row.bucket_idx }}</span>
+            {% else %}
+              <span style="color:var(--text-muted)">—</span>
+            {% endif %}
+            {% if row.net_flow_usd %}
+            <div class="text-[10px] mono" style="color:{% if row.net_flow_usd > 0 %}#86EFAC{% else %}#FCA5A5{% endif %}">
+              flow {{ "%+.0f"|format(row.net_flow_usd) }}
+            </div>
+            {% endif %}
+          </td>
+          <td class="px-2 py-2.5 mono text-[10px]" style="color:var(--text-muted)">
+            {{ row.last_trade_ts or '—' }}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="text-sm leading-relaxed" style="color:var(--text-muted)">
+    No wallet leaderboard rows are available for this city/date yet. The dashboard will stay empty until real public trade data has been fetched and scored.
   </div>
   {% endif %}
 </div>

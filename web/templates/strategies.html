@@ -461,6 +461,110 @@
             Price discount below bid for EXPIRY clearance sells. Lower = better price but risk no fill.
           </p>
         </div>
+
+        <!-- OBS Exit Enabled -->
+        <div class="space-y-2">
+          <div class="flex items-center justify-between">
+            <label class="text-xs font-bold" style="color:var(--text-muted)">OBS Proximity</label>
+            <input type="checkbox"
+                   x-model="obsExitEnabled" @change="exitDirty = true"
+                   class="h-4 w-4 cursor-pointer rounded border-white/10 bg-transparent"
+                   style="accent-color:var(--cyan)" />
+          </div>
+          <p class="text-[10px]" style="color:var(--text-muted)">
+            Enables the pre-observation fragile-bucket exit layer for US high-temperature markets.
+          </p>
+        </div>
+
+        <!-- OBS Window -->
+        <div class="space-y-2">
+          <div class="flex items-center justify-between">
+            <label class="text-xs font-bold" style="color:var(--text-muted)">OBS Window</label>
+            <span class="mono text-sm font-bold" style="color:var(--cyan)" x-text="obsExitWindowMinutes + 'm'"></span>
+          </div>
+          <input type="range" min="1" max="60" step="1"
+                 x-model.number="obsExitWindowMinutes" @input="exitDirty = true"
+                 class="w-full h-2 rounded-lg appearance-none cursor-pointer"
+                 style="background:var(--bg-panel);accent-color:var(--cyan)" />
+          <p class="text-[10px]" style="color:var(--text-muted)">
+            Minutes before the next scheduled station observation when OBS_PROXIMITY may arm.
+          </p>
+        </div>
+
+        <!-- Temp Sensitivity -->
+        <div class="space-y-2">
+          <div class="flex items-center justify-between">
+            <label class="text-xs font-bold" style="color:var(--text-muted)">Temp Sensitivity</label>
+            <span class="mono text-sm font-bold" style="color:var(--yellow)" x-text="tempSensitivityThresholdF.toFixed(1) + 'F'"></span>
+          </div>
+          <input type="range" min="0.1" max="3.0" step="0.1"
+                 x-model.number="tempSensitivityThresholdF" @input="exitDirty = true"
+                 class="w-full h-2 rounded-lg appearance-none cursor-pointer"
+                 style="background:var(--bg-panel);accent-color:var(--yellow)" />
+          <p class="text-[10px]" style="color:var(--text-muted)">
+            Boundary distance that marks a held bucket as fragile to a near-term official readout.
+          </p>
+        </div>
+
+        <!-- OBS Min Profit -->
+        <div class="space-y-2">
+          <div class="flex items-center justify-between">
+            <label class="text-xs font-bold" style="color:var(--text-muted)">OBS Min Profit</label>
+            <span class="mono text-sm font-bold" style="color:var(--green)" x-text="obsMinProfitCents.toFixed(0) + 'c'"></span>
+          </div>
+          <input type="range" min="0" max="50" step="1"
+                 x-model.number="obsMinProfitCents" @input="exitDirty = true"
+                 class="w-full h-2 rounded-lg appearance-none cursor-pointer"
+                 style="background:var(--bg-panel);accent-color:var(--green)" />
+          <p class="text-[10px]" style="color:var(--text-muted)">
+            Net per-share mark-to-market profit required before the OBS layer can sell.
+          </p>
+        </div>
+
+        <!-- OBS Cooldown -->
+        <div class="space-y-2">
+          <div class="flex items-center justify-between">
+            <label class="text-xs font-bold" style="color:var(--text-muted)">OBS Cooldown</label>
+            <span class="mono text-sm font-bold" style="color:var(--cyan)" x-text="obsReentryCooldownMinutes + 'm'"></span>
+          </div>
+          <input type="range" min="1" max="60" step="1"
+                 x-model.number="obsReentryCooldownMinutes" @input="exitDirty = true"
+                 class="w-full h-2 rounded-lg appearance-none cursor-pointer"
+                 style="background:var(--bg-panel);accent-color:var(--cyan)" />
+          <p class="text-[10px]" style="color:var(--text-muted)">
+            Minimum time between OBS_PROXIMITY exit attempts for the same bucket.
+          </p>
+        </div>
+
+        <!-- OBS Min Depth -->
+        <div class="space-y-2">
+          <div class="flex items-center justify-between">
+            <label class="text-xs font-bold" style="color:var(--text-muted)">OBS Min Bid Depth</label>
+            <span class="mono text-sm font-bold" style="color:var(--yellow)" x-text="'$' + obsMinDepthUsd.toFixed(0)"></span>
+          </div>
+          <input type="range" min="0" max="1000" step="25"
+                 x-model.number="obsMinDepthUsd" @input="exitDirty = true"
+                 class="w-full h-2 rounded-lg appearance-none cursor-pointer"
+                 style="background:var(--bg-panel);accent-color:var(--yellow)" />
+          <p class="text-[10px]" style="color:var(--text-muted)">
+            Minimum bid-side notional depth required before selling into the CLOB.
+          </p>
+        </div>
+
+        <!-- OBS Imbalance -->
+        <div class="space-y-2">
+          <div class="flex items-center justify-between">
+            <label class="text-xs font-bold" style="color:var(--text-muted)">OBS Max Imbalance</label>
+            <span class="mono text-sm font-bold" style="color:var(--text-muted)" x-text="(obsMaxOrderbookImbalance * 100).toFixed(0) + '%'"></span>
+          </div>
+          <input type="range" min="0.50" max="1.00" step="0.01"
+                 x-model.number="obsMaxOrderbookImbalance" @input="exitDirty = true"
+                 class="w-full h-2 rounded-lg appearance-none cursor-pointer"
+                 style="background:var(--bg-panel);accent-color:var(--cyan)" />
+          <p class="text-[10px]" style="color:var(--text-muted)">
+            Blocks exits when one side dominates top-of-book depth.
+          </p>
+        </div>
       </div>
 
       <div class="flex justify-end mt-4">
@@ -727,6 +831,13 @@ function strategiesPage() {
     urgentExitMaxSpread: {{ config.urgent_exit_max_spread }},
     consensusDebounceRuns: {{ config.consensus_debounce_runs }},
     expiryDiscount: {{ config.expiry_discount }},
+    obsExitEnabled: {{ 'true' if config.obs_exit_enabled else 'false' }},
+    obsExitWindowMinutes: {{ config.obs_exit_window_minutes }},
+    tempSensitivityThresholdF: {{ config.temp_sensitivity_threshold_f }},
+    obsMinProfitCents: {{ config.obs_min_profit_cents }},
+    obsReentryCooldownMinutes: {{ config.obs_reentry_cooldown_minutes }},
+    obsMinDepthUsd: {{ config.obs_min_depth_usd }},
+    obsMaxOrderbookImbalance: {{ config.obs_max_orderbook_imbalance }},
     exitDirty: false,
 
     // Telegram alerts
@@ -892,6 +1003,13 @@ function strategiesPage() {
             urgent_exit_max_spread: this.urgentExitMaxSpread,
             consensus_debounce_runs: this.consensusDebounceRuns,
             expiry_discount: this.expiryDiscount,
+            obs_exit_enabled: this.obsExitEnabled,
+            obs_exit_window_minutes: this.obsExitWindowMinutes,
+            temp_sensitivity_threshold_f: this.tempSensitivityThresholdF,
+            obs_min_profit_cents: this.obsMinProfitCents,
+            obs_reentry_cooldown_minutes: this.obsReentryCooldownMinutes,
+            obs_min_depth_usd: this.obsMinDepthUsd,
+            obs_max_orderbook_imbalance: this.obsMaxOrderbookImbalance,
           }),
         });
         if (res.ok) { this.exitDirty = false; }

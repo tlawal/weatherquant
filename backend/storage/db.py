@@ -366,6 +366,47 @@ async def init_db() -> None:
     await _run_ddl("ALTER TABLE station_calibrations ADD COLUMN mae_nbm_f FLOAT")
     await _run_ddl("ALTER TABLE station_calibrations ADD COLUMN winner VARCHAR(10)")
 
+    # wallet_stats — read-only public-wallet intelligence for weather markets.
+    # Production runs Postgres on Railway; this DDL intentionally avoids
+    # SQLite-only upsert/schema features while remaining accepted by SQLite
+    # during local/test initialization.
+    await _run_ddl("""
+        CREATE TABLE IF NOT EXISTS wallet_stats (
+            id SERIAL PRIMARY KEY,
+            wallet_address VARCHAR(64) NOT NULL,
+            city_slug VARCHAR(64) NOT NULL,
+            market_slug VARCHAR(256),
+            condition_id VARCHAR(128) NOT NULL,
+            date VARCHAR(10) NOT NULL,
+            trade_count INTEGER NOT NULL DEFAULT 0,
+            volume_usd FLOAT NOT NULL DEFAULT 0.0,
+            realized_pnl FLOAT NOT NULL DEFAULT 0.0,
+            unrealized_pnl FLOAT NOT NULL DEFAULT 0.0,
+            win_rate FLOAT,
+            avg_hold_minutes FLOAT,
+            avg_entry_price FLOAT,
+            avg_exit_price FLOAT,
+            profitable_days_pct FLOAT,
+            sharpe_like FLOAT,
+            consistency_score FLOAT,
+            regime VARCHAR(32),
+            inferred_style VARCHAR(32),
+            bucket_idx INTEGER,
+            bucket_label VARCHAR(256),
+            net_position_qty FLOAT NOT NULL DEFAULT 0.0,
+            net_flow_usd FLOAT NOT NULL DEFAULT 0.0,
+            last_trade_ts TIMESTAMP WITH TIME ZONE,
+            last_updated_ts TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+            CONSTRAINT uq_wallet_stats_wallet_city_condition_date
+                UNIQUE (wallet_address, city_slug, condition_id, date)
+        )
+    """)
+    await _run_ddl("CREATE INDEX IF NOT EXISTS ix_wallet_stats_city_slug ON wallet_stats (city_slug)")
+    await _run_ddl("CREATE INDEX IF NOT EXISTS ix_wallet_stats_wallet_address ON wallet_stats (wallet_address)")
+    await _run_ddl("CREATE INDEX IF NOT EXISTS ix_wallet_stats_date ON wallet_stats (date)")
+    await _run_ddl("CREATE INDEX IF NOT EXISTS ix_wallet_stats_consistency_score ON wallet_stats (consistency_score)")
+    await _run_ddl("CREATE INDEX IF NOT EXISTS ix_wallet_stats_condition_id ON wallet_stats (condition_id)")
+
     # Step 3: seed initial data
     await _seed_initial_data()
     log.info("db: init complete")

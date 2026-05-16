@@ -17,16 +17,24 @@ Interval: 300 seconds (5 min)
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy import select, delete, desc
 
 from backend.config import Config
 from backend.storage.db import get_session
-from backend.storage.repos import get_all_positions, get_open_orders, get_city_by_slug
+from backend.storage.repos import (
+    append_audit,
+    get_all_positions,
+    get_buckets_for_event,
+    get_city_by_slug,
+    get_open_orders,
+    get_station_profile,
+)
 from backend.engine.signal_engine import run_signal_engine, BucketSignal
 from backend.execution.trader import execute_signal
+from backend.execution.obs_proximity import evaluate_obs_proximity_exit, normalize_observation_minutes
 from backend.tz_utils import city_local_now
 
 log = logging.getLogger(__name__)
@@ -92,6 +100,11 @@ _consensus_cache_loaded = False
 # Per-bucket recent ev_at_bid values. Same survives-deploys pattern as consensus.
 _ev_cache: dict[int, list[float]] = {}
 _ev_cache_loaded = False
+
+# OBS_PROXIMITY debounce. This is intentionally in-memory and best-effort:
+# pending SELL-order checks still prevent duplicate live orders, while this
+# blocks repeated OBS decisions between scheduler cycles without a schema change.
+_obs_exit_cache: dict[int, datetime] = {}
 
 
 async def _load_consensus_cache() -> None:
@@ -280,6 +293,51 @@ def _loss_exit_blocked_by_positive_ev(pos, signal: BucketSignal, price: float) -
     )
 
 
+def _obs_reference_temp(signal: BucketSignal, current_temp: float | None, obs_high: float | None) -> float | None:
+    """Best available near-term temperature reference for OBS_PROXIMITY."""
+    reason = signal.reason or {}
+    adaptive = reason.get("adaptive") if isinstance(reason.get("adaptive"), dict) else {}
+    candidates = (
+        current_temp,
+        adaptive.get("predicted_daily_high"),
+        reason.get("projected_high_for_blend"),
+        reason.get("projected_high"),
+        obs_high,
+    )
+    for value in candidates:
+        try:
+            if value is not None:
+                return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _obs_cooldown_active(bucket_id: int, now_utc: datetime) -> bool:
+    last = _obs_exit_cache.get(bucket_id)
+    if last is None:
+        return False
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    cooldown = timedelta(minutes=Config.OBS_REENTRY_COOLDOWN_MINUTES)
+    return now_utc - last.astimezone(timezone.utc) < cooldown
+
+
+async def _audit_obs_decision(decision: dict) -> None:
+    """Persist an OBS_PROXIMITY decision payload without risking the cascade."""
+    try:
+        async with get_session() as sess:
+            await append_audit(
+                sess,
+                actor="exit_engine",
+                action="obs_proximity_decision",
+                payload=decision,
+                ok=True,
+            )
+    except Exception:
+        log.debug("exit_engine: failed to audit OBS_PROXIMITY decision", exc_info=True)
+
+
 async def _run_exit_cascade_for_position(
     pos, signal: BucketSignal, consensus_bucket_id: Optional[int], consensus_sig: Optional[BucketSignal] = None
 ) -> dict | None:
@@ -404,6 +462,117 @@ async def _run_exit_cascade_for_position(
                          signal.city_slug, consensus_bucket_id, sell_qty, pos.moon_bag_qty or 0.0)
                 return {"level": "URGENT", "price": sell_price, "reason": "consensus_shifted",
                         "qty_override": sell_qty}
+
+    # ── 2b. OBS_PROXIMITY ──
+    # Near the next official station observation, take marked profits on a
+    # fragile held bucket before a +/-1F official readout can flip the winner.
+    reason = signal.reason or {}
+    station_id = (
+        reason.get("active_station_id")
+        or reason.get("station_id")
+        or getattr(city, "metar_station", None)
+    )
+    if station_id:
+        station_id = str(station_id).upper()
+
+    observation_minutes = normalize_observation_minutes(reason.get("observation_minutes"))
+    if (
+        Config.OBS_EXIT_ENABLED
+        and getattr(city, "is_us", False)
+        and station_id
+        and not observation_minutes
+    ):
+        try:
+            async with get_session() as sess:
+                profile = await get_station_profile(sess, station_id)
+            if profile and profile.observation_minutes:
+                observation_minutes = normalize_observation_minutes(profile.observation_minutes)
+        except Exception:
+            log.debug("exit: OBS_PROXIMITY station-profile lookup failed for %s", station_id, exc_info=True)
+
+    bucket_specs = []
+    if Config.OBS_EXIT_ENABLED and getattr(city, "is_us", False) and observation_minutes:
+        try:
+            async with get_session() as sess:
+                buckets = await get_buckets_for_event(sess, signal.event_id)
+            bucket_specs = [
+                {
+                    "bucket_idx": b.bucket_idx,
+                    "label": b.label or f"Bucket {b.bucket_idx}",
+                    "low_f": b.low_f,
+                    "high_f": b.high_f,
+                }
+                for b in buckets
+            ]
+        except Exception:
+            log.debug("exit: OBS_PROXIMITY bucket lookup failed for event %s", signal.event_id, exc_info=True)
+
+    obs_decision = evaluate_obs_proximity_exit(
+        city_slug=signal.city_slug,
+        station_id=station_id,
+        now_local=now_local,
+        observation_minutes=observation_minutes,
+        bucket_specs=bucket_specs,
+        held_bucket_idx=signal.bucket_idx,
+        reference_temp_f=_obs_reference_temp(signal, current_temp, obs_high),
+        yes_bid=signal.yes_bid,
+        yes_ask=signal.yes_ask,
+        yes_bid_depth=signal.yes_bid_depth,
+        yes_ask_depth=signal.yes_ask_depth,
+        net_pnl_per_share=net_pnl_per_share,
+        current_edge=signal.ev_at_bid if signal.ev_at_bid is not None else signal.true_edge,
+        enabled=Config.OBS_EXIT_ENABLED,
+        is_us=bool(getattr(city, "is_us", False)),
+        window_minutes=Config.OBS_EXIT_WINDOW_MINUTES,
+        temp_sensitivity_threshold_f=Config.TEMP_SENSITIVITY_THRESHOLD_F,
+        min_profit_cents=Config.OBS_MIN_PROFIT_CENTS,
+        min_depth_usd=Config.OBS_MIN_DEPTH_USD,
+        max_orderbook_imbalance=Config.OBS_MAX_ORDERBOOK_IMBALANCE,
+        cooldown_active=_obs_cooldown_active(pos.bucket_id, now_local.astimezone(timezone.utc)),
+    )
+
+    if obs_decision["final_action"] == "EXIT":
+        sell_qty = pos.net_qty - (pos.moon_bag_qty or 0.0)
+        if sell_qty <= 0:
+            obs_decision["final_action"] = "SKIP"
+            obs_decision["skip_reason"] = "only_moon_bag_remaining"
+        else:
+            obs_decision["shares_to_exit"] = float(sell_qty)
+
+    log.info(
+        "exit: OBS_PROXIMITY decision city=%s station=%s action=%s reason=%s "
+        "temp=%s bucket=%s plus=%s minus=%s boundary=%s min_to_obs=%s "
+        "edge=%s pnl_c=%s depth_usd=%s imbalance=%s",
+        obs_decision.get("city"),
+        obs_decision.get("station"),
+        obs_decision.get("final_action"),
+        obs_decision.get("skip_reason"),
+        obs_decision.get("current_temp"),
+        obs_decision.get("current_bucket"),
+        obs_decision.get("plus_1f_bucket"),
+        obs_decision.get("minus_1f_bucket"),
+        obs_decision.get("boundary_distance_f"),
+        obs_decision.get("minutes_to_next_obs"),
+        obs_decision.get("current_edge"),
+        obs_decision.get("mark_to_market_profit_cents"),
+        obs_decision.get("orderbook_depth_usd"),
+        obs_decision.get("imbalance"),
+    )
+    await _audit_obs_decision(obs_decision)
+
+    if obs_decision["final_action"] == "EXIT":
+        _obs_exit_cache[pos.bucket_id] = now_local.astimezone(timezone.utc)
+        log.info(
+            "exit: OBS_PROXIMITY %s - fragile bucket near station obs; selling %.1f at bid=%.3f",
+            signal.city_slug, obs_decision["shares_to_exit"], bid,
+        )
+        return {
+            "level": "OBS_PROXIMITY",
+            "price": bid,
+            "reason": "observation_proximity_fragile_bucket",
+            "qty_override": obs_decision["shares_to_exit"],
+            "obs_decision": obs_decision,
+        }
 
     # ── Update trailing stop high-water mark ──
     # Ratchet up max_bid_seen and trailing stop on every cycle

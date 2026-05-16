@@ -97,6 +97,15 @@ class Config:
     EDGE_DECAY_MIN_POSITION_AGE_SECONDS: int = _int("EDGE_DECAY_MIN_POSITION_AGE_SECONDS", 1800)
     EDGE_DECAY_MIN_BID: float = _float("EDGE_DECAY_MIN_BID", 0.03)
     EDGE_DECAY_HISTORY_KEEP: int = _int("EDGE_DECAY_HISTORY_KEEP", 10)
+    # OBS_PROXIMITY exit: pre-observation profit protection for fragile
+    # daily-high buckets near scheduled station observation minutes.
+    OBS_EXIT_ENABLED: bool = _bool("OBS_EXIT_ENABLED", default=True)
+    OBS_EXIT_WINDOW_MINUTES: int = _int("OBS_EXIT_WINDOW_MINUTES", 20)
+    TEMP_SENSITIVITY_THRESHOLD_F: float = _float("TEMP_SENSITIVITY_THRESHOLD_F", 1.0)
+    OBS_MIN_PROFIT_CENTS: float = _float("OBS_MIN_PROFIT_CENTS", 5.0)
+    OBS_REENTRY_COOLDOWN_MINUTES: int = _int("OBS_REENTRY_COOLDOWN_MINUTES", 5)
+    OBS_MIN_DEPTH_USD: float = _float("OBS_MIN_DEPTH_USD", 100.0)
+    OBS_MAX_ORDERBOOK_IMBALANCE: float = _float("OBS_MAX_ORDERBOOK_IMBALANCE", 0.72)
 
     # ── Portfolio Risk ───────────────────────────────────────────────────────
     MAX_DRAWDOWN_PCT: float = _float("MAX_DRAWDOWN_PCT", 0.25)
@@ -142,6 +151,20 @@ class Config:
     MARKET_CONTEXT_LLM_TIMEOUT_SECONDS: int = _int(
         "MARKET_CONTEXT_LLM_TIMEOUT_SECONDS", 45
     )
+
+    # ── Wallet Tracker (read-only public-market analytics) ───────────────────
+    WALLET_TRACKER_ENABLED: bool = _bool("WALLET_TRACKER_ENABLED", default=False)
+    WALLET_TRACKER_START_CITY: str = os.environ.get("WALLET_TRACKER_START_CITY", "atlanta").strip().lower()
+    WALLET_TRACKER_UPDATE_INTERVAL_MINUTES: int = _int("WALLET_TRACKER_UPDATE_INTERVAL_MINUTES", 60)
+    WALLET_TRACKER_MIN_VOLUME_USD: float = _float("WALLET_TRACKER_MIN_VOLUME_USD", 100.0)
+    WALLET_TRACKER_MIN_TRADES: int = _int("WALLET_TRACKER_MIN_TRADES", 3)
+    WALLET_TRACKER_MIN_ACTIVE_DAYS: int = _int("WALLET_TRACKER_MIN_ACTIVE_DAYS", 2)
+    WALLET_TRACKER_MAX_WALLETS_PER_CITY: int = _int("WALLET_TRACKER_MAX_WALLETS_PER_CITY", 10)
+    WALLET_TRACKER_TRUNCATE_ADDRESSES: bool = _bool("WALLET_TRACKER_TRUNCATE_ADDRESSES", default=True)
+    WALLET_TRACKER_READ_ONLY: bool = _bool("WALLET_TRACKER_READ_ONLY", default=True)
+    WALLET_TRACKER_LOOKBACK_DAYS: int = _int("WALLET_TRACKER_LOOKBACK_DAYS", 14)
+    WALLET_TRACKER_FETCH_LIMIT: int = _int("WALLET_TRACKER_FETCH_LIMIT", 10000)
+    WALLET_TRACKER_FETCH_PAUSE_SECONDS: float = _float("WALLET_TRACKER_FETCH_PAUSE_SECONDS", 0.25)
 
     # ── Logging ───────────────────────────────────────────────────────────────
     LOG_LEVEL: str = os.environ.get("LOG_LEVEL", "INFO").upper()

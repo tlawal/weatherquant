@@ -1266,6 +1266,81 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
             (metar_obs_at.astimezone(timezone.utc) - model_computed_at.astimezone(timezone.utc)).total_seconds(),
         )
 
+    obs_proximity = None
+    if city.is_us:
+        try:
+            from backend.execution.obs_proximity import build_obs_proximity_status
+
+            def _obs_ref_from_inputs() -> float | None:
+                if not isinstance(model_inputs, dict):
+                    return None
+                adaptive = model_inputs.get("adaptive") if isinstance(model_inputs.get("adaptive"), dict) else {}
+                for raw in (
+                    model_inputs.get("current_temp_f"),
+                    adaptive.get("predicted_daily_high"),
+                    model_inputs.get("projected_high_for_blend"),
+                    model_inputs.get("projected_high"),
+                    model_inputs.get("observed_high"),
+                    model_inputs.get("ground_truth_high"),
+                ):
+                    try:
+                        if raw is not None:
+                            return float(raw)
+                    except (TypeError, ValueError):
+                        continue
+                return None
+
+            obs_reference_temp = _obs_ref_from_inputs()
+            if obs_reference_temp is None and metar and target_date_et == real_today_et:
+                obs_reference_temp = metar.temp_f
+
+            obs_station = None
+            if isinstance(model_inputs, dict):
+                obs_station = model_inputs.get("active_station_id")
+            obs_station = obs_station or current_temp_station
+
+            obs_proximity = build_obs_proximity_status(
+                city_slug=city.city_slug,
+                station_id=obs_station,
+                now_local=now_local,
+                observation_minutes=obs_minutes_list,
+                bucket_specs=buckets_with_signals,
+                reference_temp_f=obs_reference_temp,
+                enabled=Config.OBS_EXIT_ENABLED,
+                is_us=bool(city.is_us),
+                window_minutes=Config.OBS_EXIT_WINDOW_MINUTES,
+                temp_sensitivity_threshold_f=Config.TEMP_SENSITIVITY_THRESHOLD_F,
+            )
+        except Exception as e:
+            log.warning("city_detail: OBS_PROXIMITY status failed for %s: %s", city_slug, e)
+
+    wallet_leaderboard = {
+        "enabled": Config.WALLET_TRACKER_ENABLED,
+        "rows": [],
+        "status": "unavailable",
+        "disclaimer": (
+            "Wallet leaderboard is read-only public-market analytics. "
+            "It is not a copy-trading signal and does not trigger automated trades."
+        ),
+    }
+    smart_money_context = {"status": "unavailable", "reason": "wallet_tracker_unavailable"}
+    try:
+        from backend.market_context.wallet_tracker import (
+            compute_smart_money_divergence,
+            get_wallet_leaderboard_payload,
+        )
+
+        wallet_leaderboard = await get_wallet_leaderboard_payload(
+            city.city_slug,
+            target_date_et,
+        )
+        smart_money_context = compute_smart_money_divergence(
+            buckets_with_signals,
+            wallet_leaderboard.get("rows") or [],
+        )
+    except Exception as e:
+        log.warning("city_detail: wallet tracker payload failed for %s: %s", city_slug, e)
+
     return templates.TemplateResponse(
         "city.html",
         {
@@ -1522,6 +1597,9 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
             "station_predictions_json": json.dumps(station_predictions),
             "hrrr_hourly_json": json.dumps(hrrr_hourly),
             "adaptive_info": adaptive_info,
+            "obs_proximity": obs_proximity,
+            "wallet_leaderboard": wallet_leaderboard,
+            "smart_money_context": smart_money_context,
             "station_cal": station_cal,
             "market_context_snapshot": serialize_market_context_snapshot(market_context_snapshot),
             "market_context_llm_ready": Config.market_context_llm_ready(),
@@ -1941,6 +2019,13 @@ async def strategies_page(request: Request):
         "urgent_exit_max_spread": Config.URGENT_EXIT_MAX_SPREAD,
         "consensus_debounce_runs": Config.CONSENSUS_DEBOUNCE_RUNS,
         "expiry_discount": Config.EXPIRY_DISCOUNT,
+        "obs_exit_enabled": Config.OBS_EXIT_ENABLED,
+        "obs_exit_window_minutes": Config.OBS_EXIT_WINDOW_MINUTES,
+        "temp_sensitivity_threshold_f": Config.TEMP_SENSITIVITY_THRESHOLD_F,
+        "obs_min_profit_cents": Config.OBS_MIN_PROFIT_CENTS,
+        "obs_reentry_cooldown_minutes": Config.OBS_REENTRY_COOLDOWN_MINUTES,
+        "obs_min_depth_usd": Config.OBS_MIN_DEPTH_USD,
+        "obs_max_orderbook_imbalance": Config.OBS_MAX_ORDERBOOK_IMBALANCE,
         # Telegram
         "telegram_enabled": Config.TELEGRAM_ENABLED,
     }

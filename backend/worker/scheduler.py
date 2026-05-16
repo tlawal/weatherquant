@@ -461,6 +461,22 @@ async def job_sync_positions():
     await sync_positions_from_chain()
 
 
+async def job_update_wallet_rankings():
+    """Refresh read-only public wallet rankings for weather markets."""
+    from backend.market_context.wallet_tracker import update_wallet_rankings
+    summary = await update_wallet_rankings()
+    if summary.enabled:
+        log.info(
+            "wallet_tracker: scheduler summary cities=%d conditions=%d trades=%d wallets=%d top_score=%s errors=%d",
+            summary.cities_scanned,
+            summary.condition_ids_scanned,
+            summary.trades_fetched,
+            summary.wallets_updated,
+            summary.top_wallet_score,
+            len(summary.errors),
+        )
+
+
 async def job_heartbeat():
     """Write a heartbeat so API server can detect worker liveness."""
     from backend.storage.db import get_session
@@ -535,6 +551,11 @@ def create_scheduler() -> AsyncIOScheduler:
     # picks them up; processed marker on Event ensures at-most-once.
     add(job_online_em_updates,            seconds=3600,  name="online_em_updates")  # 1h
     add(job_sync_positions,          seconds=600,   name="sync_positions") # 10 min
+    add(
+        job_update_wallet_rankings,
+        seconds=max(60, Config.WALLET_TRACKER_UPDATE_INTERVAL_MINUTES * 60),
+        name="update_wallet_rankings",
+    )
 
     return scheduler
 

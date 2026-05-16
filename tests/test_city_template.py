@@ -40,3 +40,21 @@ def test_buckets_table_surfaces_execution_microstructure():
     assert "After-Cost Edge" in template
     assert "Est. Fill Cost" in template
     assert "why_not_tradable" in template
+
+
+def test_wallet_leaderboard_disclaimer_is_read_only():
+    template = Path("web/templates/city.html").read_text()
+
+    assert "Top Weather Wallets" in template
+    assert "Wallet leaderboard is read-only public-market analytics" in template
+    assert "does not trigger automated trades" in template
+
+
+def test_city_page_surfaces_obs_proximity_readout():
+    template = Path("web/templates/city.html").read_text()
+
+    assert "OBS Proximity Exit" in template
+    assert "Next Obs" in template
+    assert "Nearest Boundary" in template
+    assert "Reference Bucket" in template
+    assert "Armed" in template

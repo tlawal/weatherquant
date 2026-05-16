@@ -17,6 +17,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from itertools import product
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import aiohttp
 from sqlalchemy import String, desc, func, select
@@ -31,6 +32,7 @@ from backend.backtesting.metrics import (
     compute_sharpe,
 )
 from backend.engine.signal_engine import _execution_cost
+from backend.execution.obs_proximity import evaluate_obs_proximity_exit
 from backend.strategy.kelly import calculate_kelly_fraction
 from backend.storage.db import get_session
 from backend.storage.models import (
@@ -122,6 +124,12 @@ class BacktestParams:
     quick_flip_target: float = 0.05
     walk_forward_train_days: int = 21
     walk_forward_test_days: int = 7
+    obs_exit_enabled: bool = False
+    obs_exit_window_minutes: int = 20
+    temp_sensitivity_threshold_f: float = 1.0
+    obs_min_profit_cents: float = 5.0
+    obs_min_depth_usd: float = 100.0
+    obs_max_orderbook_imbalance: float = 0.72
 
 
 # ─── Internal types ──────────────────────────────────────────────────────────
@@ -802,6 +810,7 @@ async def fetch_resolved_events() -> list[dict]:
                         "yes_bid": ms.yes_bid,
                         "yes_ask": ms.yes_ask,
                         "spread": ms.spread,
+                        "bid_depth": ms.yes_bid_depth or 0.0,
                         "ask_depth": ms.yes_ask_depth or 0.0,
                     }
 
@@ -816,7 +825,14 @@ async def fetch_resolved_events() -> list[dict]:
                 )
                 later_snaps = (await sess.execute(amq)).scalars().all()
                 all_mkt_snaps[b.bucket_idx] = [
-                    {"yes_bid": s.yes_bid, "fetched_at": s.fetched_at}
+                    {
+                        "yes_bid": s.yes_bid,
+                        "yes_ask": s.yes_ask,
+                        "yes_bid_depth": s.yes_bid_depth,
+                        "yes_ask_depth": s.yes_ask_depth,
+                        "spread": s.spread,
+                        "fetched_at": s.fetched_at,
+                    }
                     for s in later_snaps
                     if s.yes_bid is not None
                 ]
@@ -825,10 +841,12 @@ async def fetch_resolved_events() -> list[dict]:
 
             # Q7 — pull regime label from the snapshot inputs (set by signal_engine
             # at compute time). Lets _build_results stratify metrics by regime.
+            snap_inputs: dict = {}
             _snap_regime_label: Optional[str] = None
             try:
                 _inp = json.loads(snap.inputs_json) if snap.inputs_json else {}
-                _rl = _inp.get("regime_label")
+                snap_inputs = _inp if isinstance(_inp, dict) else {}
+                _rl = snap_inputs.get("regime_label")
                 if _rl:
                     _snap_regime_label = str(_rl)
             except Exception:
@@ -838,6 +856,9 @@ async def fetch_resolved_events() -> list[dict]:
                 "event_id": event.id,
                 "city_slug": city.city_slug,
                 "city_display": city.display_name,
+                "city_tz": city.tz or "America/New_York",
+                "is_us": bool(city.is_us),
+                "metar_station": city.metar_station,
                 "date_et": event.date_et,
                 "winning_bucket_idx": event.winning_bucket_idx,
                 "buckets": [
@@ -854,6 +875,7 @@ async def fetch_resolved_events() -> list[dict]:
                 "model_sigma": snap.sigma,
                 "market_data": mkt_snaps,
                 "later_market_data": all_mkt_snaps,
+                "model_inputs": snap_inputs,
                 "snapshot_time": snap.computed_at,
                 "regime_label": _snap_regime_label,
             })
@@ -971,6 +993,39 @@ def simulate_entry(
     )
 
 
+def _obs_reference_temp_from_inputs(model_inputs: dict) -> Optional[float]:
+    if not isinstance(model_inputs, dict):
+        return None
+    adaptive = model_inputs.get("adaptive") if isinstance(model_inputs.get("adaptive"), dict) else {}
+    for raw in (
+        model_inputs.get("current_temp_f"),
+        adaptive.get("predicted_daily_high"),
+        model_inputs.get("projected_high_for_blend"),
+        model_inputs.get("projected_high"),
+        model_inputs.get("observed_high"),
+        model_inputs.get("ground_truth_high"),
+    ):
+        try:
+            if raw is not None:
+                return float(raw)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _snapshot_local_time(snap: dict, city_tz: str) -> Optional[datetime]:
+    fetched_at = snap.get("fetched_at")
+    if not isinstance(fetched_at, datetime):
+        return None
+    if fetched_at.tzinfo is None:
+        fetched_at = fetched_at.replace(tzinfo=timezone.utc)
+    try:
+        tz = ZoneInfo(city_tz or "America/New_York")
+    except Exception:
+        tz = ZoneInfo("America/New_York")
+    return fetched_at.astimezone(tz)
+
+
 def simulate_exits(
     trades: list[SimTrade],
     events_map: dict[tuple[str, str], dict],
@@ -993,7 +1048,69 @@ def simulate_exits(
         winning_idx = event_data["winning_bucket_idx"]
         later_mkt = event_data.get("later_market_data", {}).get(trade.bucket_idx, [])
 
-        # 1. Quick flip check — did bid ever reach entry + target?
+        # 1. Optional observation-proximity replay. This is a lightweight
+        # approximation using the stored model inputs and later orderbook
+        # snapshots, not a full intraday model-state replay.
+        if params.obs_exit_enabled:
+            model_inputs = event_data.get("model_inputs") or {}
+            reference_temp = _obs_reference_temp_from_inputs(model_inputs)
+            observation_minutes = (
+                model_inputs.get("observation_minutes")
+                if isinstance(model_inputs, dict)
+                else None
+            )
+            station_id = (
+                model_inputs.get("active_station_id")
+                if isinstance(model_inputs, dict)
+                else None
+            ) or event_data.get("metar_station")
+
+            for snap in later_mkt:
+                bid = snap.get("yes_bid")
+                if bid is None:
+                    continue
+                now_local = _snapshot_local_time(
+                    snap,
+                    event_data.get("city_tz") or "America/New_York",
+                )
+                if now_local is None:
+                    continue
+                net_pnl_per_share = float(bid) - trade.entry_price - (float(bid) * 0.02)
+                decision = evaluate_obs_proximity_exit(
+                    city_slug=trade.city_slug,
+                    station_id=station_id,
+                    now_local=now_local,
+                    observation_minutes=observation_minutes,
+                    bucket_specs=event_data.get("buckets", []),
+                    held_bucket_idx=trade.bucket_idx,
+                    reference_temp_f=reference_temp,
+                    yes_bid=bid,
+                    yes_ask=snap.get("yes_ask"),
+                    yes_bid_depth=snap.get("yes_bid_depth"),
+                    yes_ask_depth=snap.get("yes_ask_depth"),
+                    net_pnl_per_share=net_pnl_per_share,
+                    current_edge=trade.true_edge,
+                    enabled=True,
+                    is_us=bool(event_data.get("is_us", True)),
+                    window_minutes=params.obs_exit_window_minutes,
+                    temp_sensitivity_threshold_f=params.temp_sensitivity_threshold_f,
+                    min_profit_cents=params.obs_min_profit_cents,
+                    min_depth_usd=params.obs_min_depth_usd,
+                    max_orderbook_imbalance=params.obs_max_orderbook_imbalance,
+                    cooldown_active=False,
+                )
+                if decision.get("final_action") == "EXIT":
+                    trade.won = True
+                    payout = trade.shares * float(bid)
+                    fee = payout * 0.02
+                    trade.pnl = round(payout - fee - trade.cost, 4)
+                    trade.exit_reason = "obs_proximity"
+                    break
+
+        if trade.won is not None:
+            continue
+
+        # 2. Quick flip check — did bid ever reach entry + target?
         flip_price = trade.entry_price + params.quick_flip_target
         for snap in later_mkt:
             if snap["yes_bid"] and snap["yes_bid"] >= flip_price:
@@ -1007,7 +1124,7 @@ def simulate_exits(
         if trade.won is not None:
             continue
 
-        # 2. Resolution — hold to maturity
+        # 3. Resolution — hold to maturity
         if trade.bucket_idx == winning_idx:
             trade.won = True
             payout = trade.shares * 1.0  # YES resolves at $1
