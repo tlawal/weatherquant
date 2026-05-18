@@ -45,7 +45,10 @@ def test_buckets_table_surfaces_execution_microstructure():
 def test_wallet_leaderboard_disclaimer_is_read_only():
     template = Path("web/templates/city.html").read_text()
 
-    assert "Top Weather Wallets" in template
+    assert "Weather Smart Money" in template
+    assert "CURRENT MARKET" in template
+    assert "GLOBAL LEADERS" in template
+    assert "CITY LEADERS" in template
     assert "Wallet leaderboard is read-only public-market analytics" in template
     assert "does not trigger automated trades" in template
 

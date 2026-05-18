@@ -38,7 +38,10 @@ from backend.storage.models import (
     SourceLeadTimeSkill,
     StationCalibration,
     StationProfile,
+    WalletMarketExposure,
+    WalletSkillScore,
     WalletStat,
+    WalletTrade,
     WorkerHeartbeat,
 )
 
@@ -910,6 +913,147 @@ async def get_wallet_stats_for_city(
         WalletStat.volume_usd.desc(),
         WalletStat.last_trade_ts.desc().nullslast(),
     ).limit(limit)
+    result = await session.execute(q)
+    return list(result.scalars().all())
+
+
+async def upsert_wallet_trade(session: AsyncSession, **kwargs) -> WalletTrade:
+    dedupe_key = str(kwargs["dedupe_key"])
+    clean_kwargs = {
+        key: value
+        for key, value in kwargs.items()
+        if hasattr(WalletTrade, key)
+    }
+    clean_kwargs["wallet_address"] = str(clean_kwargs["wallet_address"]).lower()
+
+    result = await session.execute(
+        select(WalletTrade).where(WalletTrade.dedupe_key == dedupe_key)
+    )
+    row = result.scalar_one_or_none()
+    if row is None:
+        row = WalletTrade(**clean_kwargs)
+        session.add(row)
+    else:
+        for key, value in clean_kwargs.items():
+            setattr(row, key, value)
+    await session.commit()
+    await session.refresh(row)
+    return row
+
+
+async def upsert_wallet_market_exposure(
+    session: AsyncSession,
+    **kwargs,
+) -> WalletMarketExposure:
+    wallet_address = str(kwargs["wallet_address"]).lower()
+    condition_id = str(kwargs["condition_id"])
+    clean_kwargs = {
+        key: value
+        for key, value in kwargs.items()
+        if hasattr(WalletMarketExposure, key)
+    }
+    clean_kwargs.update({"wallet_address": wallet_address, "condition_id": condition_id})
+
+    result = await session.execute(
+        select(WalletMarketExposure).where(
+            WalletMarketExposure.wallet_address == wallet_address,
+            WalletMarketExposure.condition_id == condition_id,
+        )
+    )
+    row = result.scalar_one_or_none()
+    if row is None:
+        row = WalletMarketExposure(**clean_kwargs)
+        session.add(row)
+    else:
+        for key, value in clean_kwargs.items():
+            setattr(row, key, value)
+    await session.commit()
+    await session.refresh(row)
+    return row
+
+
+async def upsert_wallet_skill_score(
+    session: AsyncSession,
+    **kwargs,
+) -> WalletSkillScore:
+    wallet_address = str(kwargs["wallet_address"]).lower()
+    scope = str(kwargs["scope"])
+    city_slug = str(kwargs.get("city_slug") or "")
+    window_days = int(kwargs.get("window_days") or 90)
+    clean_kwargs = {
+        key: value
+        for key, value in kwargs.items()
+        if hasattr(WalletSkillScore, key)
+    }
+    clean_kwargs.update(
+        {
+            "wallet_address": wallet_address,
+            "scope": scope,
+            "city_slug": city_slug,
+            "window_days": window_days,
+        }
+    )
+
+    result = await session.execute(
+        select(WalletSkillScore).where(
+            WalletSkillScore.wallet_address == wallet_address,
+            WalletSkillScore.scope == scope,
+            WalletSkillScore.city_slug == city_slug,
+            WalletSkillScore.window_days == window_days,
+        )
+    )
+    row = result.scalar_one_or_none()
+    if row is None:
+        row = WalletSkillScore(**clean_kwargs)
+        session.add(row)
+    else:
+        for key, value in clean_kwargs.items():
+            setattr(row, key, value)
+    await session.commit()
+    await session.refresh(row)
+    return row
+
+
+async def get_wallet_skill_scores(
+    session: AsyncSession,
+    *,
+    scope: str,
+    city_slug: str = "",
+    window_days: int = 90,
+    limit: int = 50,
+) -> list[WalletSkillScore]:
+    q = select(WalletSkillScore).where(
+        WalletSkillScore.scope == scope,
+        WalletSkillScore.city_slug == city_slug,
+        WalletSkillScore.window_days == window_days,
+    )
+    q = q.order_by(
+        WalletSkillScore.adjusted_score.desc(),
+        WalletSkillScore.total_volume_usd.desc(),
+        WalletSkillScore.last_active_ts.desc().nullslast(),
+    ).limit(limit)
+    result = await session.execute(q)
+    return list(result.scalars().all())
+
+
+async def get_wallet_market_exposures_for_event(
+    session: AsyncSession,
+    city_slug: str,
+    date_et: str,
+    limit: int = 500,
+) -> list[WalletMarketExposure]:
+    q = (
+        select(WalletMarketExposure)
+        .where(
+            WalletMarketExposure.city_slug == city_slug,
+            WalletMarketExposure.date == date_et,
+        )
+        .order_by(
+            WalletMarketExposure.last_trade_ts.desc().nullslast(),
+            WalletMarketExposure.net_notional_usd.desc(),
+        )
+        .limit(limit)
+    )
     result = await session.execute(q)
     return list(result.scalars().all())
 

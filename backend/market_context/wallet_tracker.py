@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
 import math
 from collections import defaultdict
@@ -109,6 +110,7 @@ class PublicTrade:
     event_slug: str | None = None
     transaction_hash: str | None = None
     profile_name: str | None = None
+    raw: dict[str, Any] | None = None
 
     @property
     def notional(self) -> float:
@@ -146,7 +148,90 @@ class PublicTrade:
             event_slug=str(row.get("eventSlug") or "") or None,
             transaction_hash=str(row.get("transactionHash") or row.get("transaction_hash") or "") or None,
             profile_name=str(row.get("name") or row.get("pseudonym") or "") or None,
+            raw=row,
         )
+
+
+@dataclass(frozen=True)
+class WalletExposureMetric:
+    wallet_address: str
+    city_slug: str
+    date: str
+    condition_id: str
+    market_slug: str | None
+    bucket_idx: int | None
+    bucket_label: str | None
+    net_position_qty: float
+    net_notional_usd: float
+    avg_entry_price: float | None
+    realized_pnl: float
+    unrealized_pnl: float
+    last_trade_ts: datetime | None
+    trade_count: int = 0
+    volume_usd: float = 0.0
+
+    def to_db_kwargs(self) -> dict[str, Any]:
+        return {
+            "wallet_address": self.wallet_address,
+            "city_slug": self.city_slug,
+            "date": self.date,
+            "market_slug": self.market_slug,
+            "condition_id": self.condition_id,
+            "bucket_idx": self.bucket_idx,
+            "bucket_label": self.bucket_label,
+            "net_position_qty": self.net_position_qty,
+            "net_notional_usd": self.net_notional_usd,
+            "avg_entry_price": self.avg_entry_price,
+            "realized_pnl": self.realized_pnl,
+            "unrealized_pnl": self.unrealized_pnl,
+            "last_trade_ts": self.last_trade_ts,
+            "trade_count": self.trade_count,
+            "volume_usd": self.volume_usd,
+            "last_updated_ts": datetime.now(timezone.utc),
+        }
+
+
+@dataclass(frozen=True)
+class WalletSkillMetric:
+    wallet_address: str
+    scope: str
+    city_slug: str
+    window_days: int
+    adjusted_score: float
+    rank: int | None
+    win_rate: float | None
+    wilson_win_rate: float | None
+    resolved_markets: int
+    total_markets: int
+    total_volume_usd: float
+    realized_pnl: float
+    roi: float | None
+    profit_factor: float | None
+    avg_notional_usd: float | None
+    active_days: int
+    last_active_ts: datetime | None
+
+    def to_db_kwargs(self) -> dict[str, Any]:
+        return {
+            "wallet_address": self.wallet_address,
+            "scope": self.scope,
+            "city_slug": self.city_slug,
+            "window_days": self.window_days,
+            "adjusted_score": self.adjusted_score,
+            "rank": self.rank,
+            "win_rate": self.win_rate,
+            "wilson_win_rate": self.wilson_win_rate,
+            "resolved_markets": self.resolved_markets,
+            "total_markets": self.total_markets,
+            "total_volume_usd": self.total_volume_usd,
+            "realized_pnl": self.realized_pnl,
+            "roi": self.roi,
+            "profit_factor": self.profit_factor,
+            "avg_notional_usd": self.avg_notional_usd,
+            "active_days": self.active_days,
+            "last_active_ts": self.last_active_ts,
+            "last_updated_ts": datetime.now(timezone.utc),
+        }
 
 
 @dataclass(frozen=True)
@@ -240,41 +325,50 @@ class PolymarketDataApiTradeAdapter:
         if not ids:
             return []
         limit = min(limit or Config.WALLET_TRACKER_FETCH_LIMIT, 10000)
+        page_size = min(500, limit)
         timeout = aiohttp.ClientTimeout(total=self.timeout_s)
         trades: list[PublicTrade] = []
         async with aiohttp.ClientSession(timeout=timeout, headers=_USER_AGENT) as http:
-            for offset in range(0, len(ids), 20):
-                chunk = ids[offset:offset + 20]
-                params = {
-                    "market": ",".join(chunk),
-                    "limit": str(limit),
-                    "offset": "0",
-                    "takerOnly": "true",
-                }
-                url = f"{DATA_API}/trades"
-                log.info(
-                    "wallet_tracker: fetching public trades markets=%d limit=%d",
-                    len(chunk),
-                    limit,
-                )
-                try:
-                    async with http.get(url, params=params) as resp:
-                        if resp.status != 200:
-                            log.warning("wallet_tracker: data-api trades returned %d", resp.status)
-                            continue
-                        data = await resp.json(content_type=None)
-                except Exception as exc:
-                    log.warning("wallet_tracker: public trade fetch failed: %s", exc)
-                    continue
-                rows = data if isinstance(data, list) else data.get("data", [])
-                row_iter = rows if isinstance(rows, list) else []
-                for row in row_iter:
-                    if isinstance(row, dict):
-                        trade = PublicTrade.from_api(row)
-                        if trade:
-                            trades.append(trade)
-                if self.fetch_pause_seconds > 0:
-                    await asyncio.sleep(self.fetch_pause_seconds)
+            for chunk_offset in range(0, len(ids), 20):
+                chunk = ids[chunk_offset:chunk_offset + 20]
+                fetched_for_chunk = 0
+                for page_offset in range(0, limit, page_size):
+                    params = {
+                        "market": ",".join(chunk),
+                        "limit": str(page_size),
+                        "offset": str(page_offset),
+                        "takerOnly": "true",
+                    }
+                    url = f"{DATA_API}/trades"
+                    log.info(
+                        "wallet_tracker: fetching public trades markets=%d page_offset=%d page_size=%d",
+                        len(chunk),
+                        page_offset,
+                        page_size,
+                    )
+                    try:
+                        async with http.get(url, params=params) as resp:
+                            if resp.status != 200:
+                                log.warning("wallet_tracker: data-api trades returned %d", resp.status)
+                                break
+                            data = await resp.json(content_type=None)
+                    except Exception as exc:
+                        log.warning("wallet_tracker: public trade fetch failed: %s", exc)
+                        break
+                    rows = data if isinstance(data, list) else data.get("data", [])
+                    row_iter = rows if isinstance(rows, list) else []
+                    if not row_iter:
+                        break
+                    for row in row_iter:
+                        if isinstance(row, dict):
+                            trade = PublicTrade.from_api(row)
+                            if trade:
+                                trades.append(trade)
+                    fetched_for_chunk += len(row_iter)
+                    if len(row_iter) < page_size or fetched_for_chunk >= limit:
+                        break
+                    if self.fetch_pause_seconds > 0:
+                        await asyncio.sleep(self.fetch_pause_seconds)
         return trades
 
     async def fetch_public_profile(self, wallet_address: str) -> dict[str, Any] | None:
@@ -303,6 +397,24 @@ def calculate_sharpe_like(returns: list[float]) -> float:
     if std <= 0:
         return 1.0 if mean_r > 0 else 0.0
     return mean_r / std
+
+
+def wilson_lower_bound(wins: int, total: int, z: float = 1.96) -> float:
+    if total <= 0:
+        return 0.0
+    phat = wins / total
+    denom = 1 + z * z / total
+    centre = phat + z * z / (2 * total)
+    margin = z * math.sqrt((phat * (1 - phat) + z * z / (4 * total)) / total)
+    return round(max(0.0, (centre - margin) / denom), 4)
+
+
+def profit_factor(pnls: list[float]) -> float | None:
+    gross_win = sum(p for p in pnls if p > 0)
+    gross_loss = abs(sum(p for p in pnls if p < 0))
+    if gross_loss <= 0:
+        return round(gross_win, 4) if gross_win > 0 else None
+    return round(gross_win / gross_loss, 4)
 
 
 def calculate_consistency_score(
@@ -359,6 +471,136 @@ def _weighted_avg(items: list[tuple[float, float]]) -> float | None:
     if qty <= 0:
         return None
     return sum(q * price for q, price in items) / qty
+
+
+def trade_dedupe_key(trade: PublicTrade) -> str:
+    tx = trade.transaction_hash or ""
+    if tx:
+        return "|".join(
+            [
+                tx,
+                trade.wallet_address.lower(),
+                trade.condition_id,
+                trade.side,
+                trade.asset_id or "",
+                f"{trade.size:.8f}",
+                f"{trade.price:.8f}",
+            ]
+        )
+    return "|".join(
+        [
+            trade.wallet_address.lower(),
+            trade.condition_id,
+            trade.side,
+            trade.asset_id or "",
+            trade.timestamp.isoformat(),
+            f"{trade.size:.8f}",
+            f"{trade.price:.8f}",
+        ]
+    )
+
+
+def dedupe_public_trades(trades: list[PublicTrade]) -> list[PublicTrade]:
+    seen: set[str] = set()
+    deduped: list[PublicTrade] = []
+    for trade in sorted(trades, key=lambda t: t.timestamp):
+        key = trade_dedupe_key(trade)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(trade)
+    return deduped
+
+
+def compute_wallet_exposures(
+    trades: list[PublicTrade],
+    market_refs: list[MarketRef],
+) -> list[WalletExposureMetric]:
+    market_by_condition = {m.condition_id: m for m in market_refs if m.condition_id}
+    by_wallet_condition: dict[tuple[str, str], list[PublicTrade]] = defaultdict(list)
+    for trade in dedupe_public_trades(trades):
+        if trade.condition_id in market_by_condition:
+            by_wallet_condition[(trade.wallet_address.lower(), trade.condition_id)].append(trade)
+
+    exposures: list[WalletExposureMetric] = []
+    for (wallet_address, condition_id), condition_trades in by_wallet_condition.items():
+        market = market_by_condition[condition_id]
+        condition_trades.sort(key=lambda t: t.timestamp)
+        lots: list[list[Any]] = []
+        realized_pnl = 0.0
+        buys_usd = 0.0
+        sells_usd = 0.0
+        entry_items: list[tuple[float, float]] = []
+
+        for trade in condition_trades:
+            if trade.side == "BUY":
+                lots.append([trade.size, trade.price, trade.timestamp])
+                entry_items.append((trade.size, trade.price))
+                buys_usd += trade.notional
+                continue
+
+            sells_usd += trade.notional
+            remaining = trade.size
+            while remaining > 0 and lots:
+                lot_qty, lot_price, _lot_ts = lots[0]
+                matched = min(float(lot_qty), remaining)
+                realized_pnl += matched * (trade.price - float(lot_price))
+                lot_qty = float(lot_qty) - matched
+                remaining -= matched
+                if lot_qty <= 1e-9:
+                    lots.pop(0)
+                else:
+                    lots[0][0] = lot_qty
+
+        net_qty = sum(float(q) for q, _, _ in lots)
+        avg_entry = _weighted_avg([(float(q), float(price)) for q, price, _ in lots]) or _weighted_avg(entry_items)
+        current_price = market.current_price
+        unrealized = (
+            sum(float(q) * (float(current_price) - float(price)) for q, price, _ in lots)
+            if current_price is not None
+            else 0.0
+        )
+        exposures.append(
+            WalletExposureMetric(
+                wallet_address=wallet_address,
+                city_slug=market.city_slug,
+                date=market.date,
+                condition_id=condition_id,
+                market_slug=market.market_slug,
+                bucket_idx=market.bucket_idx,
+                bucket_label=market.bucket_label,
+                net_position_qty=round(net_qty, 4),
+                net_notional_usd=round(buys_usd - sells_usd, 4),
+                avg_entry_price=round(avg_entry, 4) if avg_entry is not None else None,
+                realized_pnl=round(realized_pnl, 4),
+                unrealized_pnl=round(unrealized, 4),
+                last_trade_ts=max((t.timestamp for t in condition_trades), default=None),
+                trade_count=len(condition_trades),
+                volume_usd=round(sum(t.notional for t in condition_trades), 4),
+            )
+        )
+    return exposures
+
+
+def _trade_to_db_kwargs(trade: PublicTrade, market: MarketRef) -> dict[str, Any]:
+    return {
+        "dedupe_key": trade_dedupe_key(trade),
+        "wallet_address": trade.wallet_address.lower(),
+        "city_slug": market.city_slug,
+        "date": market.date,
+        "market_slug": trade.market_slug or market.market_slug,
+        "condition_id": market.condition_id,
+        "asset_id": trade.asset_id,
+        "bucket_idx": market.bucket_idx,
+        "bucket_label": market.bucket_label,
+        "side": trade.side,
+        "size": trade.size,
+        "price": trade.price,
+        "notional_usd": trade.notional,
+        "trade_ts": trade.timestamp,
+        "transaction_hash": trade.transaction_hash,
+        "raw_json": json.dumps(trade.raw, default=str) if trade.raw else None,
+    }
 
 
 def _metric_passes_filters(
@@ -575,6 +817,106 @@ def compute_wallet_metrics(
     return [m for m, _ in metrics[:max_wallets]]
 
 
+def compute_wallet_skill_scores(
+    exposures: list[WalletExposureMetric],
+    market_refs: list[MarketRef],
+    *,
+    scope: str,
+    city_slug: str = "",
+    window_days: int = 90,
+    min_resolved_markets: int = 3,
+    min_volume_usd: float = 100.0,
+    min_active_days: int = 2,
+) -> list[WalletSkillMetric]:
+    resolved_conditions = {
+        m.condition_id
+        for m in market_refs
+        if m.resolved_winning_bucket_idx is not None
+    }
+    by_wallet: dict[str, list[WalletExposureMetric]] = defaultdict(list)
+    for exposure in exposures:
+        if scope == "city" and exposure.city_slug != city_slug:
+            continue
+        by_wallet[exposure.wallet_address.lower()].append(exposure)
+
+    raw_scores: list[WalletSkillMetric] = []
+    for wallet_address, rows in by_wallet.items():
+        total_markets = len({r.condition_id for r in rows})
+        resolved_rows = [r for r in rows if r.condition_id in resolved_conditions]
+        resolved_markets = len({r.condition_id for r in resolved_rows})
+        total_volume = sum(
+            float(getattr(r, "volume_usd", 0.0) or 0.0) or abs(r.net_notional_usd)
+            for r in rows
+        )
+        active_days = len({r.date for r in rows})
+        if resolved_markets < min_resolved_markets:
+            continue
+        if total_volume < min_volume_usd:
+            continue
+        if active_days < min_active_days:
+            continue
+
+        pnls = [r.realized_pnl + r.unrealized_pnl for r in resolved_rows]
+        resolved_pnl = sum(pnls)
+        if resolved_pnl <= 0:
+            continue
+        wins = sum(1 for p in pnls if p > 0)
+        win_rate = wins / resolved_markets if resolved_markets else 0.0
+        wilson = wilson_lower_bound(wins, resolved_markets)
+        roi = resolved_pnl / total_volume if total_volume > 0 else None
+        pf = profit_factor(pnls)
+        avg_notional = total_volume / max(1, total_markets)
+        volume_component = _clamp(math.log1p(total_volume) / math.log1p(25000.0))
+        resolved_component = _clamp(resolved_markets / 25.0)
+        active_component = _clamp(active_days / 14.0)
+        roi_component = _clamp((roi or 0.0) / 0.5)
+        adjusted_score = round(
+            _clamp(
+                0.35 * wilson
+                + 0.20 * roi_component
+                + 0.15 * volume_component
+                + 0.15 * resolved_component
+                + 0.15 * active_component
+            ),
+            4,
+        )
+        raw_scores.append(
+            WalletSkillMetric(
+                wallet_address=wallet_address,
+                scope=scope,
+                city_slug=city_slug if scope == "city" else "",
+                window_days=window_days,
+                adjusted_score=adjusted_score,
+                rank=None,
+                win_rate=round(win_rate, 4),
+                wilson_win_rate=wilson,
+                resolved_markets=resolved_markets,
+                total_markets=total_markets,
+                total_volume_usd=round(total_volume, 4),
+                realized_pnl=round(resolved_pnl, 4),
+                roi=round(roi, 4) if roi is not None else None,
+                profit_factor=pf,
+                avg_notional_usd=round(avg_notional, 4),
+                active_days=active_days,
+                last_active_ts=max((r.last_trade_ts for r in rows if r.last_trade_ts), default=None),
+            )
+        )
+
+    raw_scores.sort(
+        key=lambda s: (
+            s.adjusted_score,
+            s.wilson_win_rate or 0.0,
+            s.total_volume_usd,
+            s.last_active_ts or datetime.min.replace(tzinfo=timezone.utc),
+        ),
+        reverse=True,
+    )
+    return [
+        WalletSkillMetric(**{**score.__dict__, "rank": idx})
+        for idx, score in enumerate(raw_scores, start=1)
+    ]
+
+
 async def _discover_market_refs_for_city(city: Any, *, as_of_date: str) -> list[MarketRef]:
     from backend.storage.db import get_session
     from backend.storage.repos import (
@@ -646,7 +988,12 @@ async def update_wallet_rankings(
         return WalletTrackerSummary(enabled=False)
 
     from backend.storage.db import get_session
-    from backend.storage.repos import upsert_wallet_stat
+    from backend.storage.repos import (
+        upsert_wallet_stat,
+        upsert_wallet_market_exposure,
+        upsert_wallet_skill_score,
+        upsert_wallet_trade,
+    )
     from backend.tz_utils import city_local_date
 
     adapter = adapter or PolymarketDataApiTradeAdapter()
@@ -656,6 +1003,8 @@ async def update_wallet_rankings(
     total_wallets = 0
     top_score: float | None = None
     errors: list[str] = []
+    all_market_refs: list[MarketRef] = []
+    all_exposures: list[WalletExposureMetric] = []
 
     for city in cities:
         as_of_date = city_local_date(city)
@@ -672,7 +1021,19 @@ async def update_wallet_rankings(
             log.warning("wallet_tracker: city=%s trade fetch failed: %s", city.city_slug, exc)
             errors.append(msg)
             trades = []
+        trades = dedupe_public_trades(trades)
         total_trades += len(trades)
+        market_by_condition = {m.condition_id: m for m in market_refs}
+        exposures = compute_wallet_exposures(trades, market_refs)
+        all_market_refs.extend(market_refs)
+        all_exposures.extend(exposures)
+        async with get_session() as sess:
+            for trade in trades:
+                market = market_by_condition.get(trade.condition_id)
+                if market:
+                    await upsert_wallet_trade(sess, **_trade_to_db_kwargs(trade, market))
+            for exposure in exposures:
+                await upsert_wallet_market_exposure(sess, **exposure.to_db_kwargs())
         metrics = compute_wallet_metrics(
             trades,
             market_refs,
@@ -697,6 +1058,34 @@ async def update_wallet_rankings(
             metrics[0].consistency_score if metrics else None,
             len(errors),
         )
+
+    if all_exposures:
+        global_skills = compute_wallet_skill_scores(
+            all_exposures,
+            all_market_refs,
+            scope="global",
+            window_days=Config.WALLET_TRACKER_SKILL_WINDOW_DAYS,
+            min_resolved_markets=Config.WALLET_TRACKER_MIN_RESOLVED_MARKETS,
+            min_volume_usd=Config.WALLET_TRACKER_MIN_VOLUME_USD,
+            min_active_days=Config.WALLET_TRACKER_MIN_ACTIVE_DAYS,
+        )
+        city_skill_rows: list[WalletSkillMetric] = []
+        for city in cities:
+            city_skill_rows.extend(
+                compute_wallet_skill_scores(
+                    all_exposures,
+                    all_market_refs,
+                    scope="city",
+                    city_slug=city.city_slug,
+                    window_days=Config.WALLET_TRACKER_SKILL_WINDOW_DAYS,
+                    min_resolved_markets=Config.WALLET_TRACKER_MIN_RESOLVED_MARKETS,
+                    min_volume_usd=Config.WALLET_TRACKER_MIN_VOLUME_USD,
+                    min_active_days=Config.WALLET_TRACKER_MIN_ACTIVE_DAYS,
+                )
+            )
+        async with get_session() as sess:
+            for skill in global_skills + city_skill_rows:
+                await upsert_wallet_skill_score(sess, **skill.to_db_kwargs())
 
     return WalletTrackerSummary(
         enabled=True,
@@ -745,6 +1134,209 @@ def serialize_wallet_stat_row(row: Any, *, truncate_addresses: bool = True) -> d
     }
 
 
+def serialize_wallet_skill_score(row: Any, *, truncate_addresses: bool = True) -> dict[str, Any]:
+    address = str(getattr(row, "wallet_address", "") or "").lower()
+    last_active_ts = getattr(row, "last_active_ts", None)
+    return {
+        "wallet_address": address,
+        "display_address": truncate_wallet_address(address, enabled=truncate_addresses),
+        "profile_url": wallet_profile_url(address),
+        "scope": getattr(row, "scope", None),
+        "city_slug": getattr(row, "city_slug", None),
+        "window_days": getattr(row, "window_days", None),
+        "rank": getattr(row, "rank", None),
+        "adjusted_score": getattr(row, "adjusted_score", None),
+        "win_rate": getattr(row, "win_rate", None),
+        "wilson_win_rate": getattr(row, "wilson_win_rate", None),
+        "resolved_markets": getattr(row, "resolved_markets", 0) or 0,
+        "total_markets": getattr(row, "total_markets", 0) or 0,
+        "total_volume_usd": round(float(getattr(row, "total_volume_usd", 0.0) or 0.0), 2),
+        "realized_pnl": round(float(getattr(row, "realized_pnl", 0.0) or 0.0), 2),
+        "roi": getattr(row, "roi", None),
+        "profit_factor": getattr(row, "profit_factor", None),
+        "avg_notional_usd": getattr(row, "avg_notional_usd", None),
+        "active_days": getattr(row, "active_days", 0) or 0,
+        "last_active_ts": last_active_ts.isoformat() if isinstance(last_active_ts, datetime) else last_active_ts,
+        "win_rate_label": (
+            f"{round((getattr(row, 'win_rate', 0) or 0) * 100):.0f}% over {getattr(row, 'resolved_markets', 0) or 0}"
+            if getattr(row, "win_rate", None) is not None else "—"
+        ),
+    }
+
+
+def _recency_weight(last_trade_ts: datetime | None, now: datetime | None = None) -> float:
+    if not last_trade_ts:
+        return 0.25
+    now = now or datetime.now(timezone.utc)
+    if last_trade_ts.tzinfo is None:
+        last_trade_ts = last_trade_ts.replace(tzinfo=timezone.utc)
+    age_minutes = max(0.0, (now - last_trade_ts.astimezone(timezone.utc)).total_seconds() / 60.0)
+    return _clamp(math.exp(-age_minutes / 240.0), 0.15, 1.0)
+
+
+def _notional_weight(net_notional_usd: float) -> float:
+    return _clamp(math.log1p(abs(net_notional_usd)) / math.log1p(5000.0), 0.0, 1.0)
+
+
+def serialize_current_exposure_row(
+    exposure: Any,
+    *,
+    global_skill: Any | None,
+    city_skill: Any | None,
+    truncate_addresses: bool = True,
+    now: datetime | None = None,
+) -> dict[str, Any] | None:
+    if global_skill is None:
+        return None
+    global_score = float(getattr(global_skill, "adjusted_score", 0.0) or 0.0)
+    if global_score < Config.WALLET_TRACKER_MIN_ADJUSTED_SCORE:
+        return None
+    city_score = float(getattr(city_skill, "adjusted_score", 0.0) or 0.0) if city_skill else 0.75
+    net_notional = float(getattr(exposure, "net_notional_usd", 0.0) or 0.0)
+    net_qty = float(getattr(exposure, "net_position_qty", 0.0) or 0.0)
+    last_trade_ts = getattr(exposure, "last_trade_ts", None)
+    recency = _recency_weight(last_trade_ts, now=now)
+    alpha_score = round(global_score * city_score * _notional_weight(net_notional) * recency, 4)
+    address = str(getattr(exposure, "wallet_address", "") or "").lower()
+    if isinstance(last_trade_ts, datetime):
+        if last_trade_ts.tzinfo is None:
+            last_trade_ts = last_trade_ts.replace(tzinfo=timezone.utc)
+        now_dt = now or datetime.now(timezone.utc)
+        last_trade_age_min = max(0, int((now_dt - last_trade_ts.astimezone(timezone.utc)).total_seconds() // 60))
+        last_trade = last_trade_ts.isoformat()
+    else:
+        last_trade_age_min = None
+        last_trade = last_trade_ts
+    direction = "LONG" if net_qty > 0 else ("EXITING" if net_notional < 0 else "FLAT")
+    return {
+        "wallet_address": address,
+        "display_address": truncate_wallet_address(address, enabled=truncate_addresses),
+        "profile_url": wallet_profile_url(address),
+        "global_rank": getattr(global_skill, "rank", None),
+        "city_rank": getattr(city_skill, "rank", None) if city_skill else None,
+        "global_score": global_score,
+        "city_score": getattr(city_skill, "adjusted_score", None) if city_skill else None,
+        "alpha_score": alpha_score,
+        "win_rate": getattr(global_skill, "win_rate", None),
+        "wilson_win_rate": getattr(global_skill, "wilson_win_rate", None),
+        "resolved_markets": getattr(global_skill, "resolved_markets", 0) or 0,
+        "roi": getattr(global_skill, "roi", None),
+        "profit_factor": getattr(global_skill, "profit_factor", None),
+        "bucket_idx": getattr(exposure, "bucket_idx", None),
+        "bucket_label": getattr(exposure, "bucket_label", None),
+        "condition_id": getattr(exposure, "condition_id", None),
+        "market_slug": getattr(exposure, "market_slug", None),
+        "direction": direction,
+        "net_position_qty": round(net_qty, 4),
+        "net_notional_usd": round(net_notional, 2),
+        "trade_count": getattr(exposure, "trade_count", 0) or 0,
+        "volume_usd": round(float(getattr(exposure, "volume_usd", 0.0) or 0.0), 2),
+        "avg_entry_price": getattr(exposure, "avg_entry_price", None),
+        "realized_pnl": getattr(exposure, "realized_pnl", None),
+        "unrealized_pnl": getattr(exposure, "unrealized_pnl", None),
+        "last_trade_ts": last_trade,
+        "last_trade_age_min": last_trade_age_min,
+    }
+
+
+def build_bucket_consensus(
+    buckets: list[dict[str, Any]],
+    current_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    consensus_by_idx: dict[int, dict[str, Any]] = {}
+    for bucket in buckets:
+        idx = bucket.get("bucket_idx")
+        if idx is None:
+            continue
+        idx_int = int(idx)
+        consensus_by_idx[idx_int] = {
+            "bucket_idx": idx_int,
+            "bucket_label": bucket.get("label"),
+            "model_prob": bucket.get("model_prob"),
+            "ranked_wallets_long": 0,
+            "net_notional_usd": 0.0,
+            "net_position_qty": 0.0,
+            "weighted_flow": 0.0,
+            "avg_entry_price": None,
+            "_entry_num": 0.0,
+            "_entry_den": 0.0,
+        }
+    for row in current_rows:
+        idx = row.get("bucket_idx")
+        if idx is None or idx not in consensus_by_idx:
+            continue
+        net_qty = float(row.get("net_position_qty") or 0.0)
+        net_notional = float(row.get("net_notional_usd") or 0.0)
+        if net_qty <= 0 and net_notional <= 0:
+            continue
+        c = consensus_by_idx[idx]
+        c["ranked_wallets_long"] += 1
+        c["net_notional_usd"] += net_notional
+        c["net_position_qty"] += net_qty
+        c["weighted_flow"] += net_notional * float(row.get("global_score") or 0.0)
+        avg_entry = row.get("avg_entry_price")
+        if avg_entry is not None and net_qty > 0:
+            c["_entry_num"] += float(avg_entry) * net_qty
+            c["_entry_den"] += net_qty
+    consensus = []
+    for c in consensus_by_idx.values():
+        if c["_entry_den"] > 0:
+            c["avg_entry_price"] = round(c["_entry_num"] / c["_entry_den"], 4)
+        c["net_notional_usd"] = round(c["net_notional_usd"], 2)
+        c["net_position_qty"] = round(c["net_position_qty"], 4)
+        c["weighted_flow"] = round(c["weighted_flow"], 4)
+        c.pop("_entry_num", None)
+        c.pop("_entry_den", None)
+        consensus.append(c)
+    consensus.sort(key=lambda x: x["bucket_idx"])
+    return consensus
+
+
+def classify_model_confluence(
+    buckets: list[dict[str, Any]],
+    bucket_consensus: list[dict[str, Any]],
+) -> dict[str, Any]:
+    model_candidates = [
+        b for b in buckets
+        if b.get("bucket_idx") is not None and b.get("model_prob") is not None
+    ]
+    if not model_candidates:
+        return {"status": "unavailable", "badge": "NO MODEL", "reason": "model_bucket_unavailable"}
+    model_bucket = max(model_candidates, key=lambda b: b.get("model_prob") or 0.0)
+    flow_candidates = [
+        c for c in bucket_consensus
+        if c.get("ranked_wallets_long", 0) > 0 and c.get("weighted_flow", 0.0) > 0
+    ]
+    if not flow_candidates:
+        return {
+            "status": "unavailable",
+            "badge": "NO RANKED FLOW",
+            "reason": "no_ranked_wallet_flow",
+            "model_bucket_idx": model_bucket.get("bucket_idx"),
+            "model_bucket_label": model_bucket.get("label"),
+        }
+    smart_bucket = max(flow_candidates, key=lambda c: (c.get("weighted_flow") or 0.0, c.get("net_notional_usd") or 0.0))
+    model_idx = int(model_bucket["bucket_idx"])
+    smart_idx = int(smart_bucket["bucket_idx"])
+    distance = abs(model_idx - smart_idx)
+    if distance == 0:
+        badge = "CONFIRMS MODEL"
+    elif distance == 1:
+        badge = "ADJACENT"
+    else:
+        badge = "DIVERGES"
+    return {
+        "status": "available",
+        "badge": badge,
+        "model_bucket_idx": model_idx,
+        "model_bucket_label": model_bucket.get("label"),
+        "smart_money_bucket_idx": smart_idx,
+        "smart_money_bucket_label": smart_bucket.get("bucket_label"),
+        "smart_money_net_flow_usd": smart_bucket.get("net_notional_usd"),
+        "ranked_wallets_long": smart_bucket.get("ranked_wallets_long"),
+    }
+
+
 def build_wallet_leaderboard_payload(
     rows: list[Any],
     *,
@@ -775,15 +1367,172 @@ def build_wallet_leaderboard_payload(
     }
 
 
+def _empty_weather_smart_money_payload(
+    *,
+    enabled: bool,
+    status: str,
+    reason: str | None = None,
+    buckets: list[dict[str, Any]] | None = None,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    bucket_consensus = build_bucket_consensus(buckets or [], [])
+    confluence = classify_model_confluence(buckets or [], bucket_consensus)
+    if reason and confluence.get("status") == "unavailable":
+        confluence.setdefault("reason", reason)
+    return {
+        "enabled": enabled,
+        "status": status,
+        "reason": reason,
+        "mode": "weather_smart_money_v2",
+        "rows": [],
+        "current_market": [],
+        "global_leaders": [],
+        "city_leaders": [],
+        "bucket_consensus": bucket_consensus,
+        "confluence": confluence,
+        "display_limit": limit or Config.WALLET_TRACKER_DISPLAY_LIMIT,
+        "window_days": Config.WALLET_TRACKER_SKILL_WINDOW_DAYS,
+        "disclaimer": (
+            "Wallet leaderboard is read-only public-market analytics. "
+            "It is not a copy-trading signal and does not trigger automated trades."
+        ),
+    }
+
+
+async def get_weather_smart_money_payload(
+    city_slug: str,
+    date_et: str,
+    *,
+    buckets: list[dict[str, Any]] | None = None,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    """Return V2 smart-money payload for a city/date page.
+
+    This is read-only context. It intentionally has no dependency on execution
+    modules and must not be used as an automated trading signal.
+    """
+    _warn_if_execution_caller()
+    from backend.storage.db import get_session
+    from backend.storage.repos import (
+        get_wallet_market_exposures_for_event,
+        get_wallet_skill_scores,
+    )
+
+    limit = limit or Config.WALLET_TRACKER_DISPLAY_LIMIT
+    buckets = buckets or []
+    if not Config.WALLET_TRACKER_ENABLED:
+        return _empty_weather_smart_money_payload(
+            enabled=False,
+            status="disabled",
+            reason="wallet_tracker_disabled",
+            buckets=buckets,
+            limit=limit,
+        )
+
+    async with get_session() as sess:
+        global_rows = await get_wallet_skill_scores(
+            sess,
+            scope="global",
+            city_slug="",
+            window_days=Config.WALLET_TRACKER_SKILL_WINDOW_DAYS,
+            limit=limit,
+        )
+        city_rows = await get_wallet_skill_scores(
+            sess,
+            scope="city",
+            city_slug=city_slug,
+            window_days=Config.WALLET_TRACKER_SKILL_WINDOW_DAYS,
+            limit=limit,
+        )
+        exposure_rows = await get_wallet_market_exposures_for_event(
+            sess,
+            city_slug,
+            date_et,
+            limit=max(500, limit * 20),
+        )
+
+    global_by_wallet = {
+        str(row.wallet_address).lower(): row
+        for row in global_rows
+    }
+    city_by_wallet = {
+        str(row.wallet_address).lower(): row
+        for row in city_rows
+    }
+
+    current_rows = []
+    for exposure in exposure_rows:
+        address = str(getattr(exposure, "wallet_address", "") or "").lower()
+        row = serialize_current_exposure_row(
+            exposure,
+            global_skill=global_by_wallet.get(address),
+            city_skill=city_by_wallet.get(address),
+            truncate_addresses=Config.WALLET_TRACKER_TRUNCATE_ADDRESSES,
+        )
+        if row:
+            current_rows.append(row)
+    current_rows.sort(
+        key=lambda row: (
+            row.get("alpha_score") or 0.0,
+            abs(float(row.get("net_notional_usd") or 0.0)),
+            row.get("global_score") or 0.0,
+        ),
+        reverse=True,
+    )
+    current_rows = current_rows[:limit]
+    bucket_consensus = build_bucket_consensus(buckets, current_rows)
+    confluence = classify_model_confluence(buckets, bucket_consensus)
+
+    return {
+        "enabled": True,
+        "status": "ok" if (current_rows or global_rows or city_rows) else "empty",
+        "reason": None,
+        "mode": "weather_smart_money_v2",
+        "rows": current_rows,
+        "current_market": current_rows,
+        "global_leaders": [
+            serialize_wallet_skill_score(
+                row,
+                truncate_addresses=Config.WALLET_TRACKER_TRUNCATE_ADDRESSES,
+            )
+            for row in global_rows[:limit]
+        ],
+        "city_leaders": [
+            serialize_wallet_skill_score(
+                row,
+                truncate_addresses=Config.WALLET_TRACKER_TRUNCATE_ADDRESSES,
+            )
+            for row in city_rows[:limit]
+        ],
+        "bucket_consensus": bucket_consensus,
+        "confluence": confluence,
+        "display_limit": limit,
+        "window_days": Config.WALLET_TRACKER_SKILL_WINDOW_DAYS,
+        "disclaimer": (
+            "Wallet leaderboard is read-only public-market analytics. "
+            "It is not a copy-trading signal and does not trigger automated trades."
+        ),
+    }
+
+
 async def get_wallet_leaderboard_payload(
     city_slug: str,
     date_et: str,
     *,
     limit: int | None = None,
+    buckets: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     _warn_if_execution_caller()
     from backend.storage.db import get_session
     from backend.storage.repos import get_wallet_stats_for_city
+
+    if buckets is not None:
+        return await get_weather_smart_money_payload(
+            city_slug,
+            date_et,
+            buckets=buckets,
+            limit=limit,
+        )
 
     limit = limit or Config.WALLET_TRACKER_MAX_WALLETS_PER_CITY
     if not Config.WALLET_TRACKER_ENABLED:

@@ -10,16 +10,37 @@ from backend.config import Config
 from backend.market_context.wallet_tracker import (
     MarketRef,
     PublicTrade,
+    WalletExposureMetric,
+    build_bucket_consensus,
     build_wallet_leaderboard_payload,
     calculate_consistency_score,
+    classify_model_confluence,
     compute_smart_money_divergence,
+    compute_wallet_exposures,
     compute_wallet_metrics,
+    compute_wallet_skill_scores,
+    dedupe_public_trades,
+    get_weather_smart_money_payload,
     infer_strategy_style,
     truncate_wallet_address,
     update_wallet_rankings,
+    wilson_lower_bound,
 )
-from backend.storage.models import Base, City, WalletStat
-from backend.storage.repos import get_wallet_stats_for_city, upsert_wallet_stat
+from backend.storage.models import (
+    Base,
+    City,
+    WalletMarketExposure,
+    WalletSkillScore,
+    WalletStat,
+    WalletTrade,
+)
+from backend.storage.repos import (
+    get_wallet_stats_for_city,
+    upsert_wallet_market_exposure,
+    upsert_wallet_skill_score,
+    upsert_wallet_stat,
+    upsert_wallet_trade,
+)
 
 
 def _run(coro):
@@ -77,6 +98,53 @@ def test_consistency_score_rewards_repeatable_quality():
     assert 0 <= weak < strong <= 1
 
 
+def test_trade_deduping_uses_transaction_wallet_condition_side_asset():
+    wallet = "0x1234567890abcdef1234567890abcdef12345678"
+    now = datetime(2026, 5, 16, 12, tzinfo=timezone.utc)
+    first = PublicTrade(
+        wallet_address=wallet,
+        condition_id="cond-a",
+        side="BUY",
+        size=10,
+        price=0.4,
+        timestamp=now,
+        asset_id="asset-a",
+        transaction_hash="0xtx",
+    )
+    duplicate = PublicTrade(
+        wallet_address=wallet.upper(),
+        condition_id="cond-a",
+        side="BUY",
+        size=10,
+        price=0.4,
+        timestamp=now + timedelta(seconds=1),
+        asset_id="asset-a",
+        transaction_hash="0xtx",
+    )
+    distinct = PublicTrade(
+        wallet_address=wallet,
+        condition_id="cond-a",
+        side="SELL",
+        size=10,
+        price=0.55,
+        timestamp=now + timedelta(minutes=2),
+        asset_id="asset-a",
+        transaction_hash="0xtx",
+    )
+
+    deduped = dedupe_public_trades([distinct, duplicate, first])
+    assert len(deduped) == 2
+    assert [t.side for t in deduped] == ["BUY", "SELL"]
+
+
+def test_wilson_lower_bound_penalizes_tiny_perfect_records():
+    tiny_perfect = wilson_lower_bound(4, 4)
+    broad_strong = wilson_lower_bound(74, 80)
+
+    assert tiny_perfect < 0.6
+    assert broad_strong > tiny_perfect
+
+
 def test_filter_wallets_below_min_volume_and_trades():
     now = datetime(2026, 5, 16, 12, tzinfo=timezone.utc)
     markets = [
@@ -122,6 +190,81 @@ def test_compute_wallet_metrics_positive_wallet():
     assert metric.realized_pnl > 0
     assert metric.unrealized_pnl > 0
     assert metric.consistency_score is not None and metric.consistency_score > 0
+
+
+def test_current_event_exposure_extracts_bucket_position():
+    wallet = "0x1234567890abcdef1234567890abcdef12345678"
+    now = datetime(2026, 5, 16, 12, tzinfo=timezone.utc)
+    markets = [
+        MarketRef(
+            city_slug="atlanta",
+            date="2026-05-16",
+            condition_id="cond-a",
+            market_slug="atlanta-high",
+            bucket_idx=2,
+            bucket_label="88-89F",
+            current_price=0.65,
+        )
+    ]
+    trades = [
+        _trade(wallet, "cond-a", "BUY", 100, 0.40, now),
+        _trade(wallet, "cond-a", "SELL", 25, 0.50, now + timedelta(minutes=20)),
+    ]
+
+    exposures = compute_wallet_exposures(trades, markets)
+
+    assert len(exposures) == 1
+    assert exposures[0].bucket_label == "88-89F"
+    assert exposures[0].net_position_qty == 75
+    assert exposures[0].net_notional_usd == 27.5
+    assert exposures[0].trade_count == 2
+    assert exposures[0].volume_usd == 52.5
+    assert exposures[0].realized_pnl > 0
+    assert exposures[0].unrealized_pnl > 0
+
+
+def test_global_and_city_skill_scores_use_credibility_adjusted_quality():
+    wallet = "0x1234567890abcdef1234567890abcdef12345678"
+    other = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+    base = datetime(2026, 5, 16, 12, tzinfo=timezone.utc)
+    markets = [
+        MarketRef(city_slug="atlanta", date="2026-05-14", condition_id="atl-1", resolved_winning_bucket_idx=1),
+        MarketRef(city_slug="atlanta", date="2026-05-15", condition_id="atl-2", resolved_winning_bucket_idx=1),
+        MarketRef(city_slug="boston", date="2026-05-16", condition_id="bos-1", resolved_winning_bucket_idx=2),
+    ]
+    exposures = [
+        WalletExposureMetric(wallet, "atlanta", "2026-05-14", "atl-1", None, 1, "88-89F", 0, 40, None, 0, 60, base),
+        WalletExposureMetric(wallet, "atlanta", "2026-05-15", "atl-2", None, 1, "88-89F", 0, 50, None, 0, 50, base),
+        WalletExposureMetric(wallet, "boston", "2026-05-16", "bos-1", None, 2, "90-91F", 0, 30, None, 0, -10, base),
+        WalletExposureMetric(other, "atlanta", "2026-05-14", "atl-1", None, 1, "88-89F", 0, 10, None, 0, 20, base),
+    ]
+
+    global_scores = compute_wallet_skill_scores(
+        exposures,
+        markets,
+        scope="global",
+        min_resolved_markets=3,
+        min_volume_usd=1,
+        min_active_days=2,
+    )
+    city_scores = compute_wallet_skill_scores(
+        exposures,
+        markets,
+        scope="city",
+        city_slug="atlanta",
+        min_resolved_markets=2,
+        min_volume_usd=1,
+        min_active_days=2,
+    )
+
+    assert len(global_scores) == 1
+    assert global_scores[0].wallet_address == wallet
+    assert global_scores[0].resolved_markets == 3
+    assert global_scores[0].win_rate == round(2 / 3, 4)
+    assert global_scores[0].wilson_win_rate < global_scores[0].win_rate
+    assert len(city_scores) == 1
+    assert city_scores[0].city_slug == "atlanta"
+    assert city_scores[0].rank == 1
 
 
 def test_strategy_style_inference():
@@ -177,6 +320,89 @@ def test_wallet_stat_upsert_is_idempotent(tmp_path, monkeypatch):
             assert first.id == second.id
             assert len(rows) == 1
             assert fetched[0].volume_usd == 125.0
+
+    _run(run_test())
+    _run(engine.dispose())
+
+
+def test_wallet_v2_upserts_are_idempotent(tmp_path, monkeypatch):
+    engine, session_factory = _run(_setup_test_db(tmp_path, monkeypatch))
+    ts = datetime(2026, 5, 16, 12, tzinfo=timezone.utc)
+
+    async def run_test():
+        async with session_factory() as session:
+            trade_kwargs = {
+                "dedupe_key": "tx|wallet|cond|buy",
+                "wallet_address": "0x1234567890abcdef1234567890abcdef12345678",
+                "city_slug": "atlanta",
+                "date": "2026-05-16",
+                "condition_id": "cond-a",
+                "side": "BUY",
+                "size": 10.0,
+                "price": 0.4,
+                "notional_usd": 4.0,
+                "trade_ts": ts,
+            }
+            exposure_kwargs = {
+                "wallet_address": trade_kwargs["wallet_address"],
+                "city_slug": "atlanta",
+                "date": "2026-05-16",
+                "condition_id": "cond-a",
+                "net_position_qty": 10.0,
+                "net_notional_usd": 4.0,
+                "trade_count": 1,
+                "volume_usd": 4.0,
+                "avg_entry_price": 0.4,
+                "realized_pnl": 0.0,
+                "unrealized_pnl": 1.0,
+                "last_trade_ts": ts,
+                "last_updated_ts": ts,
+            }
+            skill_kwargs = {
+                "wallet_address": trade_kwargs["wallet_address"],
+                "scope": "global",
+                "city_slug": "",
+                "window_days": 90,
+                "adjusted_score": 0.5,
+                "rank": 1,
+                "win_rate": 1.0,
+                "wilson_win_rate": 0.7,
+                "resolved_markets": 5,
+                "total_markets": 6,
+                "total_volume_usd": 100.0,
+                "realized_pnl": 25.0,
+                "roi": 0.25,
+                "profit_factor": 25.0,
+                "avg_notional_usd": 20.0,
+                "active_days": 5,
+                "last_active_ts": ts,
+                "last_updated_ts": ts,
+            }
+
+            first_trade = await upsert_wallet_trade(session, **trade_kwargs)
+            second_trade = await upsert_wallet_trade(session, **{**trade_kwargs, "price": 0.45})
+            first_exposure = await upsert_wallet_market_exposure(session, **exposure_kwargs)
+            second_exposure = await upsert_wallet_market_exposure(
+                session,
+                **{**exposure_kwargs, "net_notional_usd": 4.5, "volume_usd": 4.5},
+            )
+            first_skill = await upsert_wallet_skill_score(session, **skill_kwargs)
+            second_skill = await upsert_wallet_skill_score(
+                session,
+                **{**skill_kwargs, "adjusted_score": 0.6},
+            )
+
+            trades = (await session.execute(select(WalletTrade))).scalars().all()
+            exposures = (await session.execute(select(WalletMarketExposure))).scalars().all()
+            skills = (await session.execute(select(WalletSkillScore))).scalars().all()
+            assert first_trade.id == second_trade.id
+            assert first_exposure.id == second_exposure.id
+            assert first_skill.id == second_skill.id
+            assert len(trades) == len(exposures) == len(skills) == 1
+            assert trades[0].price == 0.45
+            assert exposures[0].net_notional_usd == 4.5
+            assert exposures[0].volume_usd == 4.5
+            assert skills[0].adjusted_score == 0.6
 
     _run(run_test())
     _run(engine.dispose())
@@ -242,6 +468,139 @@ def test_dashboard_payload_helper_returns_safe_rows():
     assert payload["rows"][0]["display_address"] == "0x1234...5678"
     assert payload["rows"][0]["profile_url"].endswith(row.wallet_address.lower())
     assert "does not trigger automated trades" in payload["disclaimer"]
+
+
+def test_weather_smart_money_payload_returns_current_global_city_rows(tmp_path, monkeypatch):
+    engine, session_factory = _run(_setup_test_db(tmp_path, monkeypatch))
+    monkeypatch.setattr(Config, "WALLET_TRACKER_ENABLED", True, raising=False)
+    monkeypatch.setattr(Config, "WALLET_TRACKER_MIN_ADJUSTED_SCORE", 0.2, raising=False)
+    ts = datetime.now(timezone.utc) - timedelta(minutes=30)
+    wallet = "0x1234567890abcdef1234567890abcdef12345678"
+
+    async def run_test():
+        async with session_factory() as session:
+            await upsert_wallet_skill_score(
+                session,
+                wallet_address=wallet,
+                scope="global",
+                city_slug="",
+                window_days=Config.WALLET_TRACKER_SKILL_WINDOW_DAYS,
+                adjusted_score=0.86,
+                rank=1,
+                win_rate=1.0,
+                wilson_win_rate=0.72,
+                resolved_markets=12,
+                total_markets=14,
+                total_volume_usd=5000.0,
+                realized_pnl=800.0,
+                roi=0.16,
+                profit_factor=8.0,
+                avg_notional_usd=357.0,
+                active_days=8,
+                last_active_ts=ts,
+                last_updated_ts=ts,
+            )
+            await upsert_wallet_skill_score(
+                session,
+                wallet_address=wallet,
+                scope="city",
+                city_slug="atlanta",
+                window_days=Config.WALLET_TRACKER_SKILL_WINDOW_DAYS,
+                adjusted_score=0.80,
+                rank=2,
+                win_rate=1.0,
+                wilson_win_rate=0.61,
+                resolved_markets=7,
+                total_markets=8,
+                total_volume_usd=2000.0,
+                realized_pnl=300.0,
+                roi=0.15,
+                profit_factor=6.0,
+                avg_notional_usd=250.0,
+                active_days=5,
+                last_active_ts=ts,
+                last_updated_ts=ts,
+            )
+            await upsert_wallet_market_exposure(
+                session,
+                wallet_address=wallet,
+                city_slug="atlanta",
+                date="2026-05-16",
+                market_slug="atlanta-high",
+                condition_id="cond-a",
+                bucket_idx=2,
+                bucket_label="88-89F",
+                net_position_qty=120.0,
+                net_notional_usd=72.0,
+                trade_count=3,
+                volume_usd=180.0,
+                avg_entry_price=0.6,
+                realized_pnl=0.0,
+                unrealized_pnl=12.0,
+                last_trade_ts=ts,
+                last_updated_ts=ts,
+            )
+
+        payload = await get_weather_smart_money_payload(
+            "atlanta",
+            "2026-05-16",
+            buckets=[
+                {"bucket_idx": 1, "label": "86-87F", "model_prob": 0.25},
+                {"bucket_idx": 2, "label": "88-89F", "model_prob": 0.55},
+            ],
+            limit=50,
+        )
+        assert payload["status"] == "ok"
+        assert payload["current_market"][0]["global_rank"] == 1
+        assert payload["current_market"][0]["city_rank"] == 2
+        assert payload["bucket_consensus"][1]["ranked_wallets_long"] == 1
+        assert payload["confluence"]["badge"] == "CONFIRMS MODEL"
+        assert payload["global_leaders"][0]["win_rate_label"] == "100% over 12"
+
+    _run(run_test())
+    _run(engine.dispose())
+
+
+def test_weather_smart_money_payload_disabled_is_safe(monkeypatch):
+    monkeypatch.setattr(Config, "WALLET_TRACKER_ENABLED", False, raising=False)
+
+    payload = _run(get_weather_smart_money_payload("atlanta", "2026-05-16", buckets=[]))
+
+    assert payload["enabled"] is False
+    assert payload["current_market"] == []
+    assert payload["global_leaders"] == []
+    assert payload["city_leaders"] == []
+
+
+def test_bucket_consensus_and_model_confluence_classification():
+    buckets = [
+        {"bucket_idx": 1, "label": "86-87F", "model_prob": 0.2},
+        {"bucket_idx": 2, "label": "88-89F", "model_prob": 0.6},
+        {"bucket_idx": 3, "label": "90-91F", "model_prob": 0.2},
+    ]
+    rows = [
+        {
+            "bucket_idx": 2,
+            "net_position_qty": 100.0,
+            "net_notional_usd": 60.0,
+            "avg_entry_price": 0.6,
+            "global_score": 0.8,
+        },
+        {
+            "bucket_idx": 3,
+            "net_position_qty": 50.0,
+            "net_notional_usd": 35.0,
+            "avg_entry_price": 0.7,
+            "global_score": 0.9,
+        },
+    ]
+
+    consensus = build_bucket_consensus(buckets, rows)
+    confluence = classify_model_confluence(buckets, consensus)
+
+    assert consensus[1]["ranked_wallets_long"] == 1
+    assert consensus[1]["avg_entry_price"] == 0.6
+    assert confluence["badge"] == "CONFIRMS MODEL"
 
 
 def test_smart_money_divergence_available_and_unavailable():

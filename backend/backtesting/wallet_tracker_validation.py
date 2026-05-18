@@ -22,8 +22,17 @@ class WalletTrackerValidationResult:
     notes: tuple[str, ...]
 
 
+def _ranked_rows(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    return (
+        snapshot.get("current_market")
+        or snapshot.get("rows")
+        or snapshot.get("global_leaders")
+        or []
+    )
+
+
 def _top_wallets(snapshot: dict[str, Any], n: int = 5) -> set[str]:
-    rows = snapshot.get("rows") or []
+    rows = _ranked_rows(snapshot)
     return {
         str(row.get("wallet_address") or "").lower()
         for row in rows[:n]
@@ -32,14 +41,35 @@ def _top_wallets(snapshot: dict[str, Any], n: int = 5) -> set[str]:
 
 
 def _favored_bucket(snapshot: dict[str, Any]) -> int | None:
-    rows = snapshot.get("rows") or []
+    consensus = snapshot.get("bucket_consensus") or []
+    if consensus:
+        positive = [
+            row for row in consensus
+            if row.get("bucket_idx") is not None
+            and float(row.get("weighted_flow") or row.get("net_notional_usd") or 0.0) > 0
+        ]
+        if positive:
+            best = max(
+                positive,
+                key=lambda row: (
+                    float(row.get("weighted_flow") or 0.0),
+                    float(row.get("net_notional_usd") or 0.0),
+                ),
+            )
+            return int(best["bucket_idx"])
+
+    rows = _ranked_rows(snapshot)
     flow_by_bucket: dict[int, float] = defaultdict(float)
     for row in rows:
         idx = row.get("bucket_idx")
         if idx is None:
             continue
         try:
-            flow_by_bucket[int(idx)] += float(row.get("net_flow_usd") or 0.0)
+            flow_by_bucket[int(idx)] += float(
+                row.get("net_notional_usd")
+                or row.get("net_flow_usd")
+                or 0.0
+            )
         except (TypeError, ValueError):
             continue
     positive = {idx: flow for idx, flow in flow_by_bucket.items() if flow > 0}
@@ -55,8 +85,9 @@ def evaluate_wallet_tracker_snapshots(
     Expected snapshot keys:
       - city_slug
       - date
-      - rows: leaderboard rows from wallet_tracker.build_wallet_leaderboard_payload
-      - smart_money_context: optional divergence payload
+      - current_market or rows: wallet_tracker smart-money rows
+      - bucket_consensus: optional V2 bucket consensus rows
+      - smart_money_context or confluence: optional model/smart-money payload
       - regime: optional CALM/NORMAL/VOLATILE label
 
     TODO: Once historical public trade ingestion is complete, add forward-only
@@ -97,7 +128,7 @@ def evaluate_wallet_tracker_snapshots(
             regime = str(snapshot.get("regime") or "UNKNOWN").upper()
             regime_hits[regime].append(hit)
 
-        divergence = snapshot.get("smart_money_context") or {}
+        divergence = snapshot.get("smart_money_context") or snapshot.get("confluence") or {}
         if resolved_idx is not None and divergence.get("status") == "available":
             smart_idx = divergence.get("smart_money_bucket_idx")
             model_idx = divergence.get("model_bucket_idx")

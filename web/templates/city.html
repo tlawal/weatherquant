@@ -1268,12 +1268,12 @@
   {% endif %}
 </div>
 
-<!-- ── TOP WEATHER WALLETS ───────────────────────────────────────────────── -->
-<div class="card p-5 mb-6">
+<!-- ── WEATHER SMART MONEY ───────────────────────────────────────────────── -->
+<div class="card p-5 mb-6" x-data="{ smartTab: 'current' }">
   <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between mb-4">
     <div>
-      <div class="flex items-center gap-2">
-        <h2 class="font-semibold text-sm">Top Weather Wallets</h2>
+      <div class="flex flex-wrap items-center gap-2">
+        <h2 class="font-semibold text-sm">Weather Smart Money</h2>
         {% if wallet_leaderboard and wallet_leaderboard.enabled %}
         <span class="text-[10px] px-2 py-0.5 rounded-full font-bold"
               style="background:rgba(34,211,238,0.12);color:var(--cyan)">
@@ -1285,17 +1285,26 @@
           DISABLED
         </span>
         {% endif %}
+        {% if smart_money_context %}
+        <span class="text-[10px] px-2 py-0.5 rounded-full font-bold"
+              style="background:{% if smart_money_context.badge == 'CONFIRMS MODEL' %}rgba(34,197,94,0.14){% elif smart_money_context.badge == 'ADJACENT' %}rgba(234,179,8,0.14){% elif smart_money_context.badge == 'DIVERGES' %}rgba(239,68,68,0.14){% else %}var(--bg-panel){% endif %};color:{% if smart_money_context.badge == 'CONFIRMS MODEL' %}#86EFAC{% elif smart_money_context.badge == 'ADJACENT' %}#FBBF24{% elif smart_money_context.badge == 'DIVERGES' %}#FCA5A5{% else %}var(--text-muted){% endif %};border:1px solid var(--border)">
+          {{ smart_money_context.badge or 'NO RANKED FLOW' }}
+        </span>
+        {% endif %}
       </div>
-      <p class="text-[11px] mt-1" style="color:var(--text-muted)">
+      <p class="text-[11px] mt-1 max-w-4xl" style="color:var(--text-muted)">
         {{ wallet_leaderboard.disclaimer if wallet_leaderboard else "Wallet leaderboard is read-only public-market analytics. It is not a copy-trading signal and does not trigger automated trades." }}
       </p>
     </div>
-    <div class="text-[10px] mono text-right" style="color:var(--text-muted)">
-      {% if wallet_leaderboard and wallet_leaderboard.rows %}
-        {{ wallet_leaderboard.rows|length }} wallet{{ '' if wallet_leaderboard.rows|length == 1 else 's' }}
+    <div class="text-[10px] mono sm:text-right" style="color:var(--text-muted)">
+      {% if wallet_leaderboard and wallet_leaderboard.current_market %}
+        {{ wallet_leaderboard.current_market|length }} current wallet{{ '' if wallet_leaderboard.current_market|length == 1 else 's' }}
+      {% elif wallet_leaderboard and wallet_leaderboard.global_leaders %}
+        {{ wallet_leaderboard.global_leaders|length }} global leader{{ '' if wallet_leaderboard.global_leaders|length == 1 else 's' }}
       {% else %}
         no wallet data
       {% endif %}
+      <div>limit {{ wallet_leaderboard.display_limit if wallet_leaderboard else 50 }}</div>
     </div>
   </div>
 
@@ -1303,14 +1312,10 @@
   <div class="mb-4 p-3 rounded-lg border" style="background:rgba(34,211,238,0.06);border-color:rgba(34,211,238,0.20)">
     <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px]">
       <span class="uppercase tracking-widest font-bold" style="color:var(--cyan)">Smart Money vs Model</span>
-      <span>Model favored bucket: <span class="mono">{{ smart_money_context.model_bucket_label or ('Bucket ' ~ smart_money_context.model_bucket_idx) }}</span></span>
-      <span>Top-wallet net flow: <span class="mono">{{ smart_money_context.smart_money_bucket_label or ('Bucket ' ~ smart_money_context.smart_money_bucket_idx) }}</span></span>
-      <span>Divergence:
-        <span class="mono font-bold"
-              style="color:{% if smart_money_context.divergence == 'HIGH' %}#FCA5A5{% elif smart_money_context.divergence == 'MEDIUM' %}#FBBF24{% else %}#86EFAC{% endif %}">
-          {{ smart_money_context.divergence }}
-        </span>
-      </span>
+      <span>Model: <span class="mono">{{ smart_money_context.model_bucket_label or ('Bucket ' ~ smart_money_context.model_bucket_idx) }}</span></span>
+      <span>Ranked flow: <span class="mono">{{ smart_money_context.smart_money_bucket_label or ('Bucket ' ~ smart_money_context.smart_money_bucket_idx) }}</span></span>
+      <span>Wallets: <span class="mono">{{ smart_money_context.ranked_wallets_long or 0 }}</span></span>
+      <span>Net: <span class="mono">${{ "%.0f"|format(smart_money_context.smart_money_net_flow_usd or 0) }}</span></span>
     </div>
   </div>
   {% elif wallet_leaderboard and wallet_leaderboard.enabled %}
@@ -1319,75 +1324,147 @@
   </div>
   {% endif %}
 
-  {% if wallet_leaderboard and wallet_leaderboard.rows %}
-  <div class="overflow-x-auto">
-    <table class="w-full text-xs" style="min-width:58rem">
-      <thead>
-        <tr class="text-[10px] uppercase tracking-widest" style="color:var(--text-muted);border-bottom:1px solid var(--border)">
-          <th class="px-2 py-2 text-left">Wallet</th>
-          <th class="px-2 py-2 text-right">Score</th>
-          <th class="px-2 py-2 text-right">Realized PnL</th>
-          <th class="px-2 py-2 text-right">Win Rate</th>
-          <th class="px-2 py-2 text-right">Volume</th>
-          <th class="px-2 py-2 text-right">Avg Hold</th>
-          <th class="px-2 py-2 text-left">Style</th>
-          <th class="px-2 py-2 text-left">Recent Exposure</th>
-          <th class="px-2 py-2 text-left">Last Active</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for row in wallet_leaderboard.rows %}
-        <tr class="border-b hover:bg-white/5 transition-colors" style="border-color:rgba(26,58,107,0.4)">
-          <td class="px-2 py-2.5 mono">
-            {% if row.profile_url %}
-            <a href="{{ row.profile_url }}" target="_blank" rel="noopener" class="hover:underline" style="color:var(--cyan)">{{ row.display_address }}</a>
-            {% else %}
-            {{ row.display_address }}
-            {% endif %}
-          </td>
-          <td class="px-2 py-2.5 text-right mono font-bold">
-            {% if row.consistency_score is not none %}{{ "%.2f"|format(row.consistency_score) }}{% else %}—{% endif %}
-          </td>
-          <td class="px-2 py-2.5 text-right mono" style="color:{% if row.realized_pnl > 0 %}#86EFAC{% elif row.realized_pnl < 0 %}#FCA5A5{% else %}var(--text-muted){% endif %}">
-            {{ "%+.2f"|format(row.realized_pnl) }}
-          </td>
-          <td class="px-2 py-2.5 text-right mono">
-            {% if row.win_rate is not none %}{{ "%.0f"|format(row.win_rate * 100) }}%{% else %}—{% endif %}
-          </td>
-          <td class="px-2 py-2.5 text-right mono">${{ "%.0f"|format(row.volume_usd) }}</td>
-          <td class="px-2 py-2.5 text-right mono">
-            {% if row.avg_hold_minutes is not none %}
-              {% if row.avg_hold_minutes >= 60 %}{{ "%.1f"|format(row.avg_hold_minutes / 60) }}h{% else %}{{ "%.0f"|format(row.avg_hold_minutes) }}m{% endif %}
-            {% else %}—{% endif %}
-          </td>
-          <td class="px-2 py-2.5">{{ row.inferred_style or 'Unknown' }}</td>
-          <td class="px-2 py-2.5">
-            {% if row.bucket_label %}
-              <span class="mono">{{ row.bucket_label }}</span>
-            {% elif row.bucket_idx is not none %}
-              <span class="mono">Bucket {{ row.bucket_idx }}</span>
-            {% else %}
-              <span style="color:var(--text-muted)">—</span>
-            {% endif %}
-            {% if row.net_flow_usd %}
-            <div class="text-[10px] mono" style="color:{% if row.net_flow_usd > 0 %}#86EFAC{% else %}#FCA5A5{% endif %}">
-              flow {{ "%+.0f"|format(row.net_flow_usd) }}
-            </div>
-            {% endif %}
-          </td>
-          <td class="px-2 py-2.5 mono text-[10px]" style="color:var(--text-muted)">
-            {{ row.last_trade_ts or '—' }}
-          </td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
-  {% else %}
-  <div class="text-sm leading-relaxed" style="color:var(--text-muted)">
-    No wallet leaderboard rows are available for this city/date yet. The dashboard will stay empty until real public trade data has been fetched and scored.
+  {% if wallet_leaderboard and wallet_leaderboard.bucket_consensus %}
+  <div class="mb-4">
+    <div class="text-[10px] uppercase tracking-widest font-bold mb-2" style="color:var(--text-muted)">Bucket Consensus</div>
+    <div class="grid gap-2 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-6">
+      {% for bucket in wallet_leaderboard.bucket_consensus %}
+      <div class="panel rounded p-2" style="border:1px solid {% if smart_money_context and smart_money_context.smart_money_bucket_idx == bucket.bucket_idx %}rgba(34,211,238,0.45){% else %}var(--border){% endif %}">
+        <div class="mono text-[11px] truncate" title="{{ bucket.bucket_label or ('Bucket ' ~ bucket.bucket_idx) }}">
+          {{ bucket.bucket_label or ('Bucket ' ~ bucket.bucket_idx) }}
+        </div>
+        <div class="mt-1 flex items-center justify-between text-[10px]" style="color:var(--text-muted)">
+          <span>ranked long</span>
+          <span class="mono">{{ bucket.ranked_wallets_long }}</span>
+        </div>
+        <div class="flex items-center justify-between text-[10px]" style="color:var(--text-muted)">
+          <span>net flow</span>
+          <span class="mono" style="color:{% if bucket.net_notional_usd > 0 %}#86EFAC{% elif bucket.net_notional_usd < 0 %}#FCA5A5{% else %}var(--text-muted){% endif %}">
+            {{ "%+.0f"|format(bucket.net_notional_usd) }}
+          </span>
+        </div>
+        <div class="flex items-center justify-between text-[10px]" style="color:var(--text-muted)">
+          <span>avg entry</span>
+          <span class="mono">{% if bucket.avg_entry_price is not none %}{{ "%.2f"|format(bucket.avg_entry_price) }}{% else %}—{% endif %}</span>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
   </div>
   {% endif %}
+
+  <div class="flex flex-wrap items-center gap-2 mb-3">
+    <button type="button" @click="smartTab = 'current'"
+            :style="smartTab === 'current' ? 'background:rgba(34,211,238,0.14);border-color:rgba(34,211,238,0.45);color:var(--cyan)' : 'background:var(--bg-panel);border-color:var(--border);color:var(--text-muted)'"
+            class="px-3 py-1.5 rounded-lg border text-[10px] font-bold tracking-widest">
+      CURRENT MARKET
+    </button>
+    <button type="button" @click="smartTab = 'global'"
+            :style="smartTab === 'global' ? 'background:rgba(34,211,238,0.14);border-color:rgba(34,211,238,0.45);color:var(--cyan)' : 'background:var(--bg-panel);border-color:var(--border);color:var(--text-muted)'"
+            class="px-3 py-1.5 rounded-lg border text-[10px] font-bold tracking-widest">
+      GLOBAL LEADERS
+    </button>
+    <button type="button" @click="smartTab = 'city'"
+            :style="smartTab === 'city' ? 'background:rgba(34,211,238,0.14);border-color:rgba(34,211,238,0.45);color:var(--cyan)' : 'background:var(--bg-panel);border-color:var(--border);color:var(--text-muted)'"
+            class="px-3 py-1.5 rounded-lg border text-[10px] font-bold tracking-widest">
+      CITY LEADERS
+    </button>
+  </div>
+
+  <div x-show="smartTab === 'current'">
+    {% if wallet_leaderboard and wallet_leaderboard.current_market %}
+    <div class="overflow-x-auto">
+      <table class="w-full text-xs" style="min-width:78rem">
+        <thead>
+          <tr class="text-[10px] uppercase tracking-widest" style="color:var(--text-muted);border-bottom:1px solid var(--border)">
+            <th class="px-2 py-2 text-left">Wallet</th>
+            <th class="px-2 py-2 text-right">Global</th>
+            <th class="px-2 py-2 text-right">City</th>
+            <th class="px-2 py-2 text-right">Score</th>
+            <th class="px-2 py-2 text-right">Credible Win</th>
+            <th class="px-2 py-2 text-left">Bucket</th>
+            <th class="px-2 py-2 text-right">Net Notional</th>
+            <th class="px-2 py-2 text-right">Net Shares</th>
+            <th class="px-2 py-2 text-right">Avg Entry</th>
+            <th class="px-2 py-2 text-right">Last Trade</th>
+            <th class="px-2 py-2 text-left">Detail</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in wallet_leaderboard.current_market %}
+          <tr class="border-b hover:bg-white/5 transition-colors" style="border-color:rgba(26,58,107,0.4)">
+            <td class="px-2 py-2.5 mono">
+              {% if row.profile_url %}
+              <a href="{{ row.profile_url }}" target="_blank" rel="noopener" class="hover:underline" style="color:var(--cyan)">{{ row.display_address }}</a>
+              {% else %}
+              {{ row.display_address }}
+              {% endif %}
+            </td>
+            <td class="px-2 py-2.5 text-right mono">#{{ row.global_rank or '—' }}</td>
+            <td class="px-2 py-2.5 text-right mono">{% if row.city_rank %}#{{ row.city_rank }}{% else %}—{% endif %}</td>
+            <td class="px-2 py-2.5 text-right mono font-bold">{{ "%.2f"|format(row.alpha_score or 0) }}</td>
+            <td class="px-2 py-2.5 text-right mono">
+              {% if row.win_rate is not none %}
+              {{ "%.0f"|format(row.win_rate * 100) }}% over {{ row.resolved_markets }}
+              <div class="text-[10px]" style="color:var(--text-muted)">Wilson {{ "%.0f"|format((row.wilson_win_rate or 0) * 100) }}%</div>
+              {% else %}—{% endif %}
+            </td>
+            <td class="px-2 py-2.5">
+              <span class="mono">{{ row.bucket_label or ('Bucket ' ~ row.bucket_idx) }}</span>
+              <div class="text-[10px] mono" style="color:{% if row.direction == 'LONG' %}#86EFAC{% elif row.direction == 'EXITING' %}#FCA5A5{% else %}var(--text-muted){% endif %}">
+                {{ row.direction }}
+              </div>
+            </td>
+            <td class="px-2 py-2.5 text-right mono" style="color:{% if row.net_notional_usd > 0 %}#86EFAC{% elif row.net_notional_usd < 0 %}#FCA5A5{% else %}var(--text-muted){% endif %}">
+              {{ "%+.0f"|format(row.net_notional_usd or 0) }}
+            </td>
+            <td class="px-2 py-2.5 text-right mono">{{ "%+.2f"|format(row.net_position_qty or 0) }}</td>
+            <td class="px-2 py-2.5 text-right mono">{% if row.avg_entry_price is not none %}{{ "%.2f"|format(row.avg_entry_price) }}{% else %}—{% endif %}</td>
+            <td class="px-2 py-2.5 text-right mono">
+              {% if row.last_trade_age_min is not none %}
+                {% if row.last_trade_age_min >= 60 %}{{ "%.1f"|format(row.last_trade_age_min / 60) }}h{% else %}{{ row.last_trade_age_min }}m{% endif %}
+              {% else %}—{% endif %}
+            </td>
+            <td class="px-2 py-2.5">
+              <details>
+                <summary class="cursor-pointer text-[10px] uppercase tracking-widest" style="color:var(--cyan)">Open</summary>
+                <div class="mt-2 text-[10px] space-y-1" style="color:var(--text-muted)">
+                  <div>Global score: <span class="mono">{{ "%.2f"|format(row.global_score or 0) }}</span></div>
+                  <div>City score: <span class="mono">{% if row.city_score is not none %}{{ "%.2f"|format(row.city_score) }}{% else %}—{% endif %}</span></div>
+                  <div>Current volume: <span class="mono">${{ "%.0f"|format(row.volume_usd or 0) }} / {{ row.trade_count or 0 }} trades</span></div>
+                  <div>ROI: <span class="mono">{% if row.roi is not none %}{{ "%+.1f"|format(row.roi * 100) }}%{% else %}—{% endif %}</span></div>
+                  <div>Profit factor: <span class="mono">{{ row.profit_factor or '—' }}</span></div>
+                  <div>Condition: <span class="mono">{{ row.condition_id or '—' }}</span></div>
+                </div>
+              </details>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="text-sm leading-relaxed" style="color:var(--text-muted)">
+      No ranked weather wallets have current exposure for this city/date yet. The dashboard will stay empty until real public trade data has been fetched and scored.
+    </div>
+    {% endif %}
+  </div>
+
+  <div x-show="smartTab === 'global'" x-cloak>
+    {% set leader_rows = wallet_leaderboard.global_leaders if wallet_leaderboard else [] %}
+    {% include "partials/wallet_leaders_table.html" ignore missing %}
+    {% if not leader_rows %}
+    <div class="text-sm leading-relaxed" style="color:var(--text-muted)">No global daily high-temperature wallet leaders are available yet.</div>
+    {% endif %}
+  </div>
+
+  <div x-show="smartTab === 'city'" x-cloak>
+    {% set leader_rows = wallet_leaderboard.city_leaders if wallet_leaderboard else [] %}
+    {% include "partials/wallet_leaders_table.html" ignore missing %}
+    {% if not leader_rows %}
+    <div class="text-sm leading-relaxed" style="color:var(--text-muted)">No city-specific wallet leaders are available yet.</div>
+    {% endif %}
+  </div>
 </div>
 
 <!-- ── KALMAN DIVERGENCE BANNER ──────────────────────────────────────────── -->

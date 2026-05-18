@@ -407,6 +407,92 @@ async def init_db() -> None:
     await _run_ddl("CREATE INDEX IF NOT EXISTS ix_wallet_stats_consistency_score ON wallet_stats (consistency_score)")
     await _run_ddl("CREATE INDEX IF NOT EXISTS ix_wallet_stats_condition_id ON wallet_stats (condition_id)")
 
+    # Smart Money V2 normalized storage. These tables preserve raw public
+    # trades, derive current bucket exposure, and materialize global/city skill.
+    await _run_ddl("""
+        CREATE TABLE IF NOT EXISTS wallet_trades (
+            id SERIAL PRIMARY KEY,
+            dedupe_key VARCHAR(256) NOT NULL UNIQUE,
+            wallet_address VARCHAR(64) NOT NULL,
+            city_slug VARCHAR(64) NOT NULL,
+            date VARCHAR(10) NOT NULL,
+            market_slug VARCHAR(256),
+            condition_id VARCHAR(128) NOT NULL,
+            asset_id VARCHAR(128),
+            bucket_idx INTEGER,
+            bucket_label VARCHAR(256),
+            side VARCHAR(8) NOT NULL,
+            size FLOAT NOT NULL,
+            price FLOAT NOT NULL,
+            notional_usd FLOAT NOT NULL,
+            trade_ts TIMESTAMP WITH TIME ZONE NOT NULL,
+            transaction_hash VARCHAR(128),
+            raw_json TEXT,
+            inserted_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+        )
+    """)
+    await _run_ddl("CREATE INDEX IF NOT EXISTS ix_wallet_trade_wallet_ts ON wallet_trades (wallet_address, trade_ts)")
+    await _run_ddl("CREATE INDEX IF NOT EXISTS ix_wallet_trade_condition ON wallet_trades (condition_id)")
+    await _run_ddl("CREATE INDEX IF NOT EXISTS ix_wallet_trade_city_date ON wallet_trades (city_slug, date)")
+
+    await _run_ddl("""
+        CREATE TABLE IF NOT EXISTS wallet_market_exposures (
+            id SERIAL PRIMARY KEY,
+            wallet_address VARCHAR(64) NOT NULL,
+            city_slug VARCHAR(64) NOT NULL,
+            date VARCHAR(10) NOT NULL,
+            market_slug VARCHAR(256),
+            condition_id VARCHAR(128) NOT NULL,
+            bucket_idx INTEGER,
+            bucket_label VARCHAR(256),
+            net_position_qty FLOAT NOT NULL DEFAULT 0.0,
+            net_notional_usd FLOAT NOT NULL DEFAULT 0.0,
+            trade_count INTEGER NOT NULL DEFAULT 0,
+            volume_usd FLOAT NOT NULL DEFAULT 0.0,
+            avg_entry_price FLOAT,
+            realized_pnl FLOAT NOT NULL DEFAULT 0.0,
+            unrealized_pnl FLOAT NOT NULL DEFAULT 0.0,
+            last_trade_ts TIMESTAMP WITH TIME ZONE,
+            last_updated_ts TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+            CONSTRAINT uq_wallet_exposure_wallet_condition
+                UNIQUE (wallet_address, condition_id)
+        )
+    """)
+    await _run_ddl("ALTER TABLE wallet_market_exposures ADD COLUMN trade_count INTEGER NOT NULL DEFAULT 0")
+    await _run_ddl("ALTER TABLE wallet_market_exposures ADD COLUMN volume_usd FLOAT NOT NULL DEFAULT 0.0")
+    await _run_ddl("CREATE INDEX IF NOT EXISTS ix_wallet_exposure_city_date ON wallet_market_exposures (city_slug, date)")
+    await _run_ddl("CREATE INDEX IF NOT EXISTS ix_wallet_exposure_condition ON wallet_market_exposures (condition_id)")
+    await _run_ddl("CREATE INDEX IF NOT EXISTS ix_wallet_exposure_wallet ON wallet_market_exposures (wallet_address)")
+
+    await _run_ddl("""
+        CREATE TABLE IF NOT EXISTS wallet_skill_scores (
+            id SERIAL PRIMARY KEY,
+            wallet_address VARCHAR(64) NOT NULL,
+            scope VARCHAR(16) NOT NULL,
+            city_slug VARCHAR(64) NOT NULL DEFAULT '',
+            window_days INTEGER NOT NULL DEFAULT 90,
+            adjusted_score FLOAT NOT NULL DEFAULT 0.0,
+            rank INTEGER,
+            win_rate FLOAT,
+            wilson_win_rate FLOAT,
+            resolved_markets INTEGER NOT NULL DEFAULT 0,
+            total_markets INTEGER NOT NULL DEFAULT 0,
+            total_volume_usd FLOAT NOT NULL DEFAULT 0.0,
+            realized_pnl FLOAT NOT NULL DEFAULT 0.0,
+            roi FLOAT,
+            profit_factor FLOAT,
+            avg_notional_usd FLOAT,
+            active_days INTEGER NOT NULL DEFAULT 0,
+            last_active_ts TIMESTAMP WITH TIME ZONE,
+            last_updated_ts TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+            CONSTRAINT uq_wallet_skill_scope
+                UNIQUE (wallet_address, scope, city_slug, window_days)
+        )
+    """)
+    await _run_ddl("CREATE INDEX IF NOT EXISTS ix_wallet_skill_scope_score ON wallet_skill_scores (scope, adjusted_score)")
+    await _run_ddl("CREATE INDEX IF NOT EXISTS ix_wallet_skill_wallet ON wallet_skill_scores (wallet_address)")
+    await _run_ddl("CREATE INDEX IF NOT EXISTS ix_wallet_skill_city ON wallet_skill_scores (city_slug)")
+
     # Step 3: seed initial data
     await _seed_initial_data()
     log.info("db: init complete")

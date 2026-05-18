@@ -452,6 +452,99 @@ class WalletStat(Base):
     last_updated_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
 
+class WalletTrade(Base):
+    """Normalized public Polymarket weather trade.
+
+    Raw public data only. Used to derive wallet skill and current exposures.
+    """
+    __tablename__ = "wallet_trades"
+    __table_args__ = (
+        UniqueConstraint("dedupe_key", name="uq_wallet_trade_dedupe_key"),
+        Index("ix_wallet_trade_wallet_ts", "wallet_address", "trade_ts"),
+        Index("ix_wallet_trade_condition", "condition_id"),
+        Index("ix_wallet_trade_city_date", "city_slug", "date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    dedupe_key: Mapped[str] = mapped_column(String(256), nullable=False)
+    wallet_address: Mapped[str] = mapped_column(String(64), nullable=False)
+    city_slug: Mapped[str] = mapped_column(String(64), nullable=False)
+    date: Mapped[str] = mapped_column(String(10), nullable=False)
+    market_slug: Mapped[Optional[str]] = mapped_column(String(256))
+    condition_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    asset_id: Mapped[Optional[str]] = mapped_column(String(128))
+    bucket_idx: Mapped[Optional[int]] = mapped_column(Integer)
+    bucket_label: Mapped[Optional[str]] = mapped_column(String(256))
+    side: Mapped[str] = mapped_column(String(8), nullable=False)
+    size: Mapped[float] = mapped_column(Float, nullable=False)
+    price: Mapped[float] = mapped_column(Float, nullable=False)
+    notional_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    trade_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    transaction_hash: Mapped[Optional[str]] = mapped_column(String(128))
+    raw_json: Mapped[Optional[str]] = mapped_column(Text)
+    inserted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+
+class WalletMarketExposure(Base):
+    """Per-wallet exposure for one weather bucket market."""
+    __tablename__ = "wallet_market_exposures"
+    __table_args__ = (
+        UniqueConstraint("wallet_address", "condition_id", name="uq_wallet_exposure_wallet_condition"),
+        Index("ix_wallet_exposure_city_date", "city_slug", "date"),
+        Index("ix_wallet_exposure_condition", "condition_id"),
+        Index("ix_wallet_exposure_wallet", "wallet_address"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    wallet_address: Mapped[str] = mapped_column(String(64), nullable=False)
+    city_slug: Mapped[str] = mapped_column(String(64), nullable=False)
+    date: Mapped[str] = mapped_column(String(10), nullable=False)
+    market_slug: Mapped[Optional[str]] = mapped_column(String(256))
+    condition_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    bucket_idx: Mapped[Optional[int]] = mapped_column(Integer)
+    bucket_label: Mapped[Optional[str]] = mapped_column(String(256))
+    net_position_qty: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    net_notional_usd: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    trade_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    volume_usd: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    avg_entry_price: Mapped[Optional[float]] = mapped_column(Float)
+    realized_pnl: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    unrealized_pnl: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    last_trade_ts: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    last_updated_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+
+class WalletSkillScore(Base):
+    """Credibility-adjusted wallet skill for daily high-temperature markets."""
+    __tablename__ = "wallet_skill_scores"
+    __table_args__ = (
+        UniqueConstraint("wallet_address", "scope", "city_slug", "window_days", name="uq_wallet_skill_scope"),
+        Index("ix_wallet_skill_scope_score", "scope", "adjusted_score"),
+        Index("ix_wallet_skill_wallet", "wallet_address"),
+        Index("ix_wallet_skill_city", "city_slug"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    wallet_address: Mapped[str] = mapped_column(String(64), nullable=False)
+    scope: Mapped[str] = mapped_column(String(16), nullable=False)  # global | city
+    city_slug: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    window_days: Mapped[int] = mapped_column(Integer, default=90, nullable=False)
+    adjusted_score: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    rank: Mapped[Optional[int]] = mapped_column(Integer)
+    win_rate: Mapped[Optional[float]] = mapped_column(Float)
+    wilson_win_rate: Mapped[Optional[float]] = mapped_column(Float)
+    resolved_markets: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    total_markets: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    total_volume_usd: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    realized_pnl: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    roi: Mapped[Optional[float]] = mapped_column(Float)
+    profit_factor: Mapped[Optional[float]] = mapped_column(Float)
+    avg_notional_usd: Mapped[Optional[float]] = mapped_column(Float)
+    active_days: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_active_ts: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    last_updated_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+
 # ─── Signals ──────────────────────────────────────────────────────────────────
 
 class Signal(Base):

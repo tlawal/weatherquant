@@ -1,0 +1,54 @@
+{% if leader_rows %}
+<div class="overflow-x-auto">
+  <table class="w-full text-xs" style="min-width:64rem">
+    <thead>
+      <tr class="text-[10px] uppercase tracking-widest" style="color:var(--text-muted);border-bottom:1px solid var(--border)">
+        <th class="px-2 py-2 text-left">Wallet</th>
+        <th class="px-2 py-2 text-right">Rank</th>
+        <th class="px-2 py-2 text-right">Adj Score</th>
+        <th class="px-2 py-2 text-right">Win Rate</th>
+        <th class="px-2 py-2 text-right">Wilson</th>
+        <th class="px-2 py-2 text-right">Resolved</th>
+        <th class="px-2 py-2 text-right">ROI</th>
+        <th class="px-2 py-2 text-right">Profit Factor</th>
+        <th class="px-2 py-2 text-right">Volume</th>
+        <th class="px-2 py-2 text-right">Avg Notional</th>
+        <th class="px-2 py-2 text-right">Days</th>
+        <th class="px-2 py-2 text-left">Last Active</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in leader_rows %}
+      <tr class="border-b hover:bg-white/5 transition-colors" style="border-color:rgba(26,58,107,0.4)">
+        <td class="px-2 py-2.5 mono">
+          {% if row.profile_url %}
+          <a href="{{ row.profile_url }}" target="_blank" rel="noopener" class="hover:underline" style="color:var(--cyan)">{{ row.display_address }}</a>
+          {% else %}
+          {{ row.display_address }}
+          {% endif %}
+        </td>
+        <td class="px-2 py-2.5 text-right mono">#{{ row.rank or '—' }}</td>
+        <td class="px-2 py-2.5 text-right mono font-bold">{{ "%.2f"|format(row.adjusted_score or 0) }}</td>
+        <td class="px-2 py-2.5 text-right mono">
+          {% if row.win_rate is not none %}{{ "%.0f"|format(row.win_rate * 100) }}% over {{ row.resolved_markets }}{% else %}—{% endif %}
+        </td>
+        <td class="px-2 py-2.5 text-right mono">
+          {% if row.wilson_win_rate is not none %}{{ "%.0f"|format(row.wilson_win_rate * 100) }}%{% else %}—{% endif %}
+        </td>
+        <td class="px-2 py-2.5 text-right mono">{{ row.resolved_markets or 0 }}/{{ row.total_markets or 0 }}</td>
+        <td class="px-2 py-2.5 text-right mono" style="color:{% if row.roi and row.roi > 0 %}#86EFAC{% elif row.roi and row.roi < 0 %}#FCA5A5{% else %}var(--text-muted){% endif %}">
+          {% if row.roi is not none %}{{ "%+.1f"|format(row.roi * 100) }}%{% else %}—{% endif %}
+        </td>
+        <td class="px-2 py-2.5 text-right mono">{{ row.profit_factor or '—' }}</td>
+        <td class="px-2 py-2.5 text-right mono">${{ "%.0f"|format(row.total_volume_usd or 0) }}</td>
+        <td class="px-2 py-2.5 text-right mono">
+          {% if row.avg_notional_usd is not none %}${{ "%.0f"|format(row.avg_notional_usd) }}{% else %}—{% endif %}
+        </td>
+        <td class="px-2 py-2.5 text-right mono">{{ row.active_days or 0 }}</td>
+        <td class="px-2 py-2.5 mono text-[10px]" style="color:var(--text-muted)">{{ row.last_active_ts or '—' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
