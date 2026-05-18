@@ -88,6 +88,21 @@ The system's competitive edge is **per-station ensemble post-processing of a 10-
 | **CorrDiff downscaling** | NVIDIA diffusion-based 2km downscaling | future, gated on M1 saturation |
 | **FCN3 self-host** (Modal) | Failed 10-attempt validation in May 2026; AIWP probe watches for NOAA-hosted version | deferred — see plan §20.x |
 
+## Wallet Tracker
+
+The wallet tracker is read-only public-market analytics for daily high-temperature Polymarket markets. It never places orders, sizes positions, arms trading, or feeds the execution engine.
+
+Wallet data is stored in two layers:
+
+- `wallet_stats` is the compatibility read model used by the original leaderboard. City pages keep this as the fallback source so the panel still renders while V2 normalized tables are empty or only partially backfilled.
+- `wallet_trades`, `wallet_market_exposures`, and `wallet_skill_scores` are the V2 normalized tables. They dedupe public trades, summarize per-wallet bucket exposure, and rank wallets globally and by city when enough resolved history exists.
+
+On `/city/<slug>`, Weather Smart Money first uses V2 exposure and skill rows when available. If those rows are missing, it falls back to `wallet_stats` for the selected city/date. Ranked flow is the net displayed smart-wallet exposure by bucket, weighted by wallet skill when available and by the v1 consistency score in fallback mode. The Smart Money vs Model badge compares the model-favored bucket against the strongest ranked-flow bucket.
+
+Bucket Consensus tiles are generated from the current city/date buckets shown on the page. Each tile uses the stored market bucket label, displays the full title with wrapping, and shows ranked long wallet count, net flow, and average entry when available.
+
+Known limitations: the tracker depends on public Polymarket API availability and scheduler ingestion; V2 skill quality depends on historical resolved markets; normalized trade backfill may lag the v1 read model; PnL estimates are analytics approximations rather than execution ledger accounting; and wallet output is corroborating context only, not a copy-trading signal.
+
 ### Why BMA matters here
 
 The legacy single-Gaussian summary `N(μ, σ²)` captures only between-source variance. Each forecaster's own residual variance σᵢ is dropped, so tail-bucket probabilities are systematically underestimated — exactly the buckets Polymarket prices most aggressively. BMA's mixture variance includes both terms:

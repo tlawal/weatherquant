@@ -1324,6 +1324,8 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
         "confluence": {"status": "unavailable", "badge": "NO RANKED FLOW", "reason": "wallet_tracker_unavailable"},
         "display_limit": Config.WALLET_TRACKER_DISPLAY_LIMIT,
         "status": "unavailable",
+        "reason": "wallet_tracker_unavailable",
+        "message": "Unable to load wallets - check wallet tracker configuration or public trade ingestion.",
         "disclaimer": (
             "Wallet leaderboard is read-only public-market analytics. "
             "It is not a copy-trading signal and does not trigger automated trades."
@@ -1350,6 +1352,16 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
         }
     except Exception as e:
         log.warning("city_detail: wallet tracker payload failed for %s: %s", city_slug, e)
+        wallet_leaderboard["status"] = "error"
+        wallet_leaderboard["reason"] = "wallet_tracker_load_error"
+        wallet_leaderboard["message"] = (
+            "Unable to load wallets - check wallet tracker configuration or public trade ingestion."
+        )
+        smart_money_context = {
+            "status": "unavailable",
+            "badge": "NO RANKED FLOW",
+            "reason": "wallet_tracker_load_error",
+        }
 
     return templates.TemplateResponse(
         "city.html",

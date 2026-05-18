@@ -917,6 +917,27 @@ async def get_wallet_stats_for_city(
     return list(result.scalars().all())
 
 
+async def get_wallet_stats_leaderboard(
+    session: AsyncSession,
+    *,
+    city_slug: str | None = None,
+    date_et: str | None = None,
+    limit: int = 500,
+) -> list[WalletStat]:
+    q = select(WalletStat)
+    if city_slug:
+        q = q.where(WalletStat.city_slug == city_slug)
+    if date_et:
+        q = q.where(WalletStat.date == date_et)
+    q = q.order_by(
+        WalletStat.consistency_score.desc().nullslast(),
+        WalletStat.volume_usd.desc(),
+        WalletStat.last_trade_ts.desc().nullslast(),
+    ).limit(limit)
+    result = await session.execute(q)
+    return list(result.scalars().all())
+
+
 async def upsert_wallet_trade(session: AsyncSession, **kwargs) -> WalletTrade:
     dedupe_key = str(kwargs["dedupe_key"])
     clean_kwargs = {

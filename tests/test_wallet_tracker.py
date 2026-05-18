@@ -20,6 +20,7 @@ from backend.market_context.wallet_tracker import (
     compute_wallet_metrics,
     compute_wallet_skill_scores,
     dedupe_public_trades,
+    get_wallet_leaderboard_payload,
     get_weather_smart_money_payload,
     infer_strategy_style,
     truncate_wallet_address,
@@ -540,6 +541,24 @@ def test_weather_smart_money_payload_returns_current_global_city_rows(tmp_path, 
                 last_trade_ts=ts,
                 last_updated_ts=ts,
             )
+            await upsert_wallet_stat(
+                session,
+                wallet_address="0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+                city_slug="atlanta",
+                condition_id="legacy-cond",
+                date="2026-05-16",
+                trade_count=4,
+                volume_usd=250.0,
+                realized_pnl=25.0,
+                unrealized_pnl=0.0,
+                win_rate=1.0,
+                consistency_score=0.99,
+                bucket_idx=1,
+                bucket_label="86-87F",
+                net_position_qty=50.0,
+                net_flow_usd=40.0,
+                last_trade_ts=ts,
+            )
 
         payload = await get_weather_smart_money_payload(
             "atlanta",
@@ -551,11 +570,76 @@ def test_weather_smart_money_payload_returns_current_global_city_rows(tmp_path, 
             limit=50,
         )
         assert payload["status"] == "ok"
+        assert payload["current_source"] == "wallet_market_exposures"
         assert payload["current_market"][0]["global_rank"] == 1
+        assert payload["current_market"][0]["wallet_address"] == wallet
         assert payload["current_market"][0]["city_rank"] == 2
         assert payload["bucket_consensus"][1]["ranked_wallets_long"] == 1
         assert payload["confluence"]["badge"] == "CONFIRMS MODEL"
         assert payload["global_leaders"][0]["win_rate_label"] == "100% over 12"
+
+    _run(run_test())
+    _run(engine.dispose())
+
+
+def test_wallet_leaderboard_with_buckets_uses_wallet_stats_fallback(tmp_path, monkeypatch):
+    engine, session_factory = _run(_setup_test_db(tmp_path, monkeypatch))
+    monkeypatch.setattr(Config, "WALLET_TRACKER_ENABLED", True, raising=False)
+    wallet = "0x1234567890abcdef1234567890abcdef12345678"
+    ts = datetime.now(timezone.utc) - timedelta(minutes=15)
+
+    async def run_test():
+        async with session_factory() as session:
+            await upsert_wallet_stat(
+                session,
+                wallet_address=wallet,
+                city_slug="atlanta",
+                condition_id="cond-a",
+                date="2026-05-16",
+                trade_count=8,
+                volume_usd=640.0,
+                realized_pnl=96.0,
+                unrealized_pnl=10.0,
+                win_rate=0.875,
+                avg_hold_minutes=45.0,
+                avg_entry_price=0.42,
+                avg_exit_price=0.57,
+                profitable_days_pct=0.8,
+                sharpe_like=1.2,
+                consistency_score=0.77,
+                inferred_style="Early Forecaster",
+                bucket_idx=2,
+                bucket_label="Will the highest temperature in Atlanta be between 88-89F on May 16?",
+                net_position_qty=120.0,
+                net_flow_usd=75.0,
+                last_trade_ts=ts,
+                market_slug="atlanta-high",
+            )
+
+        payload = await get_wallet_leaderboard_payload(
+            "atlanta",
+            "2026-05-16",
+            buckets=[
+                {"bucket_idx": 1, "label": "86-87F", "model_prob": 0.2},
+                {
+                    "bucket_idx": 2,
+                    "label": "Will the highest temperature in Atlanta be between 88-89F on May 16?",
+                    "model_prob": 0.65,
+                },
+            ],
+            limit=10,
+        )
+
+        assert payload["status"] == "ok"
+        assert payload["current_source"] == "wallet_stats_fallback"
+        assert payload["current_market"][0]["wallet_address"] == wallet
+        assert payload["current_market"][0]["net_notional_usd"] == 75.0
+        assert payload["current_market"][0]["source"] == "wallet_stats_fallback"
+        assert payload["global_leaders"][0]["wallet_address"] == wallet
+        assert payload["city_leaders"][0]["wallet_address"] == wallet
+        assert payload["bucket_consensus"][1]["ranked_wallets_long"] == 1
+        assert payload["bucket_consensus"][1]["net_notional_usd"] == 75.0
+        assert payload["confluence"]["badge"] == "CONFIRMS MODEL"
 
     _run(run_test())
     _run(engine.dispose())
@@ -567,9 +651,29 @@ def test_weather_smart_money_payload_disabled_is_safe(monkeypatch):
     payload = _run(get_weather_smart_money_payload("atlanta", "2026-05-16", buckets=[]))
 
     assert payload["enabled"] is False
+    assert payload["message"] == "Wallet tracker is disabled by configuration."
     assert payload["current_market"] == []
     assert payload["global_leaders"] == []
     assert payload["city_leaders"] == []
+
+
+def test_weather_smart_money_payload_empty_state_is_descriptive(tmp_path, monkeypatch):
+    engine, _session_factory = _run(_setup_test_db(tmp_path, monkeypatch))
+    monkeypatch.setattr(Config, "WALLET_TRACKER_ENABLED", True, raising=False)
+
+    payload = _run(
+        get_weather_smart_money_payload(
+            "atlanta",
+            "2026-05-16",
+            buckets=[{"bucket_idx": 1, "label": "86-87F", "model_prob": 0.5}],
+        )
+    )
+
+    assert payload["status"] == "empty"
+    assert payload["reason"] == "no_wallet_data_for_city_date"
+    assert payload["message"] == "No wallet trades have been stored for this city/date yet."
+
+    _run(engine.dispose())
 
 
 def test_bucket_consensus_and_model_confluence_classification():
@@ -600,6 +704,30 @@ def test_bucket_consensus_and_model_confluence_classification():
 
     assert consensus[1]["ranked_wallets_long"] == 1
     assert consensus[1]["avg_entry_price"] == 0.6
+    assert confluence["badge"] == "CONFIRMS MODEL"
+
+
+def test_bucket_consensus_accepts_wallet_stats_net_flow_rows():
+    buckets = [
+        {"bucket_idx": 1, "label": "86-87F", "model_prob": 0.25},
+        {"bucket_idx": 2, "label": "88-89F", "model_prob": 0.55},
+    ]
+    rows = [
+        {
+            "bucket_idx": 2,
+            "bucket_label": "88-89F",
+            "net_position_qty": 10.0,
+            "net_flow_usd": 125.0,
+            "consistency_score": 0.7,
+        }
+    ]
+
+    consensus = build_bucket_consensus(buckets, rows)
+    confluence = classify_model_confluence(buckets, consensus)
+
+    assert consensus[1]["ranked_wallets_long"] == 1
+    assert consensus[1]["net_notional_usd"] == 125.0
+    assert consensus[1]["weighted_flow"] == 87.5
     assert confluence["badge"] == "CONFIRMS MODEL"
 
 

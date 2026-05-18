@@ -51,6 +51,16 @@ def test_wallet_leaderboard_disclaimer_is_read_only():
     assert "CITY LEADERS" in template
     assert "Wallet leaderboard is read-only public-market analytics" in template
     assert "does not trigger automated trades" in template
+    assert "No wallet trades have been stored for this city/date yet." in template
+
+
+def test_wallet_bucket_consensus_titles_wrap_instead_of_truncate():
+    template = Path("web/templates/city.html").read_text()
+
+    bucket_section = template[template.index("Bucket Consensus"):template.index("CURRENT MARKET")]
+    assert "whitespace-normal break-words leading-snug" in bucket_section
+    assert "min-h-[2.5rem]" in bucket_section
+    assert " text-[11px] truncate" not in bucket_section
 
 
 def test_city_page_surfaces_obs_proximity_readout():

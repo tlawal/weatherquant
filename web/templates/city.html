@@ -1329,8 +1329,8 @@
     <div class="text-[10px] uppercase tracking-widest font-bold mb-2" style="color:var(--text-muted)">Bucket Consensus</div>
     <div class="grid gap-2 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-6">
       {% for bucket in wallet_leaderboard.bucket_consensus %}
-      <div class="panel rounded p-2" style="border:1px solid {% if smart_money_context and smart_money_context.smart_money_bucket_idx == bucket.bucket_idx %}rgba(34,211,238,0.45){% else %}var(--border){% endif %}">
-        <div class="mono text-[11px] truncate" title="{{ bucket.bucket_label or ('Bucket ' ~ bucket.bucket_idx) }}">
+      <div class="panel rounded p-2 min-h-[7.5rem]" style="border:1px solid {% if smart_money_context and smart_money_context.smart_money_bucket_idx == bucket.bucket_idx %}rgba(34,211,238,0.45){% else %}var(--border){% endif %}">
+        <div class="mono text-[11px] whitespace-normal break-words leading-snug min-h-[2.5rem]" title="{{ bucket.bucket_label or ('Bucket ' ~ bucket.bucket_idx) }}">
           {{ bucket.bucket_label or ('Bucket ' ~ bucket.bucket_idx) }}
         </div>
         <div class="mt-1 flex items-center justify-between text-[10px]" style="color:var(--text-muted)">
@@ -1445,7 +1445,7 @@
     </div>
     {% else %}
     <div class="text-sm leading-relaxed" style="color:var(--text-muted)">
-      No ranked weather wallets have current exposure for this city/date yet. The dashboard will stay empty until real public trade data has been fetched and scored.
+      {{ wallet_leaderboard.message if wallet_leaderboard and wallet_leaderboard.message else "No wallet trades have been stored for this city/date yet." }}
     </div>
     {% endif %}
   </div>
@@ -1454,7 +1454,7 @@
     {% set leader_rows = wallet_leaderboard.global_leaders if wallet_leaderboard else [] %}
     {% include "partials/wallet_leaders_table.html" ignore missing %}
     {% if not leader_rows %}
-    <div class="text-sm leading-relaxed" style="color:var(--text-muted)">No global daily high-temperature wallet leaders are available yet.</div>
+    <div class="text-sm leading-relaxed" style="color:var(--text-muted)">{{ wallet_leaderboard.message if wallet_leaderboard and wallet_leaderboard.message else "No wallet trades have been stored for this city/date yet." }}</div>
     {% endif %}
   </div>
 
@@ -1462,7 +1462,7 @@
     {% set leader_rows = wallet_leaderboard.city_leaders if wallet_leaderboard else [] %}
     {% include "partials/wallet_leaders_table.html" ignore missing %}
     {% if not leader_rows %}
-    <div class="text-sm leading-relaxed" style="color:var(--text-muted)">No city-specific wallet leaders are available yet.</div>
+    <div class="text-sm leading-relaxed" style="color:var(--text-muted)">{{ wallet_leaderboard.message if wallet_leaderboard and wallet_leaderboard.message else "No wallet trades have been stored for this city/date yet." }}</div>
     {% endif %}
   </div>
 </div>

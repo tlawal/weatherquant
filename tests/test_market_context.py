@@ -455,10 +455,12 @@ def test_city_page_renders_market_context_states(tmp_path, monkeypatch):
     monkeypatch.setattr(Config, "MARKET_CONTEXT_LLM_PROVIDER", "", raising=False)
     monkeypatch.setattr(Config, "MARKET_CONTEXT_LLM_MODEL", "", raising=False)
     monkeypatch.setattr(Config, "MARKET_CONTEXT_LLM_API_KEY", "", raising=False)
+    monkeypatch.setattr(Config, "WALLET_TRACKER_ENABLED", False, raising=False)
 
     response = client.get(f"/city/atlanta?date={seeded['today_et']}")
     assert response.status_code == 200
     assert "Market Context has not been generated" in response.text
+    assert "Wallet tracker is disabled by configuration." in response.text
 
     async def insert_snapshot(status: str, last_error: str | None = None):
         async with session_factory() as session:

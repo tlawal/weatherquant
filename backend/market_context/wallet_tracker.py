@@ -1266,14 +1266,20 @@ def build_bucket_consensus(
         if idx is None or idx not in consensus_by_idx:
             continue
         net_qty = float(row.get("net_position_qty") or 0.0)
-        net_notional = float(row.get("net_notional_usd") or 0.0)
+        net_notional = float(row.get("net_notional_usd") or row.get("net_flow_usd") or 0.0)
         if net_qty <= 0 and net_notional <= 0:
             continue
         c = consensus_by_idx[idx]
         c["ranked_wallets_long"] += 1
         c["net_notional_usd"] += net_notional
         c["net_position_qty"] += net_qty
-        c["weighted_flow"] += net_notional * float(row.get("global_score") or 0.0)
+        score_weight = float(
+            row.get("global_score")
+            or row.get("consistency_score")
+            or row.get("alpha_score")
+            or 1.0
+        )
+        c["weighted_flow"] += net_notional * score_weight
         avg_entry = row.get("avg_entry_price")
         if avg_entry is not None and net_qty > 0:
             c["_entry_num"] += float(avg_entry) * net_qty
@@ -1367,6 +1373,138 @@ def build_wallet_leaderboard_payload(
     }
 
 
+def _wallet_tracker_message(status: str, reason: str | None = None) -> str:
+    if status == "disabled" or reason == "wallet_tracker_disabled":
+        return "Wallet tracker is disabled by configuration."
+    if status == "error":
+        return "Unable to load wallets - check wallet tracker configuration or public trade ingestion."
+    return "No wallet trades have been stored for this city/date yet."
+
+
+def _serialize_wallet_stat_as_current_row(
+    row: Any,
+    *,
+    rank: int,
+    truncate_addresses: bool = True,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Map the v1 wallet_stats read model into the V2 current-market shape."""
+    base = serialize_wallet_stat_row(row, truncate_addresses=truncate_addresses)
+    last_trade_ts = getattr(row, "last_trade_ts", None)
+    if isinstance(last_trade_ts, datetime):
+        if last_trade_ts.tzinfo is None:
+            last_trade_ts = last_trade_ts.replace(tzinfo=timezone.utc)
+        now_dt = now or datetime.now(timezone.utc)
+        last_trade_age_min = max(
+            0,
+            int((now_dt - last_trade_ts.astimezone(timezone.utc)).total_seconds() // 60),
+        )
+    else:
+        last_trade_age_min = None
+    consistency = float(getattr(row, "consistency_score", 0.0) or 0.0)
+    net_flow = float(getattr(row, "net_flow_usd", 0.0) or 0.0)
+    net_qty = float(getattr(row, "net_position_qty", 0.0) or 0.0)
+    volume = float(getattr(row, "volume_usd", 0.0) or 0.0)
+    return {
+        **base,
+        "global_rank": rank,
+        "city_rank": rank,
+        "global_score": consistency,
+        "city_score": consistency,
+        "alpha_score": round(consistency * _notional_weight(net_flow or volume), 4),
+        "wilson_win_rate": None,
+        "resolved_markets": getattr(row, "trade_count", 0) or 0,
+        "roi": (
+            round(float(getattr(row, "realized_pnl", 0.0) or 0.0) / volume, 4)
+            if volume > 0 else None
+        ),
+        "profit_factor": None,
+        "direction": "LONG" if net_qty > 0 or net_flow > 0 else ("EXITING" if net_flow < 0 else "FLAT"),
+        "net_notional_usd": round(net_flow, 2),
+        "last_trade_age_min": last_trade_age_min,
+        "source": "wallet_stats_fallback",
+    }
+
+
+def _serialize_wallet_stat_as_leader(
+    row: Any,
+    *,
+    scope: str,
+    rank: int,
+    truncate_addresses: bool = True,
+) -> dict[str, Any]:
+    base = serialize_wallet_stat_row(row, truncate_addresses=truncate_addresses)
+    volume = float(getattr(row, "volume_usd", 0.0) or 0.0)
+    realized = float(getattr(row, "realized_pnl", 0.0) or 0.0)
+    win_rate = getattr(row, "win_rate", None)
+    trade_count = getattr(row, "trade_count", 0) or 0
+    return {
+        "wallet_address": base["wallet_address"],
+        "display_address": base["display_address"],
+        "profile_url": base["profile_url"],
+        "scope": scope,
+        "city_slug": getattr(row, "city_slug", None) if scope == "city" else "",
+        "window_days": Config.WALLET_TRACKER_SKILL_WINDOW_DAYS,
+        "rank": rank,
+        "adjusted_score": getattr(row, "consistency_score", None),
+        "win_rate": win_rate,
+        "wilson_win_rate": None,
+        "resolved_markets": trade_count,
+        "total_markets": trade_count,
+        "total_volume_usd": round(volume, 2),
+        "realized_pnl": round(realized, 2),
+        "roi": round(realized / volume, 4) if volume > 0 else None,
+        "profit_factor": None,
+        "avg_notional_usd": round(volume / max(1, trade_count), 2) if trade_count else None,
+        "active_days": 1,
+        "last_active_ts": base["last_trade_ts"],
+        "win_rate_label": (
+            f"{round(float(win_rate) * 100):.0f}% over {trade_count}"
+            if win_rate is not None else "—"
+        ),
+        "source": "wallet_stats_fallback",
+    }
+
+
+def _serialize_wallet_stat_leaders(
+    rows: list[Any],
+    *,
+    scope: str,
+    limit: int,
+    truncate_addresses: bool = True,
+) -> list[dict[str, Any]]:
+    leaders: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        address = str(getattr(row, "wallet_address", "") or "").lower()
+        if not address or address in seen:
+            continue
+        seen.add(address)
+        leaders.append(
+            _serialize_wallet_stat_as_leader(
+                row,
+                scope=scope,
+                rank=len(leaders) + 1,
+                truncate_addresses=truncate_addresses,
+            )
+        )
+        if len(leaders) >= limit:
+            break
+    return leaders
+
+
+# Regression note:
+# V1 displayed wallets from wallet_stats through get_wallet_stats_for_city().
+# Smart Money V2 changed city_detail to call get_wallet_leaderboard_payload()
+# with buckets=..., and that short-circuited into the new V2 payload builder.
+# The V2 builder only read wallet_skill_scores and wallet_market_exposures, and
+# serialize_current_exposure_row() required a global skill row before rendering
+# any exposure. In production, those normalized V2 tables may be empty, not yet
+# backfilled, or filtered below threshold while wallet_stats still has usable
+# rows. The displayed current rows became empty, and ranked flow disappeared
+# because bucket consensus was derived from those same suppressed current rows.
+# Keep wallet_stats as the compatibility floor until normalized V2 ingestion has
+# a complete backfill. This module remains read-only analytics only.
 def _empty_weather_smart_money_payload(
     *,
     enabled: bool,
@@ -1378,11 +1516,12 @@ def _empty_weather_smart_money_payload(
     bucket_consensus = build_bucket_consensus(buckets or [], [])
     confluence = classify_model_confluence(buckets or [], bucket_consensus)
     if reason and confluence.get("status") == "unavailable":
-        confluence.setdefault("reason", reason)
+        confluence["reason"] = reason
     return {
         "enabled": enabled,
         "status": status,
         "reason": reason,
+        "message": _wallet_tracker_message(status, reason),
         "mode": "weather_smart_money_v2",
         "rows": [],
         "current_market": [],
@@ -1414,12 +1553,15 @@ async def get_weather_smart_money_payload(
     _warn_if_execution_caller()
     from backend.storage.db import get_session
     from backend.storage.repos import (
+        get_wallet_stats_for_city,
+        get_wallet_stats_leaderboard,
         get_wallet_market_exposures_for_event,
         get_wallet_skill_scores,
     )
 
     limit = limit or Config.WALLET_TRACKER_DISPLAY_LIMIT
     buckets = buckets or []
+    fallback_limit = max(100, limit * 10)
     if not Config.WALLET_TRACKER_ENABLED:
         return _empty_weather_smart_money_payload(
             enabled=False,
@@ -1430,6 +1572,21 @@ async def get_weather_smart_money_payload(
         )
 
     async with get_session() as sess:
+        legacy_current_rows = await get_wallet_stats_for_city(
+            sess,
+            city_slug,
+            date_et=date_et,
+            limit=fallback_limit,
+        )
+        legacy_city_rows = await get_wallet_stats_leaderboard(
+            sess,
+            city_slug=city_slug,
+            limit=fallback_limit,
+        )
+        legacy_global_rows = await get_wallet_stats_leaderboard(
+            sess,
+            limit=fallback_limit,
+        )
         global_rows = await get_wallet_skill_scores(
             sess,
             scope="global",
@@ -1480,30 +1637,64 @@ async def get_weather_smart_money_payload(
         reverse=True,
     )
     current_rows = current_rows[:limit]
+    current_source = "wallet_market_exposures"
+    if not current_rows and legacy_current_rows:
+        current_rows = [
+            _serialize_wallet_stat_as_current_row(
+                row,
+                rank=idx,
+                truncate_addresses=Config.WALLET_TRACKER_TRUNCATE_ADDRESSES,
+            )
+            for idx, row in enumerate(legacy_current_rows[:limit], start=1)
+        ]
+        current_source = "wallet_stats_fallback"
+    elif not current_rows:
+        current_source = "none"
     bucket_consensus = build_bucket_consensus(buckets, current_rows)
     confluence = classify_model_confluence(buckets, bucket_consensus)
+    global_leaders = [
+        serialize_wallet_skill_score(
+            row,
+            truncate_addresses=Config.WALLET_TRACKER_TRUNCATE_ADDRESSES,
+        )
+        for row in global_rows[:limit]
+    ]
+    if not global_leaders:
+        global_leaders = _serialize_wallet_stat_leaders(
+            legacy_global_rows,
+            scope="global",
+            limit=limit,
+            truncate_addresses=Config.WALLET_TRACKER_TRUNCATE_ADDRESSES,
+        )
+    city_leaders = [
+        serialize_wallet_skill_score(
+            row,
+            truncate_addresses=Config.WALLET_TRACKER_TRUNCATE_ADDRESSES,
+        )
+        for row in city_rows[:limit]
+    ]
+    if not city_leaders:
+        city_leaders = _serialize_wallet_stat_leaders(
+            legacy_city_rows,
+            scope="city",
+            limit=limit,
+            truncate_addresses=Config.WALLET_TRACKER_TRUNCATE_ADDRESSES,
+        )
+    has_wallet_data = bool(current_rows or global_leaders or city_leaders)
+    status = "ok" if has_wallet_data else "empty"
+    reason = None if has_wallet_data else "no_wallet_data_for_city_date"
 
     return {
         "enabled": True,
-        "status": "ok" if (current_rows or global_rows or city_rows) else "empty",
-        "reason": None,
+        "status": status,
+        "reason": reason,
+        "message": _wallet_tracker_message(status, reason),
         "mode": "weather_smart_money_v2",
+        "current_source": current_source,
         "rows": current_rows,
         "current_market": current_rows,
-        "global_leaders": [
-            serialize_wallet_skill_score(
-                row,
-                truncate_addresses=Config.WALLET_TRACKER_TRUNCATE_ADDRESSES,
-            )
-            for row in global_rows[:limit]
-        ],
-        "city_leaders": [
-            serialize_wallet_skill_score(
-                row,
-                truncate_addresses=Config.WALLET_TRACKER_TRUNCATE_ADDRESSES,
-            )
-            for row in city_rows[:limit]
-        ],
+        "global_leaders": global_leaders,
+        "city_leaders": city_leaders,
         "bucket_consensus": bucket_consensus,
         "confluence": confluence,
         "display_limit": limit,
