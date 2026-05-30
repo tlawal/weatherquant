@@ -84,6 +84,7 @@ def test_edge_decay_isolated_per_bucket():
 # is monkey-patched out so the test stays a fast unit test.
 
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -142,8 +143,25 @@ def _make_position(
     age_seconds: int = 7200,
     moon_bag_qty: float = 0.0,
     tier_1_exited: bool = False,
+    entry_ev_at_bid: float | None = 0.04,
+    entry_type: str = "AUTOMATIC",
+    entry_strategy: str = "auto_edge",
+    entry_model_prob: float = 0.40,
+    entry_market_prob: float = 0.35,
 ):
     """Synthetic position attached only via duck-typing — cascade reads attrs."""
+    entry_decision = {
+        "entry_type": entry_type,
+        "entry_strategy": entry_strategy,
+        "model_prob": entry_model_prob,
+        "market_prob": entry_market_prob,
+        "ev_at_bid": entry_ev_at_bid,
+        "yes_bid": entry_model_prob - entry_ev_at_bid if entry_ev_at_bid is not None else None,
+        "source_highs": {
+            "nws_high": 83.0,
+            "hrrr_high": 82.0,
+        },
+    }
     return SimpleNamespace(
         bucket_id=bucket_id,
         avg_cost=avg_cost,
@@ -155,6 +173,10 @@ def _make_position(
         max_bid_seen=0.0,
         trailing_stop_price=None,
         entry_time=datetime.now(timezone.utc) - timedelta(seconds=age_seconds),
+        entry_type=entry_type,
+        entry_strategy=entry_strategy,
+        strategy=entry_strategy,
+        entry_decision_json=json.dumps(entry_decision),
     )
 
 
@@ -197,6 +219,37 @@ def test_cascade_edge_decay_fires_after_n_consecutive_negative_evs(stub_db):
     assert result is not None
     assert result["level"] == "EDGE_DECAY"
     assert result["reason"] == "ev_decayed"
+    assert result["diagnostics"]["entry_ev_at_bid"] == pytest.approx(0.04)
+    assert result["diagnostics"]["ev_drop"] >= Config.EDGE_DECAY_MIN_EV_DROP
+
+
+def test_cascade_edge_decay_does_not_sell_manual_negative_edge_that_improved(stub_db):
+    """Atlanta regression: a manual negative-EV entry cannot exit just because EV stays negative."""
+    n = Config.EDGE_DECAY_DEBOUNCE_RUNS
+    bucket_id = 100
+    ee._ev_cache[bucket_id] = [-0.18, -0.15, -0.13][-n:]
+
+    pos = _make_position(
+        bucket_id=bucket_id,
+        age_seconds=47 * 60,
+        avg_cost=0.32,
+        net_qty=5.0,
+        entry_type="MANUAL",
+        entry_strategy="manual_scalp",
+        entry_ev_at_bid=-0.1933,
+        entry_model_prob=0.1267,
+        entry_market_prob=0.32,
+    )
+    signal = _make_signal(
+        bucket_id=bucket_id,
+        ev_at_bid=-0.1665,
+        yes_bid=0.31,
+        model_prob=0.1785,
+    )
+    signal.true_edge = -0.1665
+
+    result = _run(ee._run_exit_cascade_for_position(pos, signal, None, None))
+    assert result is None
 
 
 def test_cascade_consensus_shift_with_positive_ev_suppresses_both_exits(stub_db):

@@ -943,24 +943,45 @@
 </div>
 
 <!-- ── LEAD-TIME SKILL PANEL (Phase 4 Verification) ─────────────────────── -->
-<div class="card p-4 mb-6" x-data="{ skillOpen: {{ 'false' if lead_time_skills else 'true' }} }">
-  <button type="button"
-          class="w-full flex items-center justify-between gap-3 text-left"
-          @click="skillOpen = !skillOpen"
-          :aria-expanded="skillOpen.toString()"
-          aria-controls="lead-time-skill-panel">
-    <span class="flex items-center gap-2 min-w-0">
-      <span class="text-[10px] uppercase tracking-widest font-bold" style="color:var(--text-muted)">Lead-Time Skill</span>
-      <span class="text-[10px] mono transition-transform" style="color:var(--text-muted)" :class="skillOpen ? 'rotate-90' : ''">›</span>
-    </span>
-    <span class="flex items-center gap-2 shrink-0">
+<div class="card p-4 mb-6" x-data="{ skillOpen: {{ 'false' if lead_time_skills else 'true' }}, showLeadTip: false }">
+  <div class="w-full flex items-center justify-between gap-3">
+    <div class="flex items-center gap-2 min-w-0">
+      <button type="button"
+              class="flex items-center gap-2 text-left"
+              @click="skillOpen = !skillOpen"
+              :aria-expanded="skillOpen.toString()"
+              aria-controls="lead-time-skill-panel">
+        <span class="text-[10px] uppercase tracking-widest font-bold" style="color:var(--text-muted)">Lead-Time Skill</span>
+        <span class="text-[10px] mono transition-transform" style="color:var(--text-muted)" :class="skillOpen ? 'rotate-90' : ''">›</span>
+      </button>
+      <span class="relative">
+        <button type="button"
+                @click.stop="showLeadTip = !showLeadTip"
+                @click.outside="showLeadTip = false"
+                class="hover:text-cyan-400 opacity-60 hover:opacity-100 transition-all text-[10px]"
+                aria-label="Explain lead-time skill">ⓘ</button>
+        <span x-show="showLeadTip" x-cloak
+              x-transition:enter="transition ease-out duration-100"
+              x-transition:enter-start="opacity-0 scale-95"
+              x-transition:enter-end="opacity-100 scale-100"
+              class="absolute left-0 top-5 z-50 w-72 p-3 rounded-xl shadow-2xl border text-[10px] normal-case tracking-normal leading-relaxed"
+              style="background:var(--bg-card); border-color:var(--border); color:var(--text-main)">
+          Scores each source's forecasted final daily high against the resolved daily high, grouped by fixed checkpoints before 23:59:59 local time on the market date. Lower MAE is better; positive bias means the source has been too hot.
+        </span>
+      </span>
+    </div>
+    <button type="button"
+            class="flex items-center gap-2 shrink-0"
+            @click="skillOpen = !skillOpen"
+            :aria-expanded="skillOpen.toString()"
+            aria-controls="lead-time-skill-panel">
       {% if lead_time_skills %}
         <span class="text-[10px] px-2 py-0.5 rounded-full font-bold" style="background:rgba(34,197,94,0.15);color:#86efac">{{ lead_time_skills|length }} buckets</span>
       {% else %}
         <span class="text-[10px] px-2 py-0.5 rounded-full font-bold" style="background:rgba(239,68,68,0.15);color:#fca5a5">No data</span>
       {% endif %}
-    </span>
-  </button>
+    </button>
+  </div>
   <div id="lead-time-skill-panel"
        class="mt-3"
        x-show="skillOpen"
@@ -1269,11 +1290,21 @@
 </div>
 
 <!-- ── WEATHER SMART MONEY ───────────────────────────────────────────────── -->
-<div class="card p-5 mb-6" x-data="{ smartTab: 'current' }">
+{% set wallet_coverage = wallet_leaderboard.coverage if wallet_leaderboard and wallet_leaderboard.coverage else {} %}
+{% set smart_current_count = wallet_coverage.current_market_wallets|default((wallet_leaderboard.current_market|length) if wallet_leaderboard and wallet_leaderboard.current_market else 0) %}
+{% set smart_skill_count = (wallet_coverage.global_skill_rows|default(0)) + (wallet_coverage.city_skill_rows|default(0)) %}
+<div class="card p-5 mb-6" x-data="{ smartTab: 'current', smartOpen: {{ 'true' if wallet_leaderboard and wallet_leaderboard.current_market else 'false' }} }">
   <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between mb-4">
     <div>
       <div class="flex flex-wrap items-center gap-2">
         <h2 class="font-semibold text-sm">Weather Smart Money</h2>
+        <button type="button"
+                @click="smartOpen = !smartOpen"
+                :aria-expanded="smartOpen.toString()"
+                aria-controls="weather-smart-money-panel"
+                class="text-[10px] mono transition-transform opacity-70 hover:opacity-100"
+                style="color:var(--text-muted)"
+                :class="smartOpen ? 'rotate-90' : ''">›</button>
         {% if wallet_leaderboard and wallet_leaderboard.enabled %}
         <span class="text-[10px] px-2 py-0.5 rounded-full font-bold"
               style="background:rgba(34,211,238,0.12);color:var(--cyan)">
@@ -1305,8 +1336,23 @@
         no wallet data
       {% endif %}
       <div>limit {{ wallet_leaderboard.display_limit if wallet_leaderboard else 50 }}</div>
+      <div>source {{ wallet_coverage.current_source or (wallet_leaderboard.current_source if wallet_leaderboard else 'none') }}</div>
     </div>
   </div>
+  <div class="mb-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-4 text-[10px] mono"
+       style="color:var(--text-muted)">
+    <div class="panel rounded p-2">Current rows <span style="color:var(--cyan)">{{ smart_current_count }}</span></div>
+    <div class="panel rounded p-2">Exposure rows <span style="color:var(--cyan)">{{ wallet_coverage.exposure_rows|default(0) }}</span></div>
+    <div class="panel rounded p-2">Skill rows <span style="color:var(--cyan)">{{ smart_skill_count }}</span></div>
+    <div class="panel rounded p-2">Last refresh <span style="color:var(--cyan)">{{ wallet_coverage.last_refresh[:16]|replace('T', ' ') if wallet_coverage.last_refresh else 'unknown' }}</span></div>
+  </div>
+
+  <div id="weather-smart-money-panel"
+       x-show="smartOpen"
+       x-cloak
+       x-transition:enter="transition ease-out duration-100"
+       x-transition:enter-start="opacity-0 -translate-y-1"
+       x-transition:enter-end="opacity-100 translate-y-0">
 
   {% if smart_money_context and smart_money_context.status == 'available' %}
   <div class="mb-4 p-3 rounded-lg border" style="background:rgba(34,211,238,0.06);border-color:rgba(34,211,238,0.20)">
@@ -1464,6 +1510,7 @@
     {% if not leader_rows %}
     <div class="text-sm leading-relaxed" style="color:var(--text-muted)">{{ wallet_leaderboard.message if wallet_leaderboard and wallet_leaderboard.message else "No wallet trades have been stored for this city/date yet." }}</div>
     {% endif %}
+  </div>
   </div>
 </div>
 
@@ -1769,6 +1816,11 @@
     <div class="card p-5">
       <h2 class="font-semibold text-sm mb-4" style="color:var(--text-muted)">Temperature Probability Distribution</h2>
       <div id="prob-chart" class="w-full" style="height:300px"></div>
+      {% if model and model.inputs and model.inputs.intraday_threshold_shadow %}
+      <div class="mt-2 text-[10px] leading-relaxed" style="color:var(--text-muted)">
+        Intraday Threshold is a shadow threshold-crossing model for same-day markets. It estimates P(final high reaches each bucket boundary) from observed high, current temperature, remaining heating, trend, and consensus; alpha is {{ "%.1f"|format((model.inputs.intraday_threshold_shadow.alpha|default(0)) * 100) }}%, so live trading probabilities still come from the legacy daily-high PDF until validation promotes it.
+      </div>
+      {% endif %}
 
       {% if model and model.inputs %}
       <div class="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs border-t pt-4" style="border-color:var(--border)">
@@ -2509,7 +2561,7 @@ document.addEventListener('DOMContentLoaded', function() {
         mode: 'lines+markers',
         x: labels,
         y: buckets.map(b => b.intraday_prob !== null && b.intraday_prob !== undefined ? +(b.intraday_prob * 100).toFixed(2) : null),
-        name: 'Intraday Threshold',
+        name: 'Intraday Threshold (shadow)',
         line: { color: '#22D3EE', width: 2 },
         marker: { color: '#22D3EE', size: 6 },
       }] : []),

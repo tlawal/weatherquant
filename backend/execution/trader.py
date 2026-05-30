@@ -119,6 +119,24 @@ def _build_entry_decision_snapshot(
     spread = signal.spread
     reason = signal.reason or {}
     source_quality = reason.get("source_quality") or reason.get("source_quality_gates")
+    source_high_keys = (
+        "nws_high",
+        "wu_hourly_peak",
+        "hrrr_high",
+        "hrrr_15min_high",
+        "nbm_high",
+        "ecmwf_ifs_high",
+        "ecmwf_aifs_high",
+        "gfs_graphcast_high",
+        "pangu_weather_high",
+        "fourcastnet_v2_high",
+        "aurora_high",
+    )
+    source_highs = {
+        key: reason.get(key)
+        for key in source_high_keys
+        if reason.get(key) is not None
+    }
     return {
         "entry_strategy": entry_strategy,
         "entry_type": "MANUAL" if manual else "AUTOMATIC",
@@ -131,6 +149,8 @@ def _build_entry_decision_snapshot(
         "shares": shares,
         "limit_price": limit_price,
         "model_prob": signal.model_prob,
+        "model_prob_calibrated": signal.model_prob,
+        "model_prob_raw": reason.get("model_prob_raw"),
         "market_prob": signal.mkt_prob,
         "raw_edge": signal.raw_edge,
         "true_edge": signal.true_edge,
@@ -151,9 +171,25 @@ def _build_entry_decision_snapshot(
         "hours_to_close": hours_to_close,
         "station_mae_f": reason.get("station_mae_f"),
         "observed_high_f": reason.get("raw_high") or reason.get("observed_high_f"),
+        "daily_high_metar": reason.get("daily_high_metar"),
+        "current_temp_f": reason.get("current_temp_f"),
+        "mu_forecast": reason.get("mu_forecast"),
+        "mu_multi_model": reason.get("mu_multi_model"),
+        "projected_high": reason.get("projected_high"),
+        "projected_high_for_blend": reason.get("projected_high_for_blend"),
+        "sigma_raw": reason.get("sigma_raw"),
+        "time_to_settlement_h": reason.get("time_to_settlement_h"),
+        "active_station_id": reason.get("active_station_id"),
+        "source_highs": source_highs,
+        "sources_used": reason.get("sources_used"),
         "source_quality": source_quality,
         "excluded_sources": reason.get("excluded_sources"),
         "consensus_bucket_idx": reason.get("consensus_bucket_idx"),
+        "model_snapshot_id": reason.get("model_snapshot_id"),
+        "signal_id": reason.get("signal_id"),
+        "signal_computed_at": reason.get("signal_computed_at"),
+        "market_snapshot_id": reason.get("market_snapshot_id"),
+        "market_snapshot_at": reason.get("market_snapshot_at"),
         "gate_failures": gate_failures,
     }
 

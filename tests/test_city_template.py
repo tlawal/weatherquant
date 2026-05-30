@@ -25,6 +25,8 @@ def test_station_calibration_card_separates_overall_and_current_lead_skill():
     assert "Best overall:" in template
     assert "Best at current lead:" in template
     assert "n < 30 are provisional" in template
+    assert "23:59:59 local time" in template
+    assert "Lower MAE is better" in template
 
 
 def test_buckets_table_surfaces_execution_microstructure():
@@ -34,6 +36,8 @@ def test_buckets_table_surfaces_execution_microstructure():
     assert "Intraday" in template
     assert "Legacy Daily-High PDF" in template
     assert "Intraday Threshold" in template
+    assert "Intraday Threshold (shadow)" in template
+    assert "shadow threshold-crossing model" in template
     assert "settles below" in template
     assert "Max Size" in template
     assert "Trade State" in template
@@ -49,6 +53,12 @@ def test_wallet_leaderboard_disclaimer_is_read_only():
     assert "CURRENT MARKET" in template
     assert "GLOBAL LEADERS" in template
     assert "CITY LEADERS" in template
+    assert "smartOpen" in template
+    assert "weather-smart-money-panel" in template
+    assert "Current rows" in template
+    assert "Exposure rows" in template
+    assert "Skill rows" in template
+    assert "Last refresh" in template
     assert "Wallet leaderboard is read-only public-market analytics" in template
     assert "does not trigger automated trades" in template
     assert "No wallet trades have been stored for this city/date yet." in template

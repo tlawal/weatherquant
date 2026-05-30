@@ -2460,10 +2460,47 @@ async def manual_trade(
         sig_row = await get_latest_signal_for_bucket(sess, bucket.id)
         mkt_snap = await get_latest_market_snapshot(sess, bucket.id)
 
+    signal_reason: dict = {}
+    gate_failures: list[str] = []
+    if sig_row and sig_row.reason_json:
+        try:
+            parsed_reason = json.loads(sig_row.reason_json)
+            if isinstance(parsed_reason, dict):
+                signal_reason = parsed_reason
+        except (TypeError, ValueError, json.JSONDecodeError):
+            signal_reason = {}
+    if sig_row and sig_row.gate_failures_json:
+        try:
+            parsed_failures = json.loads(sig_row.gate_failures_json)
+            if isinstance(parsed_failures, list):
+                gate_failures = [str(x) for x in parsed_failures]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            gate_failures = []
+    if sig_row:
+        signal_reason.setdefault("signal_id", sig_row.id)
+        signal_reason.setdefault("model_snapshot_id", sig_row.model_snapshot_id)
+        signal_reason.setdefault(
+            "signal_computed_at",
+            sig_row.computed_at.isoformat() if sig_row.computed_at else None,
+        )
+    if mkt_snap:
+        signal_reason.setdefault("market_snapshot_id", mkt_snap.id)
+        signal_reason.setdefault(
+            "market_snapshot_at",
+            mkt_snap.fetched_at.isoformat() if mkt_snap.fetched_at else None,
+        )
+
     model_prob = sig_row.model_prob if sig_row else 0.5
-    mkt_prob = mkt_snap.yes_mid if mkt_snap else 0.5
-    true_edge = sig_row.true_edge if sig_row else 0.0
+    mkt_prob = (
+        mkt_snap.yes_mid
+        if mkt_snap and mkt_snap.yes_mid is not None
+        else (sig_row.mkt_prob if sig_row else 0.5)
+    )
+    exec_cost = sig_row.exec_cost if sig_row else 0.02
+    raw_edge = sig_row.raw_edge if sig_row else model_prob - mkt_prob
+    true_edge = sig_row.true_edge if sig_row else raw_edge - exec_cost
     is_sell = body.side.startswith("sell_")
+    bucket_idx = bucket.bucket_idx if bucket.bucket_idx is not None else body.bucket_idx
 
     yes_bid_val = mkt_snap.yes_bid if mkt_snap else None
     signal = BucketSignal(
@@ -2472,14 +2509,14 @@ async def manual_trade(
         unit=getattr(city, "unit", "F"),
         event_id=event.id,
         bucket_id=bucket.id,
-        bucket_idx=body.bucket_idx,
-        label=bucket.label or f"Bucket {body.bucket_idx}",
+        bucket_idx=bucket_idx,
+        label=bucket.label or f"Bucket {bucket_idx}",
         low_f=bucket.low_f,
         high_f=bucket.high_f,
         model_prob=model_prob,
         mkt_prob=mkt_prob,
-        raw_edge=model_prob - mkt_prob,
-        exec_cost=sig_row.exec_cost if sig_row else 0.02,
+        raw_edge=raw_edge,
+        exec_cost=exec_cost,
         true_edge=true_edge,
         ev_per_share=model_prob - mkt_prob,
         ev_at_bid=(model_prob - yes_bid_val) if yes_bid_val is not None else None,
@@ -2489,6 +2526,8 @@ async def manual_trade(
         spread=mkt_snap.spread if mkt_snap else None,
         yes_ask_depth=mkt_snap.yes_ask_depth if mkt_snap else 0.0,
         yes_bid_depth=mkt_snap.yes_bid_depth if mkt_snap else 0.0,
+        reason=signal_reason,
+        gate_failures=gate_failures,
         actionable=True,  # manual override
     )
 

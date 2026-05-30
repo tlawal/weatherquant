@@ -92,13 +92,48 @@ async def notify_exit_triggered(
     reason: str,
     price: float,
     shares: float,
+    details: dict | None = None,
 ) -> None:
     """Notification for exit engine actions."""
     try:
+        detail_lines = ""
+        if details:
+            entry_ev = details.get("entry_ev_at_bid")
+            current_ev = details.get("current_ev_at_bid")
+            ev_delta = details.get("ev_delta")
+            true_edge_delta = details.get("true_edge_delta")
+            model_delta = details.get("model_prob_delta")
+            market_delta = details.get("market_prob_delta")
+            source_deltas = details.get("source_high_deltas") or {}
+            if details.get("entry_model_snapshot_unavailable"):
+                detail_lines += "\nEntry model snapshot unavailable"
+            elif entry_ev is not None or current_ev is not None:
+                detail_lines += (
+                    f"\nEV: {entry_ev if entry_ev is not None else '—'}"
+                    f" → {current_ev if current_ev is not None else '—'}"
+                )
+                if ev_delta is not None:
+                    detail_lines += f" (Δ {ev_delta:+.3f})"
+            if model_delta is not None or market_delta is not None:
+                detail_lines += (
+                    f"\nModel Δ: {model_delta:+.3f}" if model_delta is not None else "\nModel Δ: —"
+                )
+                detail_lines += (
+                    f"  Market Δ: {market_delta:+.3f}" if market_delta is not None else "  Market Δ: —"
+                )
+            if true_edge_delta is not None:
+                detail_lines += f"\nTrue edge Δ: {true_edge_delta:+.3f}"
+            if source_deltas:
+                parts = [
+                    f"{k.replace('_high', '').replace('_peak', '')}:{v:+.1f}°"
+                    for k, v in list(source_deltas.items())[:5]
+                ]
+                detail_lines += "\nSource Δ: " + ", ".join(parts)
         text = (
             f"\u26a0\ufe0f <b>Exit</b> | {city_slug}\n"
             f"Level: {level}  Reason: {reason}\n"
             f"Price: {price:.4f}  Shares: {shares:.2f}"
+            f"{detail_lines}"
         )
         await send_telegram(text)
     except Exception:

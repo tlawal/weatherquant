@@ -1381,6 +1381,21 @@ def _wallet_tracker_message(status: str, reason: str | None = None) -> str:
     return "No wallet trades have been stored for this city/date yet."
 
 
+def _latest_row_timestamp(*row_groups: list[Any]) -> str | None:
+    latest: datetime | None = None
+    for rows in row_groups:
+        for row in rows or []:
+            for attr in ("last_updated_ts", "last_trade_ts", "last_active_ts"):
+                value = getattr(row, attr, None)
+                if isinstance(value, datetime):
+                    if value.tzinfo is None:
+                        value = value.replace(tzinfo=timezone.utc)
+                    value = value.astimezone(timezone.utc)
+                    if latest is None or value > latest:
+                        latest = value
+    return latest.isoformat() if latest else None
+
+
 def _serialize_wallet_stat_as_current_row(
     row: Any,
     *,
@@ -1523,6 +1538,21 @@ def _empty_weather_smart_money_payload(
         "reason": reason,
         "message": _wallet_tracker_message(status, reason),
         "mode": "weather_smart_money_v2",
+        "current_source": "none",
+        "coverage": {
+            "current_source": "none",
+            "current_market_wallets": 0,
+            "bucket_consensus_buckets": len(bucket_consensus),
+            "legacy_current_rows": 0,
+            "legacy_city_rows": 0,
+            "legacy_global_rows": 0,
+            "exposure_rows": 0,
+            "global_skill_rows": 0,
+            "city_skill_rows": 0,
+            "display_limit": limit or Config.WALLET_TRACKER_DISPLAY_LIMIT,
+            "window_days": Config.WALLET_TRACKER_SKILL_WINDOW_DAYS,
+            "last_refresh": None,
+        },
         "rows": [],
         "current_market": [],
         "global_leaders": [],
@@ -1683,6 +1713,27 @@ async def get_weather_smart_money_payload(
     has_wallet_data = bool(current_rows or global_leaders or city_leaders)
     status = "ok" if has_wallet_data else "empty"
     reason = None if has_wallet_data else "no_wallet_data_for_city_date"
+    coverage = {
+        "current_source": current_source,
+        "current_market_wallets": len(current_rows),
+        "bucket_consensus_buckets": len(bucket_consensus),
+        "legacy_current_rows": len(legacy_current_rows),
+        "legacy_city_rows": len(legacy_city_rows),
+        "legacy_global_rows": len(legacy_global_rows),
+        "exposure_rows": len(exposure_rows),
+        "global_skill_rows": len(global_rows),
+        "city_skill_rows": len(city_rows),
+        "display_limit": limit,
+        "window_days": Config.WALLET_TRACKER_SKILL_WINDOW_DAYS,
+        "last_refresh": _latest_row_timestamp(
+            legacy_current_rows,
+            legacy_city_rows,
+            legacy_global_rows,
+            exposure_rows,
+            global_rows,
+            city_rows,
+        ),
+    }
 
     return {
         "enabled": True,
@@ -1691,6 +1742,7 @@ async def get_weather_smart_money_payload(
         "message": _wallet_tracker_message(status, reason),
         "mode": "weather_smart_money_v2",
         "current_source": current_source,
+        "coverage": coverage,
         "rows": current_rows,
         "current_market": current_rows,
         "global_leaders": global_leaders,

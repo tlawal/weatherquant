@@ -19,6 +19,7 @@ from backend.storage.models import (
     ForecastObs,
     Fill,
     MetarObs,
+    MarketSnapshot,
     ModelSnapshot,
     Order,
     Position,
@@ -310,6 +311,96 @@ def test_manual_market_trade_triggers_position_sync(tmp_path, monkeypatch):
     assert res["status"] == "filled"
     assert res["position_sync"] == {"ok": True, "synced": 1}
     assert calls["sync"] == 1
+
+    _run(engine.dispose())
+
+
+def test_manual_trade_hydrates_signal_reason_and_bucket_idx(tmp_path, monkeypatch):
+    engine, session_factory = _run(_setup_test_db(tmp_path, monkeypatch))
+    city = _run(_create_city(session_factory))
+    captured = {}
+
+    async def seed():
+        async with session_factory() as session:
+            event = Event(city_id=city.id, date_et=city_local_date(city), status="ok")
+            session.add(event)
+            await session.flush()
+            bucket = Bucket(
+                event_id=event.id,
+                bucket_idx=4,
+                label="Will the highest temperature in Atlanta be 82-83F?",
+                low_f=82.0,
+                high_f=83.0,
+                yes_token_id="yes-token",
+                no_token_id="no-token",
+                condition_id="cond-token",
+            )
+            session.add(bucket)
+            await session.flush()
+            snap = ModelSnapshot(
+                event_id=event.id,
+                mu=82.3,
+                sigma=3.1,
+                probs_json="[0.1, 0.2]",
+                inputs_json="{}",
+            )
+            session.add(snap)
+            await session.flush()
+            session.add(Signal(
+                bucket_id=bucket.id,
+                model_snapshot_id=snap.id,
+                model_prob=0.1785,
+                mkt_prob=0.315,
+                raw_edge=-0.1365,
+                exec_cost=0.03,
+                true_edge=-0.1665,
+                reason_json='{"nws_high":83.0,"hrrr_high":80.6,"sources_used":["nws","hrrr"]}',
+                gate_failures_json='["manual_edge_bypass"]',
+            ))
+            session.add(MarketSnapshot(
+                bucket_id=bucket.id,
+                yes_bid=0.31,
+                yes_ask=0.32,
+                yes_mid=0.315,
+                yes_bid_depth=10.0,
+                yes_ask_depth=9.0,
+                spread=0.01,
+            ))
+            await session.commit()
+            return bucket.id, snap.id
+
+    class FakeClob:
+        can_trade = True
+
+        async def get_balance(self):
+            return 10.0
+
+    async def fake_execute_signal(signal, *args, **kwargs):
+        captured["signal"] = signal
+        return {"status": "filled"}
+
+    bucket_id, snap_id = _run(seed())
+    monkeypatch.setattr("backend.ingestion.polymarket_clob.get_clob", lambda: FakeClob())
+    monkeypatch.setattr("backend.execution.trader.execute_signal", fake_execute_signal)
+
+    res = _run(api_routes.manual_trade(api_routes.ManualTradeRequest(
+        city_slug=city.city_slug,
+        bucket_id=bucket_id,
+        side="buy_yes",
+        qty=5,
+        order_type="limit",
+        limit_price=0.32,
+    ), actor="test"))
+
+    signal = captured["signal"]
+    assert res["status"] == "filled"
+    assert signal.bucket_idx == 4
+    assert signal.reason["nws_high"] == 83.0
+    assert signal.reason["hrrr_high"] == 80.6
+    assert signal.reason["model_snapshot_id"] == snap_id
+    assert signal.reason["signal_id"]
+    assert signal.reason["market_snapshot_id"]
+    assert signal.gate_failures == ["manual_edge_bypass"]
 
     _run(engine.dispose())
 

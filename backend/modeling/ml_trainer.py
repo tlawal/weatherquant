@@ -8,6 +8,7 @@ Usage:
 """
 import json
 import logging
+import os
 import sqlite3
 
 import numpy as np
@@ -16,20 +17,64 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from sklearn.ensemble import GradientBoostingRegressor
-from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_absolute_error
 import joblib
+from dotenv import load_dotenv
 
 from zoneinfo import ZoneInfo
+
+load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 log = logging.getLogger("ml_trainer")
 
-DB_PATH = Path(__file__).parent.parent.parent / "data" / "state.db"
-if not DB_PATH.exists():
-    DB_PATH = Path(__file__).parent.parent.parent / "state.db"
+ROOT_DIR = Path(__file__).parent.parent.parent
+
+
+def _sqlite_path_from_url(url: str) -> Path | None:
+    if not url:
+        return None
+    for prefix in ("sqlite+aiosqlite:///", "sqlite:///"):
+        if not url.startswith(prefix):
+            continue
+        raw_path = url[len(prefix):]
+        if not raw_path or raw_path == ":memory:":
+            return None
+        path = Path(raw_path)
+        return path if path.is_absolute() else ROOT_DIR / path
+    return None
+
+
+def _resolve_db_path() -> Path:
+    explicit_path = os.environ.get("ML_TRAINER_DB_PATH", "").strip()
+    if explicit_path:
+        return Path(explicit_path).expanduser()
+
+    db_url_path = _sqlite_path_from_url(os.environ.get("DATABASE_URL", "").strip())
+    if db_url_path is not None:
+        return db_url_path
+
+    candidates = [
+        ROOT_DIR / "data" / "state.db",
+        ROOT_DIR / "data" / "weatherquant.db",
+        ROOT_DIR / "state.db",
+        ROOT_DIR / "weatherquant.db",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+DB_PATH = _resolve_db_path()
 MODEL_PATH = Path(__file__).parent / "residual_model.pkl"
 METADATA_PATH = Path(__file__).parent / "residual_model_meta.json"
+SHADOW_MODEL_PATH = Path(__file__).parent / "residual_model_shadow.pkl"
+SHADOW_METADATA_PATH = Path(__file__).parent / "residual_model_shadow_meta.json"
+PROMOTE_RESIDUAL_ML = os.environ.get("PROMOTE_RESIDUAL_ML", "").strip().lower() in {
+    "1", "true", "yes", "on"
+}
+MIN_PROMOTION_MAE_IMPROVEMENT_F = 0.20
 
 # Static baseline for comparison (the old _REMAINING_RISE_TABLE)
 _OLD_TABLE = [
@@ -148,10 +193,37 @@ def extract_features_and_train():
     X = df[features]
     y = df["y_remaining_rise"]
 
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    # Chronological, date-grouped holdout. A random row split leaks same-day
+    # diurnal structure because morning and afternoon observations from the same
+    # city/date can land on both sides of the split.
+    unique_dates = sorted(pd.to_datetime(df["date_local"]).dt.date.unique())
+    if len(unique_dates) < 5:
+        log.warning(
+            "Only %d unique local dates — not enough for leakage-safe chronological validation.",
+            len(unique_dates),
+        )
+        return
+    split_idx = max(1, int(len(unique_dates) * 0.8))
+    split_idx = min(split_idx, len(unique_dates) - 1)
+    train_dates = set(unique_dates[:split_idx])
+    test_dates = set(unique_dates[split_idx:])
+    train_mask = pd.to_datetime(df["date_local"]).dt.date.isin(train_dates)
+    test_mask = pd.to_datetime(df["date_local"]).dt.date.isin(test_dates)
+    X_train, y_train = X.loc[train_mask], y.loc[train_mask]
+    X_test, y_test = X.loc[test_mask], y.loc[test_mask]
+    if X_train.empty or X_test.empty:
+        log.warning(
+            "Chronological split produced empty train/test partition (train=%d, test=%d).",
+            len(X_train), len(X_test),
+        )
+        return
 
     # 9. Train
-    log.info(f"Training GradientBoostingRegressor on {len(X_train)} samples ({len(X_test)} test)...")
+    log.info(
+        "Training GradientBoostingRegressor on %d train samples / %d test samples "
+        "(%d train dates / %d test dates)...",
+        len(X_train), len(X_test), len(train_dates), len(test_dates),
+    )
     model = GradientBoostingRegressor(
         n_estimators=200,
         max_depth=4,
@@ -174,29 +246,48 @@ def extract_features_and_train():
     log.info(f"=== Results ===")
     log.info(f"ML Model  — Train MAE: {train_mae:.2f}°F  |  Test MAE: {test_mae:.2f}°F")
     log.info(f"Old Table — Baseline MAE: {baseline_mae:.2f}°F")
-    log.info(f"Improvement: {baseline_mae - test_mae:.2f}°F lower MAE ({(1 - test_mae / baseline_mae) * 100:.1f}% reduction)")
+    improvement_f = baseline_mae - test_mae
+    improvement_pct = (1 - test_mae / baseline_mae) * 100 if baseline_mae > 0 else 0.0
+    log.info(f"Improvement: {improvement_f:.2f}°F lower MAE ({improvement_pct:.1f}% reduction)")
 
     # Feature importances
     importances = model.feature_importances_
     for col, imp in sorted(zip(features, importances), key=lambda x: -x[1]):
         log.info(f"  Feature [{col}]: {imp:.4f}")
 
-    # 11. Save
-    joblib.dump(model, MODEL_PATH)
-    log.info(f"Saved model to {MODEL_PATH}")
+    promotion_ready = improvement_f >= MIN_PROMOTION_MAE_IMPROVEMENT_F
+    output_model_path = MODEL_PATH if (PROMOTE_RESIDUAL_ML and promotion_ready) else SHADOW_MODEL_PATH
+    output_meta_path = METADATA_PATH if (PROMOTE_RESIDUAL_ML and promotion_ready) else SHADOW_METADATA_PATH
+
+    # 11. Save. Default is shadow-only so a training run cannot silently change
+    # live remaining-rise predictions loaded by residual_tracker.py.
+    joblib.dump(model, output_model_path)
+    log.info(f"Saved {'promoted' if output_model_path == MODEL_PATH else 'shadow'} model to {output_model_path}")
+    if PROMOTE_RESIDUAL_ML and not promotion_ready:
+        log.warning(
+            "PROMOTE_RESIDUAL_ML requested but blocked: %.2f°F improvement < %.2f°F threshold",
+            improvement_f, MIN_PROMOTION_MAE_IMPROVEMENT_F,
+        )
 
     meta = {
         "features": features,
         "train_mae": round(float(train_mae), 3),
         "test_mae": round(float(test_mae), 3),
         "baseline_mae": round(float(baseline_mae), 3),
-        "improvement_pct": round(float((1 - test_mae / baseline_mae) * 100), 1),
+        "improvement_f": round(float(improvement_f), 3),
+        "improvement_pct": round(float(improvement_pct), 1),
         "trained_at": datetime.now(timezone.utc).isoformat(),
         "n_samples": len(df),
         "n_cities": int(df["city_id"].nunique()),
+        "split_method": "chronological_date_holdout",
+        "train_dates": [str(d) for d in sorted(train_dates)],
+        "test_dates": [str(d) for d in sorted(test_dates)],
+        "promotion_ready": bool(promotion_ready),
+        "promoted": bool(output_model_path == MODEL_PATH),
+        "promotion_threshold_mae_improvement_f": MIN_PROMOTION_MAE_IMPROVEMENT_F,
     }
-    METADATA_PATH.write_text(json.dumps(meta, indent=2))
-    log.info(f"Saved metadata to {METADATA_PATH}")
+    output_meta_path.write_text(json.dumps(meta, indent=2))
+    log.info(f"Saved metadata to {output_meta_path}")
     log.info("Done.")
 
 

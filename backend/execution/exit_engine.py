@@ -5,8 +5,9 @@ Interval: 300 seconds (5 min)
 5-level cascade:
     1. EMERGENCY: METAR obs contradicts bucket by >= 3°F (Market sell)
     1b. EDGE_DECAY: ev_at_bid <= EDGE_DECAY_THRESHOLD for EDGE_DECAY_DEBOUNCE_RUNS
-        consecutive runs (Limit sell at bid). Fires before URGENT so EV-based
-        exits take priority over structural-shift exits.
+        consecutive runs, plus a material deterioration from the stored entry
+        EV baseline (Limit sell at bid). Fires before URGENT so EV-based exits
+        take priority over structural-shift exits.
     2. URGENT: Model consensus shifted to different bucket (Limit sell bid - 1c)
        — debounced: requires CONSENSUS_DEBOUNCE_RUNS consecutive shifts
        — spread-guarded: suppressed when spread > URGENT_EXIT_MAX_SPREAD
@@ -16,6 +17,7 @@ Interval: 300 seconds (5 min)
 """
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -223,6 +225,200 @@ def _edge_decay_triggered(bucket_id: int) -> bool:
     return all(e <= Config.EDGE_DECAY_THRESHOLD for e in recent)
 
 
+def _safe_float(value, default: float | None = None) -> float | None:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _load_entry_decision(pos) -> dict:
+    raw = getattr(pos, "entry_decision_json", None)
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+_SOURCE_HIGH_KEYS = (
+    "nws_high",
+    "wu_hourly_peak",
+    "hrrr_high",
+    "hrrr_15min_high",
+    "nbm_high",
+    "ecmwf_ifs_high",
+    "ecmwf_aifs_high",
+    "gfs_graphcast_high",
+    "pangu_weather_high",
+    "fourcastnet_v2_high",
+    "aurora_high",
+)
+
+
+def _source_highs(reason: dict | None) -> dict[str, float]:
+    reason = reason or {}
+    highs: dict[str, float] = {}
+    for key in _SOURCE_HIGH_KEYS:
+        val = _safe_float(reason.get(key))
+        if val is not None:
+            highs[key] = val
+    return highs
+
+
+def _entry_ev_at_bid(entry_decision: dict) -> float | None:
+    ev = _safe_float(entry_decision.get("ev_at_bid"))
+    if ev is not None:
+        return ev
+    model_prob = _safe_float(entry_decision.get("model_prob"))
+    yes_bid = _safe_float(entry_decision.get("yes_bid"))
+    if model_prob is not None and yes_bid is not None:
+        return model_prob - yes_bid
+    return None
+
+
+def _entry_strategy(pos, entry_decision: dict) -> str:
+    return str(
+        getattr(pos, "entry_strategy", None)
+        or entry_decision.get("entry_strategy")
+        or getattr(pos, "strategy", None)
+        or ""
+    ).strip().lower()
+
+
+def _edge_decay_diagnostics(pos, signal: BucketSignal, entry_decision: dict) -> dict:
+    entry_sources = entry_decision.get("source_highs")
+    if not isinstance(entry_sources, dict):
+        entry_sources = {}
+    current_sources = _source_highs(signal.reason)
+    source_deltas = {}
+    for key, current in current_sources.items():
+        entry = _safe_float(entry_sources.get(key))
+        if entry is not None:
+            source_deltas[key] = round(current - entry, 3)
+
+    entry_ev = _entry_ev_at_bid(entry_decision)
+    current_ev = _safe_float(signal.ev_at_bid)
+    entry_model_prob = _safe_float(entry_decision.get("model_prob"))
+    current_model_prob = _safe_float(signal.model_prob)
+    entry_market_prob = _safe_float(entry_decision.get("market_prob"))
+    current_market_prob = _safe_float(signal.mkt_prob)
+    entry_true_edge = _safe_float(entry_decision.get("true_edge"))
+    current_true_edge = _safe_float(signal.true_edge)
+    entry_bid = _safe_float(entry_decision.get("yes_bid"))
+    current_bid = _safe_float(signal.yes_bid)
+
+    diagnostics = {
+        "entry_snapshot_available": bool(entry_decision),
+        "entry_model_snapshot_unavailable": not bool(entry_decision),
+        "entry_strategy": _entry_strategy(pos, entry_decision) or None,
+        "entry_type": getattr(pos, "entry_type", None) or entry_decision.get("entry_type"),
+        "entry_ev_at_bid": entry_ev,
+        "current_ev_at_bid": current_ev,
+        "ev_delta": (
+            round(current_ev - entry_ev, 6)
+            if current_ev is not None and entry_ev is not None else None
+        ),
+        "entry_model_prob": entry_model_prob,
+        "current_model_prob": current_model_prob,
+        "model_prob_delta": (
+            round(current_model_prob - entry_model_prob, 6)
+            if current_model_prob is not None and entry_model_prob is not None else None
+        ),
+        "entry_market_prob": entry_market_prob,
+        "current_market_prob": current_market_prob,
+        "market_prob_delta": (
+            round(current_market_prob - entry_market_prob, 6)
+            if current_market_prob is not None and entry_market_prob is not None else None
+        ),
+        "entry_true_edge": entry_true_edge,
+        "current_true_edge": current_true_edge,
+        "true_edge_delta": (
+            round(current_true_edge - entry_true_edge, 6)
+            if current_true_edge is not None and entry_true_edge is not None else None
+        ),
+        "entry_bid": entry_bid,
+        "current_bid": current_bid,
+        "bid_delta": (
+            round(current_bid - entry_bid, 6)
+            if current_bid is not None and entry_bid is not None else None
+        ),
+        "source_high_deltas": source_deltas,
+        "recent_ev_at_bid": [
+            round(e, 6)
+            for e in _ev_cache.get(pos.bucket_id, [])[-Config.EDGE_DECAY_DEBOUNCE_RUNS:]
+        ],
+    }
+    return diagnostics
+
+
+def _edge_decay_exit_allowed(pos, signal: BucketSignal, age_s: float, bid: float) -> tuple[bool, dict]:
+    """Return whether EV deterioration is strong enough to trigger EDGE_DECAY."""
+    entry_decision = _load_entry_decision(pos)
+    diagnostics = _edge_decay_diagnostics(pos, signal, entry_decision)
+    diagnostics["threshold"] = Config.EDGE_DECAY_THRESHOLD
+    diagnostics["required_min_drop"] = Config.EDGE_DECAY_MIN_EV_DROP
+    diagnostics["required_entry_min_ev"] = Config.EDGE_DECAY_ENTRY_MIN_EV
+
+    if signal.ev_at_bid is None:
+        diagnostics["blocked_reason"] = "missing_current_ev_at_bid"
+        return False, diagnostics
+    if not _edge_decay_triggered(pos.bucket_id):
+        diagnostics["blocked_reason"] = "ev_not_debounced"
+        return False, diagnostics
+    if bid < Config.EDGE_DECAY_MIN_BID:
+        diagnostics["blocked_reason"] = "bid_below_floor"
+        return False, diagnostics
+
+    entry_strategy = str(diagnostics.get("entry_strategy") or "")
+    entry_type = str(diagnostics.get("entry_type") or "").upper()
+    is_manual = entry_type == "MANUAL" or entry_strategy.startswith("manual_")
+    is_manual_scalp = entry_strategy in {"manual_scalp", "scalp"}
+    min_age = (
+        Config.MANUAL_EDGE_DECAY_MIN_AGE_SECONDS
+        if is_manual else Config.EDGE_DECAY_MIN_POSITION_AGE_SECONDS
+    )
+    diagnostics["manual_position"] = is_manual
+    diagnostics["min_age_seconds"] = min_age
+
+    if age_s < min_age:
+        diagnostics["blocked_reason"] = "position_too_young"
+        return False, diagnostics
+
+    entry_ev = diagnostics.get("entry_ev_at_bid")
+    current_ev = diagnostics.get("current_ev_at_bid")
+    if entry_ev is None:
+        diagnostics["blocked_reason"] = "entry_model_snapshot_unavailable"
+        return False, diagnostics
+    if current_ev is None:
+        diagnostics["blocked_reason"] = "missing_current_ev_at_bid"
+        return False, diagnostics
+
+    ev_drop = entry_ev - current_ev
+    diagnostics["ev_drop"] = round(ev_drop, 6)
+    if is_manual:
+        if not is_manual_scalp:
+            diagnostics["blocked_reason"] = "manual_strategy_exempt"
+            return False, diagnostics
+        if ev_drop < Config.EDGE_DECAY_MIN_EV_DROP:
+            diagnostics["blocked_reason"] = "manual_ev_not_worse_by_min_drop"
+            return False, diagnostics
+    else:
+        if entry_ev < Config.EDGE_DECAY_ENTRY_MIN_EV:
+            diagnostics["blocked_reason"] = "auto_entry_ev_below_min"
+            return False, diagnostics
+        if ev_drop < Config.EDGE_DECAY_MIN_EV_DROP:
+            diagnostics["blocked_reason"] = "auto_ev_not_worse_by_min_drop"
+            return False, diagnostics
+
+    diagnostics["blocked_reason"] = None
+    return True, diagnostics
+
+
 def _stable_consensus(event_id: int, held_bucket_id: int, multiplier: int = 1) -> int | None:
     """Return the consensus bucket_id only if the last N runs consistently
     agree on a DIFFERENT bucket than the held one. Returns None if still noisy."""
@@ -390,12 +586,8 @@ async def _run_exit_cascade_for_position(
     # ── 1b. EDGE_DECAY ── (EV-based, fires before URGENT)
     # Exit when ev_at_bid has stayed at or below threshold for N consecutive runs.
     # Held bucket is no longer +EV; sell the non-moon-bag portion at the bid.
-    if (
-        signal.ev_at_bid is not None
-        and _edge_decay_triggered(pos.bucket_id)
-        and age_s >= Config.EDGE_DECAY_MIN_POSITION_AGE_SECONDS
-        and bid >= Config.EDGE_DECAY_MIN_BID
-    ):
+    edge_decay_allowed, edge_decay_diag = _edge_decay_exit_allowed(pos, signal, age_s, bid)
+    if edge_decay_allowed:
         sell_qty = pos.net_qty - (pos.moon_bag_qty or 0.0)
         if sell_qty <= 0:
             log.info(
@@ -405,10 +597,11 @@ async def _run_exit_cascade_for_position(
         else:
             recent = _ev_cache.get(pos.bucket_id, [])[-Config.EDGE_DECAY_DEBOUNCE_RUNS:]
             log.info(
-                "exit: EDGE_DECAY %s — ev_at_bid persisted <= %.4f for %d runs (recent=%s, age_s=%d). "
-                "Selling %.1f shares at bid=%.3f.",
-                signal.city_slug, Config.EDGE_DECAY_THRESHOLD,
-                Config.EDGE_DECAY_DEBOUNCE_RUNS,
+                "exit: EDGE_DECAY %s — ev_at_bid deteriorated from %s to %.4f "
+                "(drop=%s, recent=%s, age_s=%d). Selling %.1f shares at bid=%.3f.",
+                signal.city_slug, edge_decay_diag.get("entry_ev_at_bid"),
+                signal.ev_at_bid,
+                edge_decay_diag.get("ev_drop"),
                 [round(e, 4) for e in recent], int(age_s), sell_qty, bid,
             )
             return {
@@ -416,7 +609,17 @@ async def _run_exit_cascade_for_position(
                 "price": bid,
                 "reason": "ev_decayed",
                 "qty_override": sell_qty,
+                "diagnostics": edge_decay_diag,
             }
+    elif edge_decay_diag.get("blocked_reason") not in {"ev_not_debounced", "missing_current_ev_at_bid"}:
+        log.info(
+            "exit: EDGE_DECAY suppressed %s — %s (entry_ev=%s current_ev=%s recent=%s)",
+            signal.city_slug,
+            edge_decay_diag.get("blocked_reason"),
+            edge_decay_diag.get("entry_ev_at_bid"),
+            edge_decay_diag.get("current_ev_at_bid"),
+            edge_decay_diag.get("recent_ev_at_bid"),
+        )
 
     # ── 2. URGENT ── (debounced + spread-guarded + confidence-gated + EV-corroborated)
     # Model consensus shifted to different bucket, we are holding a non-consensus bucket.
@@ -806,7 +1009,11 @@ async def run_exit_engine() -> None:
             )
             
             exec_status = result.get("status", "unknown")
-            shares_actually_exited = float(exit_qty) if exec_status in ("filled", "timeout", "open") else 0.0
+            fill_payload = result.get("fill") if isinstance(result.get("fill"), dict) else {}
+            shares_actually_exited = (
+                float(fill_payload.get("qty") or exit_qty)
+                if exec_status == "filled" else 0.0
+            )
             await _emit_exit_event(
                 pos, signal, cascade,
                 shares_exited=shares_actually_exited,
@@ -818,7 +1025,7 @@ async def run_exit_engine() -> None:
             if result.get("status") in ("filled", "timeout", "open"):
                 # Apply post-exit tier state updates (tier flags, trailing stop, etc.)
                 post_update = cascade.get("post_exit_update")
-                if post_update:
+                if post_update and result.get("status") == "filled":
                     async with get_session() as sess:
                         from sqlalchemy import update
                         import backend.storage.models as m
@@ -837,6 +1044,7 @@ async def run_exit_engine() -> None:
                         reason=cascade["reason"],
                         price=sell_price,
                         shares=exit_qty,
+                        details=cascade.get("diagnostics"),
                     )
                 except Exception:
                     log.debug("Telegram exit notification failed (non-critical)", exc_info=True)
