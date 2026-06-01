@@ -105,6 +105,7 @@ async def notify_exit_triggered(
             model_delta = details.get("model_prob_delta")
             market_delta = details.get("market_prob_delta")
             source_deltas = details.get("source_high_deltas") or {}
+            price_adjustment = details.get("price_adjustment") or {}
             if details.get("entry_model_snapshot_unavailable"):
                 detail_lines += "\nEntry model snapshot unavailable"
             elif entry_ev is not None or current_ev is not None:
@@ -129,6 +130,12 @@ async def notify_exit_triggered(
                     for k, v in list(source_deltas.items())[:5]
                 ]
                 detail_lines += "\nSource Δ: " + ", ".join(parts)
+            if price_adjustment:
+                detail_lines += (
+                    "\nOrder price: "
+                    f"{price_adjustment.get('reference_price', '—')} → "
+                    f"{price_adjustment.get('order_price', '—')}"
+                )
         text = (
             f"\u26a0\ufe0f <b>Exit</b> | {city_slug}\n"
             f"Level: {level}  Reason: {reason}\n"
@@ -147,14 +154,24 @@ async def notify_exit_failed(
     price: float,
     shares: float,
     error: str,
+    details: dict | None = None,
 ) -> None:
     """Notification when an exit order fails to execute."""
     try:
+        detail_lines = ""
+        price_adjustment = (details or {}).get("price_adjustment") if details else None
+        if price_adjustment:
+            detail_lines = (
+                "\nOrder price: "
+                f"{price_adjustment.get('reference_price', '—')} → "
+                f"{price_adjustment.get('order_price', '—')}"
+            )
         text = (
             f"\U0001f6a8 <b>Exit FAILED</b> | {city_slug}\n"
             f"Level: {level}  Reason: {reason}\n"
             f"Price: {price:.4f}  Shares: {shares:.2f}\n"
             f"Error: {error[:120]}"
+            f"{detail_lines}"
         )
         await send_telegram(text)
     except Exception:

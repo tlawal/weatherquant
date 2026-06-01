@@ -44,6 +44,26 @@ log = logging.getLogger(__name__)
 
 import re as _re
 
+CLOB_LIMIT_MIN_PRICE = 0.01
+CLOB_LIMIT_MAX_PRICE = 0.99
+
+
+def normalize_limit_price_for_clob(price: float) -> float:
+    """Clamp a CLOB limit price into Polymarket's accepted range."""
+    return round(min(max(float(price), CLOB_LIMIT_MIN_PRICE), CLOB_LIMIT_MAX_PRICE), 3)
+
+
+def _price_adjustment(reference_price: float, order_price: float) -> dict | None:
+    if abs(float(reference_price) - float(order_price)) < 0.0005:
+        return None
+    return {
+        "reason": "clamped_to_clob_limit_range",
+        "reference_price": round(float(reference_price), 4),
+        "order_price": round(float(order_price), 4),
+        "min_price": CLOB_LIMIT_MIN_PRICE,
+        "max_price": CLOB_LIMIT_MAX_PRICE,
+    }
+
 
 def _rewrite_balance_error(raw: str) -> str | None:
     """If raw is a Polymarket insufficient-balance error, return a friendly message."""
@@ -312,6 +332,7 @@ async def execute_signal(
         result["status"] = "error"
         result["error"] = "no valid price"
         return result
+    reference_price = float(limit_price)
 
     if side == "SELL":
         # SELL: must specify qty, validate against held position
@@ -400,6 +421,9 @@ async def execute_signal(
 
     result["shares"] = shares
     result["limit_price"] = limit_price
+    result["reference_price"] = round(reference_price, 4)
+    result["order_price"] = limit_price
+    result["price_adjustment"] = None
     result["estimated_cost"] = cost
     resolved_entry_strategy = entry_strategy
     if side == "BUY":
@@ -525,6 +549,37 @@ async def execute_signal(
             result["status"] = "error"
             result["error"] = f"shares < 5 limit minimum but current bid ({signal.yes_bid}) below limit ({limit_price}) or depth ({signal.yes_bid_depth}) insufficient"
             return result
+
+    # Polymarket rejects limit prices outside [0.01, 0.99]. Preserve the
+    # original quote as reference_price, but submit only legal CLOB prices.
+    order_price = (
+        normalize_limit_price_for_clob(reference_price)
+        if order_type == "limit" else reference_price
+    )
+    adjustment = (
+        _price_adjustment(reference_price, order_price)
+        if order_type == "limit" else None
+    )
+    if adjustment:
+        result["warning"] = (
+            (result.get("warning") + "; ") if result.get("warning") else ""
+        ) + (
+            f"Limit price adjusted from ${reference_price:.3f} to "
+            f"${order_price:.3f} for Polymarket CLOB limits"
+        )
+        log.info(
+            "trade: clamped limit price %.4f → %.4f for CLOB legal range",
+            reference_price, order_price,
+        )
+    limit_price = order_price
+    cost = round(shares * limit_price, 2)
+    result["shares"] = shares
+    result["limit_price"] = limit_price
+    result["order_price"] = limit_price
+    result["reference_price"] = round(reference_price, 4)
+    result["price_adjustment"] = adjustment
+    result["estimated_cost"] = cost
+    result["order_type"] = order_type
 
     # ── Capture pre-trade position baseline (used by fill poller to compute delta)
     async with get_session() as sess:

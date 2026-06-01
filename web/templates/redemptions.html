@@ -525,6 +525,9 @@ function actionButtons({evt, b}) {
   const refresh = `<button onclick="loadEvents('live')" class="px-2 py-[2px] rounded text-[0.58rem] font-bold border border-cyan-500/50 text-cyan-300 hover:bg-cyan-900/30">Sync From Wallet</button>`;
   const uma = `<button onclick="loadEvents('onchain')" class="px-2 py-[2px] rounded text-[0.58rem] font-bold border border-yellow-500/50 text-yellow-300 hover:bg-yellow-900/30">Check UMA</button>`;
   const markClosed = positionId ? `<button onclick="markClosed(${positionId}, this)" class="px-2 py-[2px] rounded text-[0.58rem] font-bold border border-red-500/50 text-red-300 hover:bg-red-900/30">Mark Closed</button>` : '';
+  const liveBid = Number(b.live_bid || 0);
+  const liveSpread = Number(b.live_spread || 0);
+  const bidDepth = Number((b.exit_plan && b.exit_plan.bid_depth) || 0);
 
   if (b.sync_status === 'missing_on_chain') {
     return `<div class="flex flex-col items-end gap-1">${refresh}${markClosed}${openMarket}${journal}</div>`;
@@ -536,7 +539,7 @@ function actionButtons({evt, b}) {
     return `<div class="flex flex-col items-end gap-1">${uma}${refresh}${openMarket}${journal}</div>`;
   }
   if (evt.status === 'open' && b.tradable !== false) {
-    return `<div class="flex flex-col items-end gap-1"><button onclick="marketSell('${cid}', ${qty}, '${city}', ${bucketId}, this)" class="px-2 py-[2px] rounded text-[0.58rem] font-bold border border-red-500/50 text-red-400 hover:bg-red-900/30">Quick Exit</button><a href="/city/${city}" class="px-2 py-[2px] rounded text-[0.58rem] font-bold border border-yellow-500/50 text-yellow-300 hover:bg-yellow-900/30">Limit Exit</a>${openCity}${journal}</div>`;
+    return `<div class="flex flex-col items-end gap-1"><button onclick="marketSell('${cid}', ${qty}, '${city}', ${bucketId}, ${liveBid}, ${liveSpread}, ${bidDepth}, this)" class="px-2 py-[2px] rounded text-[0.58rem] font-bold border border-red-500/50 text-red-400 hover:bg-red-900/30">Quick Exit</button><a href="/city/${city}" class="px-2 py-[2px] rounded text-[0.58rem] font-bold border border-yellow-500/50 text-yellow-300 hover:bg-yellow-900/30">Limit Exit</a>${openCity}${journal}</div>`;
   }
   return `<div class="flex flex-col items-end gap-1">${refresh}${openMarket}${journal}</div>`;
 }
@@ -860,8 +863,11 @@ async function markClosed(positionId, btn) {
   }
 }
 
-async function marketSell(conditionId, qty, citySlug, bucketId, btn) {
-  if (!confirm(`SELL ${qty.toFixed(1)} shares at best bid? This cannot be undone.`)) return;
+async function marketSell(conditionId, qty, citySlug, bucketId, liveBid, spread, bidDepth, btn) {
+  const bidLine = liveBid > 0
+    ? `Current bid: $${Number(liveBid).toFixed(3)} · spread ${(Number(spread || 0) * 100).toFixed(1)}¢ · depth ${Number(bidDepth || 0).toFixed(1)} shares`
+    : 'Current bid unavailable; this will attempt a FOK market sell against the live book.';
+  if (!confirm(`SELL ${qty.toFixed(1)} shares with a FOK market exit?\n${bidLine}\nThis cannot be undone.`)) return;
   _actionInProgress = true;
   btn.disabled = true;
   const origText = btn.textContent;
@@ -872,12 +878,13 @@ async function marketSell(conditionId, qty, citySlug, bucketId, btn) {
       bucket_id: bucketId,
       side: 'sell_yes',
       qty: qty,
-      order_type: 'limit',
+      order_type: 'market',
     });
-    if (data && (data.status === 'filled' || data.status === 'order_placed')) {
+    if (data && (data.status === 'filled' || data.status === 'open' || data.status === 'order_placed')) {
       btn.textContent = 'SOLD';
       btn.classList.remove('border-red-500/50', 'text-red-400');
       btn.classList.add('border-green-500/50', 'text-green-400');
+      if (data.warning) alert('Sell submitted: ' + data.warning);
       setTimeout(loadEvents, 2000);
     } else {
       alert('Sell error: ' + (data?.error || data?.detail || JSON.stringify(data)));

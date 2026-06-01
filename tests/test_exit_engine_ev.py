@@ -358,6 +358,31 @@ def test_expiry_likely_winner_passive_sell_not_ten_cent_dump(stub_db, monkeypatc
     assert result["price"] >= 0.99
 
 
+def test_expiry_likely_winner_clamps_passive_price_to_clob_max(stub_db, monkeypatch):
+    """Near-par bids above $0.99 must not produce invalid CLOB limit prices."""
+    now = datetime(2026, 5, 13, 19, 49, tzinfo=ZoneInfo("America/New_York"))
+    monkeypatch.setattr("backend.execution.exit_engine.city_local_now", lambda city: now)
+    pos = _make_position(avg_cost=0.95, net_qty=1.0, age_seconds=9000)
+    signal = _make_signal(
+        low_f=74.0,
+        high_f=75.0,
+        yes_bid=0.998,
+        spread=0.0,
+        model_prob=0.90,
+    )
+    signal.reason = {"raw_high": 75.0}
+
+    result = _run(ee._run_exit_cascade_for_position(pos, signal, None, None))
+    assert result is not None
+    assert result["level"] == "PROFIT"
+    assert result["reason"] == "expiry_passive_winner"
+    assert result["price"] == 0.99
+    assert result["diagnostics"]["pre_cap_bid"] == 0.998
+    assert result["diagnostics"]["reference_price"] == 0.998
+    assert result["diagnostics"]["order_price"] == 0.99
+    assert result["diagnostics"]["price_adjustment"]["reason"] == "clamped_to_clob_limit_range"
+
+
 def test_expiry_likely_winner_holds_when_bid_below_passive_floor(stub_db, monkeypatch):
     """A likely winner with a sub-par bid is held to redeem instead of force-sold."""
     now = datetime(2026, 5, 13, 19, 49, tzinfo=ZoneInfo("America/New_York"))

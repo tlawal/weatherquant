@@ -35,7 +35,7 @@ from backend.storage.repos import (
     get_station_profile,
 )
 from backend.engine.signal_engine import run_signal_engine, BucketSignal
-from backend.execution.trader import execute_signal
+from backend.execution.trader import execute_signal, normalize_limit_price_for_clob
 from backend.execution.obs_proximity import evaluate_obs_proximity_exit, normalize_observation_minutes
 from backend.tz_utils import city_local_now
 
@@ -847,13 +847,32 @@ async def _run_exit_cascade_for_position(
         likely_winner = _is_likely_expiry_winner(signal, bid, obs_high)
         if likely_winner:
             if bid >= Config.EXPIRY_PASSIVE_SELL_MIN_BID:
-                sell_price = max(Config.EXPIRY_PASSIVE_SELL_MIN_BID, bid)
+                reference_price = max(Config.EXPIRY_PASSIVE_SELL_MIN_BID, bid)
+                sell_price = normalize_limit_price_for_clob(reference_price)
+                price_adjustment = None
+                if abs(reference_price - sell_price) >= 0.0005:
+                    price_adjustment = {
+                        "reason": "clamped_to_clob_limit_range",
+                        "reference_price": round(reference_price, 4),
+                        "order_price": round(sell_price, 4),
+                    }
                 log.info(
                     "exit: EXPIRY_PASSIVE %s — likely winner; passively offering at %.3f "
-                    "(bid=%.3f, model=%.3f, obs_high=%s)",
-                    signal.city_slug, sell_price, bid, signal.model_prob, obs_high,
+                    "(reference=%.3f, bid=%.3f, model=%.3f, obs_high=%s)",
+                    signal.city_slug, sell_price, reference_price, bid, signal.model_prob, obs_high,
                 )
-                return {"level": "PROFIT", "price": sell_price, "reason": "expiry_passive_winner"}
+                return {
+                    "level": "PROFIT",
+                    "price": sell_price,
+                    "reason": "expiry_passive_winner",
+                    "reference_price": reference_price,
+                    "diagnostics": {
+                        "pre_cap_bid": bid,
+                        "reference_price": round(reference_price, 4),
+                        "order_price": round(sell_price, 4),
+                        "price_adjustment": price_adjustment,
+                    },
+                }
             log.info(
                 "exit: HOLD_TO_REDEEM %s — likely winner; bid %.3f below passive sell floor %.3f",
                 signal.city_slug, bid, Config.EXPIRY_PASSIVE_SELL_MIN_BID,
@@ -1009,6 +1028,11 @@ async def run_exit_engine() -> None:
             )
             
             exec_status = result.get("status", "unknown")
+            if result.get("price_adjustment"):
+                diagnostics = cascade.setdefault("diagnostics", {})
+                diagnostics["price_adjustment"] = result.get("price_adjustment")
+                diagnostics["reference_price"] = result.get("reference_price")
+                diagnostics["order_price"] = result.get("order_price")
             fill_payload = result.get("fill") if isinstance(result.get("fill"), dict) else {}
             shares_actually_exited = (
                 float(fill_payload.get("qty") or exit_qty)
@@ -1072,6 +1096,7 @@ async def run_exit_engine() -> None:
                         price=sell_price,
                         shares=exit_qty,
                         error=err,
+                        details=cascade.get("diagnostics"),
                     )
                 except Exception:
                     log.debug("Telegram exit-failed notification failed (non-critical)", exc_info=True)

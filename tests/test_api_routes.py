@@ -405,6 +405,212 @@ def test_manual_trade_hydrates_signal_reason_and_bucket_idx(tmp_path, monkeypatc
     _run(engine.dispose())
 
 
+def test_quick_exit_market_sell_does_not_submit_near_par_limit(tmp_path, monkeypatch):
+    engine, session_factory = _run(_setup_test_db(tmp_path, monkeypatch))
+    city = _run(_create_city(session_factory))
+    calls = []
+
+    async def seed():
+        async with session_factory() as session:
+            event = Event(city_id=city.id, date_et=city_local_date(city), status="ok")
+            session.add(event)
+            await session.flush()
+            bucket = Bucket(
+                event_id=event.id,
+                bucket_idx=9,
+                label="Will the highest temperature in Atlanta be between 74-75F?",
+                low_f=74.0,
+                high_f=75.0,
+                yes_token_id="yes-token",
+                no_token_id="no-token",
+                condition_id="cond-token",
+            )
+            session.add(bucket)
+            await session.flush()
+            session.add(Position(
+                bucket_id=bucket.id,
+                side="yes",
+                net_qty=1.0,
+                avg_cost=0.84,
+                entry_type="MANUAL",
+                entry_strategy="manual_scalp",
+            ))
+            session.add(Signal(
+                bucket_id=bucket.id,
+                model_prob=0.70,
+                mkt_prob=0.9985,
+                raw_edge=-0.2985,
+                exec_cost=0.02,
+                true_edge=-0.3185,
+                reason_json='{"raw_high":75.0}',
+            ))
+            session.add(MarketSnapshot(
+                bucket_id=bucket.id,
+                yes_bid=0.998,
+                yes_ask=0.0,
+                yes_mid=0.9985,
+                yes_bid_depth=140.0,
+                yes_ask_depth=0.0,
+                spread=0.0,
+            ))
+            await session.commit()
+            return bucket.id
+
+    class FakeClob:
+        can_trade = True
+
+        async def get_balance(self):
+            return 10.0
+
+        async def place_market_order(self, **kwargs):
+            calls.append(("market", kwargs))
+            return {"orderID": "market-order-1"}
+
+        async def place_limit_order(self, **kwargs):
+            calls.append(("limit", kwargs))
+            return {"orderID": "limit-order-1"}
+
+    import backend.execution.trader as trader_mod
+
+    async def fake_poll_for_fill(**kwargs):
+        return {"qty": kwargs["expected_size"], "price": kwargs["expected_price"]}
+
+    async def fake_erc1155_balance(*args, **kwargs):
+        return 10_000_000
+
+    async def fake_sync_positions_from_chain(*args, **kwargs):
+        return {"ok": True, "synced": 1}
+
+    bucket_id = _run(seed())
+    fake_clob = FakeClob()
+    monkeypatch.setattr("backend.ingestion.polymarket_clob.get_clob", lambda: fake_clob)
+    monkeypatch.setattr(trader_mod, "get_clob", lambda: fake_clob)
+    monkeypatch.setattr(trader_mod, "_poll_for_fill", fake_poll_for_fill)
+    monkeypatch.setattr("backend.execution.chain_utils.erc1155_balance", fake_erc1155_balance)
+    monkeypatch.setattr("backend.execution.chain_utils.get_wallet_address", lambda: "0xabc")
+    monkeypatch.setattr("backend.execution.position_sync.sync_positions_from_chain", fake_sync_positions_from_chain)
+
+    res = _run(api_routes.manual_trade(api_routes.ManualTradeRequest(
+        city_slug=city.city_slug,
+        bucket_id=bucket_id,
+        side="sell_yes",
+        qty=1,
+        order_type="market",
+    ), actor="test"))
+
+    assert res["status"] == "filled"
+    assert res["order_type"] == "market"
+    assert res["order_price"] == 0.998
+    assert calls == [("market", {"token_id": "yes-token", "side": "SELL", "amount": 1})]
+
+    _run(engine.dispose())
+
+
+def test_limit_sell_clamps_near_par_price_for_clob(tmp_path, monkeypatch):
+    engine, session_factory = _run(_setup_test_db(tmp_path, monkeypatch))
+    city = _run(_create_city(session_factory))
+    calls = []
+
+    async def seed():
+        async with session_factory() as session:
+            event = Event(city_id=city.id, date_et=city_local_date(city), status="ok")
+            session.add(event)
+            await session.flush()
+            bucket = Bucket(
+                event_id=event.id,
+                bucket_idx=9,
+                label="Will the highest temperature in Atlanta be between 74-75F?",
+                low_f=74.0,
+                high_f=75.0,
+                yes_token_id="yes-token",
+                no_token_id="no-token",
+                condition_id="cond-token",
+            )
+            session.add(bucket)
+            await session.flush()
+            session.add(Position(
+                bucket_id=bucket.id,
+                side="yes",
+                net_qty=5.0,
+                avg_cost=0.84,
+                entry_type="MANUAL",
+                entry_strategy="manual_scalp",
+            ))
+            session.add(Signal(
+                bucket_id=bucket.id,
+                model_prob=0.70,
+                mkt_prob=0.9985,
+                raw_edge=-0.2985,
+                exec_cost=0.02,
+                true_edge=-0.3185,
+                reason_json='{"raw_high":75.0}',
+            ))
+            session.add(MarketSnapshot(
+                bucket_id=bucket.id,
+                yes_bid=0.998,
+                yes_ask=0.0,
+                yes_mid=0.9985,
+                yes_bid_depth=140.0,
+                yes_ask_depth=0.0,
+                spread=0.0,
+            ))
+            await session.commit()
+            return bucket.id
+
+    class FakeClob:
+        can_trade = True
+
+        async def get_balance(self):
+            return 10.0
+
+        async def place_market_order(self, **kwargs):
+            calls.append(("market", kwargs))
+            return {"orderID": "market-order-1"}
+
+        async def place_limit_order(self, **kwargs):
+            calls.append(("limit", kwargs))
+            return {"orderID": "limit-order-1"}
+
+    import backend.execution.trader as trader_mod
+
+    async def fake_poll_for_fill(**kwargs):
+        return {"qty": kwargs["expected_size"], "price": kwargs["expected_price"]}
+
+    async def fake_erc1155_balance(*args, **kwargs):
+        return 10_000_000
+
+    bucket_id = _run(seed())
+    fake_clob = FakeClob()
+    monkeypatch.setattr("backend.ingestion.polymarket_clob.get_clob", lambda: fake_clob)
+    monkeypatch.setattr(trader_mod, "get_clob", lambda: fake_clob)
+    monkeypatch.setattr(trader_mod, "_poll_for_fill", fake_poll_for_fill)
+    monkeypatch.setattr("backend.execution.chain_utils.erc1155_balance", fake_erc1155_balance)
+    monkeypatch.setattr("backend.execution.chain_utils.get_wallet_address", lambda: "0xabc")
+
+    res = _run(api_routes.manual_trade(api_routes.ManualTradeRequest(
+        city_slug=city.city_slug,
+        bucket_id=bucket_id,
+        side="sell_yes",
+        qty=5,
+        order_type="limit",
+        limit_price=0.998,
+    ), actor="test"))
+
+    assert res["status"] == "filled"
+    assert calls == [("limit", {
+        "token_id": "yes-token",
+        "side": "SELL",
+        "size": 5,
+        "price": 0.99,
+    })]
+    assert res["reference_price"] == 0.998
+    assert res["order_price"] == 0.99
+    assert res["price_adjustment"]["reason"] == "clamped_to_clob_limit_range"
+    assert res["fill"]["price"] == 0.99
+
+    _run(engine.dispose())
+
+
 def test_manual_market_open_trade_sends_late_fill_alert_from_sync(tmp_path, monkeypatch):
     engine, session_factory = _run(_setup_test_db(tmp_path, monkeypatch))
     city = _run(_create_city(session_factory))
