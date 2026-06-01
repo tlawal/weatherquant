@@ -45,6 +45,7 @@ class SizingResult:
     position_cap: float
     liquidity_cap: float
     bankroll_remaining: float
+    kelly_source: str = "single_probability"
 
 
 def compute_size(
@@ -54,6 +55,7 @@ def compute_size(
     open_exposure: float,
     ask_depth: float,
     regime_multiplier: float = 1.0,
+    kelly_fraction_override: Optional[float] = None,
 ) -> SizingResult:
     """
     Compute position size using half-Kelly with hard caps.
@@ -86,17 +88,25 @@ def compute_size(
     # regimes (front passing, ensemble disagreement growing, active wx).
     # Clamped to [0.5, 1.0] in regime_kelly_multiplier; defensive clamp here too.
     rm = max(0.5, min(1.0, regime_multiplier))
-    kelly_f = calculate_kelly_fraction(
-        model_prob=model_prob,
-        yes_price=limit_price,
-        fractional_kelly=Config.KELLY_FRACTION * rm,
-        max_position_size=Config.MAX_POSITION_PCT,
-    )
+    if kelly_fraction_override is not None:
+        kelly_f = max(
+            0.0,
+            min(Config.MAX_POSITION_PCT, float(kelly_fraction_override) * rm),
+        )
+        kelly_source = "posterior_bma_component_median"
+    else:
+        kelly_f = calculate_kelly_fraction(
+            model_prob=model_prob,
+            yes_price=limit_price,
+            fractional_kelly=Config.KELLY_FRACTION * rm,
+            max_position_size=Config.MAX_POSITION_PCT,
+        )
+        kelly_source = "single_probability"
 
     if kelly_f <= 0:
         return _rejected(
             f"negative_kelly: f={kelly_f:.4f} (no positive edge in sizing)",
-            kelly_f, 0, 0, bankroll_remaining
+            kelly_f, 0, 0, bankroll_remaining, kelly_source=kelly_source,
         )
 
     # Note: calculate_kelly_fraction already applied Config.KELLY_FRACTION
@@ -139,10 +149,18 @@ def compute_size(
         position_cap=round(position_cap, 2),
         liquidity_cap=round(liquidity_cap, 2),
         bankroll_remaining=round(bankroll_remaining, 2),
+        kelly_source=kelly_source,
     )
 
 
-def _rejected(reason: str, kelly_f: float, kelly_size: float, position_cap: float, remaining: float) -> SizingResult:
+def _rejected(
+    reason: str,
+    kelly_f: float,
+    kelly_size: float,
+    position_cap: float,
+    remaining: float,
+    kelly_source: str = "single_probability",
+) -> SizingResult:
     log.warning("sizing: REJECTED — %s", reason)
     return SizingResult(
         size=0.0,
@@ -153,4 +171,5 @@ def _rejected(reason: str, kelly_f: float, kelly_size: float, position_cap: floa
         position_cap=round(position_cap, 2),
         liquidity_cap=0.0,
         bankroll_remaining=round(remaining, 2),
+        kelly_source=kelly_source,
     )

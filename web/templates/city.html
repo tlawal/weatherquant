@@ -1380,6 +1380,10 @@
           {{ bucket.bucket_label or ('Bucket ' ~ bucket.bucket_idx) }}
         </div>
         <div class="mt-1 flex items-center justify-between text-[10px]" style="color:var(--text-muted)">
+          <span>wallets long</span>
+          <span class="mono">{{ bucket.wallets_long|default(bucket.ranked_wallets_long) }}</span>
+        </div>
+        <div class="flex items-center justify-between text-[10px]" style="color:var(--text-muted)">
           <span>ranked long</span>
           <span class="mono">{{ bucket.ranked_wallets_long }}</span>
         </div>
@@ -1477,6 +1481,7 @@
                 <div class="mt-2 text-[10px] space-y-1" style="color:var(--text-muted)">
                   <div>Global score: <span class="mono">{{ "%.2f"|format(row.global_score or 0) }}</span></div>
                   <div>City score: <span class="mono">{% if row.city_score is not none %}{{ "%.2f"|format(row.city_score) }}{% else %}—{% endif %}</span></div>
+                  <div>Skill source: <span class="mono">{{ row.skill_source or ('ranked' if row.is_ranked else 'unscored') }}</span></div>
                   <div>Current volume: <span class="mono">${{ "%.0f"|format(row.volume_usd or 0) }} / {{ row.trade_count or 0 }} trades</span></div>
                   <div>ROI: <span class="mono">{% if row.roi is not none %}{{ "%+.1f"|format(row.roi * 100) }}%{% else %}—{% endif %}</span></div>
                   <div>Profit factor: <span class="mono">{{ row.profit_factor or '—' }}</span></div>

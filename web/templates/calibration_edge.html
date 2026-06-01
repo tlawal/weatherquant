@@ -11,8 +11,9 @@
         Alpha Dashboard
       </h1>
       <p class="text-sm mt-1" style="color:var(--text-muted)">
-        Brier(model) − Brier(market) over fixed pre-resolution checkpoints.
-        Provisional local scores use canonical settlement highs until Gamma confirms.
+        Brier(model) − Brier(market) plus CRPS distribution error over fixed
+        pre-resolution checkpoints. Provisional local scores use canonical
+        settlement highs until Gamma confirms.
       </p>
     </div>
     <form method="get" class="flex items-center gap-2 text-xs">
@@ -29,6 +30,7 @@
 
   <!-- ── Headline KPIs ───────────────────────────────────────────────────── -->
   {% set src = metrics.by_source %}
+  {% set crps_src = metrics.crps.by_source if metrics.crps is defined and metrics.crps.by_source is defined else {} %}
   {% set sig = metrics.promotion_signal %}
   {% set diag = metrics.diagnostics or {} %}
   {% set status_counts = metrics.settlement_status_counts or {} %}
@@ -52,6 +54,7 @@
       </div>
       <div class="text-[11px] mt-0.5" style="color:var(--text-muted)">
         Brier {{ "%.4f"|format(src.legacy.brier) if src.legacy.brier is not none else '—' }}
+        · CRPS {{ "%.2f"|format(crps_src.legacy.crps) if crps_src.legacy is defined and crps_src.legacy.crps is not none else '—' }}°F
       </div>
     </div>
     <div class="card p-4">
@@ -63,7 +66,9 @@
         {% else %}—{% endif %}
       </div>
       <div class="text-[11px] mt-0.5" style="color:var(--text-muted)">
-        Brier {{ "%.4f"|format(src.bma.brier) if src.bma.brier is not none else '—' }} (n={{ src.bma.n }})
+        Brier {{ "%.4f"|format(src.bma.brier) if src.bma.brier is not none else '—' }}
+        · CRPS {{ "%.2f"|format(crps_src.bma.crps) if crps_src.bma is defined and crps_src.bma.crps is not none else '—' }}°F
+        (n={{ src.bma.n }})
       </div>
     </div>
     <div class="card p-4">
@@ -74,12 +79,52 @@
       </div>
       <div class="text-[11px] mt-0.5" style="color:var(--text-muted)">
         {{ sig.consecutive_days_bma_wins }}d streak
+        {% if sig.bma_crps_better_than_legacy is defined %}
+          · CRPS {% if sig.bma_crps_better_than_legacy %}BMA{% else %}legacy{% endif %}
+        {% endif %}
         {% if sig.consecutive_days_bma_wins >= 14 %}
           <span class="font-semibold ml-1" style="color:var(--green)">▲ READY TO PROMOTE</span>
         {% endif %}
       </div>
     </div>
   </div>
+
+  <!-- ── Continuous Distribution Score ──────────────────────────────────── -->
+  {% if metrics.crps is defined %}
+  <div class="card p-4">
+    <div class="flex items-center justify-between gap-3 flex-wrap mb-3">
+      <div>
+        <h2 class="font-semibold text-sm">CRPS distribution accuracy</h2>
+        <p class="text-[11px] mt-1" style="color:var(--text-muted)">
+          Lower CRPS means the full temperature distribution was closer to the
+          resolved high. Market CRPS normalizes noon bucket prices into a
+          discrete distribution over bucket representatives.
+        </p>
+      </div>
+      <div class="text-[10px] mono" style="color:var(--text-muted)">
+        {{ metrics.crps.n_events|default(0) }} events
+      </div>
+    </div>
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+      {% for label, key, color in [("Legacy", "legacy", "var(--cyan)"), ("BMA shadow", "bma", "#FBBF24"), ("Market", "market", "var(--text-muted)")] %}
+      {% set r = metrics.crps.by_source[key] %}
+      <div class="panel rounded-lg p-3">
+        <div class="text-[10px] uppercase tracking-widest" style="color:{{ color }}">{{ label }}</div>
+        <div class="text-xl font-bold mono mt-1">
+          {% if r.crps is not none %}{{ "%.3f"|format(r.crps) }}°F{% else %}—{% endif %}
+        </div>
+        <div class="text-[11px] mt-0.5" style="color:var(--text-muted)">
+          {% if key != "market" and r.edge_cdeg is not none %}
+            edge {{ "%+.1f"|format(r.edge_cdeg) }} cdeg vs market
+          {% else %}
+            n={{ r.n }}
+          {% endif %}
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
 
   <!-- ── Scoring Diagnostics ─────────────────────────────────────────────── -->
   <div class="card p-4">

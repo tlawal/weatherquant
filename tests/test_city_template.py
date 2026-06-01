@@ -59,6 +59,8 @@ def test_wallet_leaderboard_disclaimer_is_read_only():
     assert "Exposure rows" in template
     assert "Skill rows" in template
     assert "Last refresh" in template
+    assert "wallets long" in template
+    assert "Skill source" in template
     assert "Wallet leaderboard is read-only public-market analytics" in template
     assert "does not trigger automated trades" in template
     assert "No wallet trades have been stored for this city/date yet." in template

@@ -20,9 +20,15 @@ from backend.modeling.edge_metrics import (
     BPS,
     DEFAULT_MIN_N_BUCKETS,
     _aggregate,
+    _aggregate_crps,
     _BucketScore,
+    _bma_mixture_crps,
     _consecutive_days_bma_wins,
+    _DistributionScore,
+    _discrete_crps,
+    _normal_crps,
     _score_event,
+    _score_distribution_event,
     compute_edge_metrics,
 )
 from backend.storage.models import (
@@ -176,6 +182,98 @@ def test_aggregate_bps_rounds_to_one_decimal():
     assert out["legacy"]["edge_bps"] == pytest.approx(-1100.0, abs=0.1)
 
 
+# ───────────────────── CRPS helpers ─────────────────────────────────────────
+
+def test_normal_crps_closed_form_is_low_when_observed_near_mu():
+    centered = _normal_crps(80.0, 2.0, 80.0)
+    missed = _normal_crps(80.0, 2.0, 86.0)
+
+    assert centered == pytest.approx(2.0 * (2.0 / math.sqrt(2.0 * math.pi) - 1.0 / math.sqrt(math.pi)))
+    assert missed > centered
+
+
+def test_bma_mixture_crps_matches_single_normal_component():
+    components = [{"mu": 82.0, "sigma": 2.5, "weight": 1.0}]
+
+    assert _bma_mixture_crps(components, 83.0) == pytest.approx(
+        _normal_crps(82.0, 2.5, 83.0)
+    )
+
+
+def test_discrete_crps_rewards_mass_near_realized_high():
+    reps = {0: 80.0, 1: 84.0, 2: 88.0}
+    good = _discrete_crps({0: 0.05, 1: 0.85, 2: 0.10}, reps, 84.0)
+    bad = _discrete_crps({0: 0.85, 1: 0.10, 2: 0.05}, reps, 84.0)
+
+    assert good < bad
+
+
+def test_score_distribution_event_scores_legacy_bma_and_market():
+    event = {
+        "id": 7,
+        "city_slug": "atlanta",
+        "date_et": "2026-05-30",
+        "buckets": [
+            {"bucket_idx": 0, "low_f": None, "high_f": 81.0},
+            {"bucket_idx": 1, "low_f": 82.0, "high_f": 83.0},
+            {"bucket_idx": 2, "low_f": 84.0, "high_f": None},
+        ],
+        "settlement_status": "provisional_local",
+        "score_checkpoint_utc": "2026-05-30T16:00:00+00:00",
+    }
+    score = _score_distribution_event(
+        event=event,
+        legacy_mu=82.0,
+        legacy_sigma=2.0,
+        bma_shadow={
+            "between_share": 0.25,
+            "components": [
+                {"mu": 82.0, "sigma": 1.8, "weight": 0.7},
+                {"mu": 85.0, "sigma": 2.2, "weight": 0.3},
+            ],
+        },
+        market_by_bucket={0: 0.10, 1: 0.60, 2: 0.30},
+        resolved_high_f=83.0,
+    )
+
+    assert score.event_id == 7
+    assert score.settlement_status == "provisional_local"
+    assert score.legacy_crps is not None
+    assert score.bma_crps is not None
+    assert score.market_crps is not None
+    assert score.bma_between_share == pytest.approx(0.25)
+
+
+def test_aggregate_crps_reports_edge_in_centi_degrees():
+    scores = [
+        _DistributionScore(
+            event_id=1,
+            city_slug="x",
+            date_et="2026-05-30",
+            resolved_high_f=83.0,
+            legacy_crps=0.8,
+            bma_crps=0.6,
+            market_crps=1.1,
+        ),
+        _DistributionScore(
+            event_id=2,
+            city_slug="x",
+            date_et="2026-05-31",
+            resolved_high_f=84.0,
+            legacy_crps=1.0,
+            bma_crps=0.9,
+            market_crps=1.2,
+        ),
+    ]
+
+    out = _aggregate_crps(scores)
+    assert out["legacy"]["crps"] == pytest.approx(0.9)
+    assert out["bma"]["crps"] == pytest.approx(0.75)
+    assert out["market"]["crps"] == pytest.approx(1.15)
+    assert out["legacy"]["edge_cdeg"] == pytest.approx(25.0)
+    assert out["bma"]["edge_cdeg"] == pytest.approx(40.0)
+
+
 # ───────────────────── _consecutive_days_bma_wins ───────────────────────────
 
 def test_streak_counts_only_most_recent_consecutive_wins():
@@ -305,7 +403,18 @@ async def _seed_scored_event(session, *, date_et: str, resolved: bool = False):
         mu=80.0,
         sigma=2.0,
         probs_json=json.dumps([0.10, 0.20, 0.30, 0.40]),
-        inputs_json=json.dumps({"bma_shadow": {"probs": [0.05, 0.15, 0.25, 0.55]}}),
+        inputs_json=json.dumps({
+            "bma_shadow": {
+                "mean": 80.4,
+                "sigma": 2.1,
+                "between_share": 0.2,
+                "probs": [0.05, 0.15, 0.25, 0.55],
+                "components": [
+                    {"source": "hrrr", "mu": 80.2, "sigma": 1.9, "weight": 0.6},
+                    {"source": "nws", "mu": 80.8, "sigma": 2.4, "weight": 0.4},
+                ],
+            }
+        }),
     ))
     session.add(ModelSnapshot(
         event_id=event.id,
@@ -353,7 +462,9 @@ def test_compute_edge_metrics_with_no_resolved_events_returns_empty_safe(monkeyp
     assert out["by_day"] == []
     assert out["by_city"] == {}
     assert out["promotion_signal"]["bma_better_than_legacy"] is False
+    assert out["promotion_signal"]["bma_crps_better_than_legacy"] is False
     assert out["promotion_signal"]["consecutive_days_bma_wins"] == 0
+    assert out["crps"]["by_source"]["legacy"]["crps"] is None
 
 
 def test_compute_edge_metrics_scores_provisional_local_settlements(tmp_path):
@@ -370,6 +481,11 @@ def test_compute_edge_metrics_scores_provisional_local_settlements(tmp_path):
                 # Uses the noon pre-resolution snapshot, not the later near-perfect
                 # post-resolution snapshot.
                 assert out["by_source"]["legacy"]["brier"] == pytest.approx(0.125)
+                assert out["crps"]["n_events"] == 1
+                assert out["crps"]["by_source"]["legacy"]["crps"] is not None
+                assert out["crps"]["by_source"]["bma"]["crps"] is not None
+                assert out["crps"]["by_source"]["market"]["crps"] is not None
+                assert out["promotion_signal"]["bma_crps_better_than_legacy"] in (True, False)
         finally:
             await engine.dispose()
 

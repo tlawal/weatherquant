@@ -39,8 +39,9 @@ from typing import Optional
 from scipy.stats import norm
 
 
-# Minimum number of residual observations before we trust a per-source σ
-# estimate from SourceLeadTimeSkill. Below this we fall back to a wider prior.
+# Minimum number of residual observations before we fully trust a per-source σ
+# estimate from SourceLeadTimeSkill. Below this we shrink the observed MAE
+# toward the wider prior instead of discarding it entirely.
 BMA_MIN_N_FOR_SIGMA = 30
 
 # Cold-start prior σ when no per-source skill data exists yet (°F).
@@ -239,8 +240,9 @@ def build_bma_predictive(
             We use σᵢ = MAE directly — slightly conservative for Gaussian, but
             BMA is robust to small misspecification of within-source σ once
             mixture variance is dominated by the between-source term.
-        lead_skill_n_obs_by_source: {source: n}. Sources with n < BMA_MIN_N_FOR_SIGMA
-            fall back to BMA_PRIOR_SIGMA_F.
+        lead_skill_n_obs_by_source: {source: n}. Sources with 0 < n <
+            BMA_MIN_N_FOR_SIGMA use empirical-Bayes shrinkage toward
+            BMA_PRIOR_SIGMA_F; n >= BMA_MIN_N_FOR_SIGMA uses MAE directly.
         sigma_unit_mult: 1.0 for °F outputs, 5/9 for °C. Applied to the prior σ
             and floor; MAE values are already in display units from the caller.
         fitted_weights_by_source: optional EM-fit weights from BMAWeights
@@ -273,13 +275,24 @@ def build_bma_predictive(
 
         mae = mae_map.get(src)
         n = int(n_map.get(src, 0))
-        if mae is not None and n >= BMA_MIN_N_FOR_SIGMA and mae > 0:
+        if mae is not None and mae > 0 and n >= BMA_MIN_N_FOR_SIGMA:
             sigma = float(mae)
+        elif mae is not None and mae > 0 and n > 0:
+            prior_sigma = BMA_PRIOR_SIGMA_F * sigma_unit_mult
+            confidence = min(1.0, n / BMA_MIN_N_FOR_SIGMA)
+            sigma = (1.0 - confidence) * prior_sigma + confidence * float(mae)
+            fallback_used = True
+            notes.append(
+                f"{src}: n={n}<{BMA_MIN_N_FOR_SIGMA}, "
+                f"σ=shrinkage({sigma:.2f}; prior={prior_sigma:.2f}, mae={float(mae):.2f})"
+            )
         else:
             sigma = BMA_PRIOR_SIGMA_F * sigma_unit_mult
             fallback_used = True
             if mae is None:
                 notes.append(f"{src}: no SourceLeadTimeSkill row, σ=prior")
+            elif n <= 0:
+                notes.append(f"{src}: n=0, σ=prior")
             elif n < BMA_MIN_N_FOR_SIGMA:
                 notes.append(f"{src}: n={n}<{BMA_MIN_N_FOR_SIGMA}, σ=prior")
 

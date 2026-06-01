@@ -204,6 +204,101 @@ def test_compute_model_includes_hrrr_15min_source(monkeypatch):
     assert model.inputs["sources_used"] == ["hrrr_15min"]
 
 
+def test_hrrr_15min_companion_outlier_is_quarantined(monkeypatch):
+    """Atlanta regression: HRRR-15m can stale/cold-spike away from parent HRRR.
+
+    When regular HRRR is available, the 15-minute companion should not pull the
+    live distribution several degrees colder unless it stays near the parent.
+    """
+    monkeypatch.setattr(temperature_model, "datetime", _MorningDateTime)
+
+    model = compute_model(
+        nws_high=86.0,
+        wu_hourly_peak=86.0,
+        daily_high_metar=None,
+        current_temp_f=70.0,
+        calibration={
+            "station_source_weights": {
+                "nws": 0.16,
+                "wu_hourly": 0.12,
+                "hrrr": 0.22,
+                "hrrr_15min": 0.20,
+                "nbm": 0.15,
+                "ecmwf_ifs": 0.15,
+            },
+            "station_source_biases": {},
+        },
+        buckets=[
+            (None, 81.0),
+            (82.0, 83.0),
+            (84.0, 85.0),
+            (86.0, 87.0),
+            (88.0, None),
+        ],
+        forecast_quality="ok",
+        unit="F",
+        city_tz="America/New_York",
+        hrrr_high=85.4,
+        hrrr_15min_high=79.5,
+        nbm_high=84.1,
+        ecmwf_ifs_high=83.8,
+        ecmwf_aifs_high=82.0,
+    )
+
+    assert model is not None
+    assert "hrrr_15min" not in model.inputs["sources_used"]
+    assert model.inputs["excluded_sources"]["hrrr_15min"] == "companion_divergence_vs_hrrr"
+    gate = model.inputs["source_quality_gates"]["hrrr_15min"]
+    assert gate["reference_source"] == "hrrr"
+    assert gate["delta"] == pytest.approx(5.9)
+    assert model.inputs["raw_spread"] >= 6.5
+    assert model.inputs["mu_forecast"] > 84.0
+
+
+def test_no_intraday_observation_disables_late_day_metar_weight(monkeypatch):
+    """Future-date regression: late-night render without event-date METAR should
+    not inherit the 20:00-24:00 same-day observation weight."""
+
+    class _NightDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            fixed = cls(2026, 6, 1, 21, 0, tzinfo=ZoneInfo("America/New_York"))
+            return fixed.astimezone(tz) if tz else fixed
+
+    monkeypatch.setattr(temperature_model, "datetime", _NightDateTime)
+
+    model = compute_model(
+        nws_high=86.0,
+        wu_hourly_peak=86.0,
+        daily_high_metar=None,
+        current_temp_f=None,
+        observed_high=None,
+        calibration=None,
+        buckets=[
+            (None, 81.0),
+            (82.0, 83.0),
+            (84.0, 85.0),
+            (86.0, 87.0),
+            (88.0, None),
+        ],
+        forecast_quality="ok",
+        unit="F",
+        city_tz="America/New_York",
+        hrrr_high=85.4,
+        hrrr_15min_high=85.2,
+        nbm_high=84.1,
+        ecmwf_ifs_high=83.8,
+    )
+
+    assert model is not None
+    assert model.inputs["w_metar_base"] == pytest.approx(0.85)
+    assert model.inputs["w_metar"] == pytest.approx(0.0)
+    assert model.inputs["w_metar_gate"] == "no_intraday_observation"
+    assert model.inputs["metar_projection_gate"] == "no_intraday_observation"
+    assert model.mu == pytest.approx(model.inputs["mu_forecast"])
+    assert model.sigma == pytest.approx(model.inputs["sigma_raw"])
+
+
 def test_stale_unproven_ai_sources_do_not_create_cold_tail(monkeypatch):
     """Atlanta-like regression: local consensus near 80°F should not place
     ~30% mass below 75°F just because thin/stale AI sources are cooler."""

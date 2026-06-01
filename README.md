@@ -1,6 +1,6 @@
 # WeatherQuant
 
-Quantitative trading system for daily-high-temperature prediction markets on Polymarket. Fuses **10** numerical and AI weather models, a per-minute METAR nowcast, and a Bayesian-mixture predictive distribution (with offline + online EM weight updates) into bucket-level edge signals; sizes positions via Kelly; executes through Polymarket CLOB v2 with a tiered exit cascade. Independent LLM **Market Context Agent** runs alongside with a 10-source encyclopedia + adversarial reasoning. Real-time **alpha-vs-market** dashboard at `/calibration/edge` measures Brier(model) − Brier(market) for promotion decisions.
+Quantitative trading system for daily-high-temperature prediction markets on Polymarket. Fuses **10** numerical and AI weather models, a per-minute METAR nowcast, and a Bayesian-mixture predictive distribution (with offline + online EM weight updates) into bucket-level edge signals; sizes positions via Kelly; executes through Polymarket CLOB v2 with a tiered exit cascade. Independent LLM **Market Context Agent** runs alongside with a 10-source encyclopedia + adversarial reasoning. Real-time **alpha-vs-market** dashboard at `/calibration/edge` measures Brier(model) − Brier(market) and CRPS distribution error for promotion decisions.
 
 ---
 
@@ -71,12 +71,12 @@ The system's competitive edge is **per-station ensemble post-processing of a 10-
 | **Intraday threshold shadow model** | **Deterministic threshold-crossing probabilities with monotone survival-to-bucket conversion, shadow-only** | **✓ live (shadow)** |
 | **OBS_PROXIMITY exit layer** | **Pre-observation profit protection for fragile buckets near scheduled station observations, with UI controls in strategies page** | **✓ live** |
 | **Wallet tracker read-only analytics** | **Public Polymarket wallet analytics with scoring, strategy inference, leaderboard, and Smart Money vs Model divergence** | **✓ live (disabled by default)** |
-| **Alpha dashboard** | **`/calibration/edge` — Brier(model) − Brier(market), per-city/per-day, plus chip on `/` and card on `/redemptions`** | **✓ live** |
+| **Alpha dashboard** | **`/calibration/edge` — Brier(model) − Brier(market) plus CRPS distribution error, per-city/per-day, plus chip on `/` and card on `/redemptions`** | **✓ live** |
 | **Market Context Agent rewrite** | **10-source encyclopedia, calibration MAE per source, adversarial reasoning + trigger conditions sections** | **✓ live** |
 | **AIWP probe** | **Weekly check of NOAA S3 for new AI weather model prefixes (FCN3 watch). One-line integration when detected.** | **✓ live** |
 | M1 BMA promotion | Swap `mu/sigma/probs` to drive trades after ≥14d CRPS comparison | **gated on data** (need ~14 settled days post-deploy) |
-| **CRPS comparator** | Add CRPS computation alongside Brier in `/calibration/edge` | **next (~150 LOC)** |
-| **M5 — posterior-aware Kelly** | Sample 1000 draws from BMA mixture per bucket, take median Kelly | next (~80 LOC) |
+| **CRPS comparator** | Continuous ranked probability score alongside Brier in `/calibration/edge` | **✓ live** |
+| **M5 — posterior-aware Kelly** | Component-level BMA Kelly distribution; auto-sizing uses conservative weighted-median component Kelly | **✓ live** |
 | **M7 — reliability-driven gate** | Daily-miscalibration kill switch (Bröcker & Smith 2007) | queued — needs 30d data first |
 | **M3 — NIG conjugate σ + bias updates** | Online closed-form Bayesian replaces nightly EWMA | queued (~150 LOC) |
 | **Dynamic exits** | Time-decay, vol-aware sizing, regime-conditional trailing stops, slippage modeling | queued (~150 LOC) |
@@ -198,7 +198,7 @@ Per-station rolling 30-day MAE/bias/RMSE, refreshed every 6h (`job_refresh_stati
 
 Sortable analytics + Leaflet station-health map at `/calibration`.
 
-The complementary **Lead-Time Skill** table (`SourceLeadTimeSkill`) is refreshed on its own 6h job. It tracks `MAE_f` and `bias_f` per `(city, source, lead_bucket)` ∈ {0, 1, 3, 6, 12, 18, 24, 36, 48, 72h}. Surfaced on city pages and used as the σᵢ prior for BMA when `n_obs ≥ 30`.
+The complementary **Lead-Time Skill** table (`SourceLeadTimeSkill`) is refreshed on its own 6h job. It tracks `MAE_f` and `bias_f` per `(city, source, lead_bucket)` ∈ {0, 1, 3, 6, 12, 18, 24, 36, 48, 72h}. Surfaced on city pages and used immediately with empirical-Bayes shrinkage: `0 < n_obs < 30` partially blends observed MAE into BMA σᵢ and source-weight factors, while `n_obs ≥ 30` uses the lead-bucket MAE at full strength.
 
 ---
 

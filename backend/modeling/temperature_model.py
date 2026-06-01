@@ -185,6 +185,7 @@ _GENERAL_OUTLIER_THRESHOLD_F = 10.0
 _AI_OUTLIER_THRESHOLD_F = 6.0
 _AI_OUTLIER_MIN_STATION_SAMPLES = 30
 _AI_OUTLIER_MAX_STATION_MAE_F = 4.0
+_HRRR_15MIN_PARENT_MAX_DELTA_F = 4.0
 _SAME_DAY_TIGHT_SPREAD_CAP_F = 2.5
 _SAME_DAY_TIGHT_SIGMA_CAP_F = 2.75
 _SAME_DAY_STATION_SIGMA_MIN_SAMPLES = 5
@@ -197,6 +198,7 @@ _LEAD_SKILL_CLAMP = (0.7, 1.3)
 _FRESHNESS_FLOOR = 0.5
 # Minimum n_obs in a SourceLeadTimeSkill bucket before we trust its MAE.
 _LEAD_SKILL_MIN_N_OBS = 30
+_LEAD_SKILL_PRIOR_SIGMA_F = 3.0
 
 
 def _lead_time_sigma_growth(
@@ -234,6 +236,49 @@ def _lead_time_sigma_growth(
     if median_lead <= 72.0:
         sigma_f = min(sigma_f, 3.5)
     return sigma_f * unit_mult
+
+
+def _lead_skill_sigma(
+    mae_by_source: Optional[dict[str, float]],
+    n_obs_by_source: Optional[dict[str, int]],
+    weights_by_source: dict[str, float],
+    unit_mult: float,
+) -> Optional[float]:
+    """Empirical-Bayes residual sigma from lead-time skill rows.
+
+    This is the legacy single-Gaussian analogue of BMA's per-component sigma:
+    use each source's lead-bucket MAE immediately, but shrink it toward a
+    3°F prior until the bucket reaches the mature n=30 threshold.
+    """
+    mae_map = mae_by_source or {}
+    n_map = n_obs_by_source or {}
+    rows: list[tuple[float, float]] = []
+    prior = _LEAD_SKILL_PRIOR_SIGMA_F * unit_mult
+    for src, mae in mae_map.items():
+        try:
+            mae_f = float(mae)
+        except (TypeError, ValueError):
+            continue
+        if mae_f <= 0:
+            continue
+        try:
+            n = int(n_map.get(src, 0) or 0)
+        except (TypeError, ValueError):
+            n = 0
+        if n <= 0:
+            continue
+        weight = float(weights_by_source.get(src, 0.0) or 0.0)
+        if weight <= 0:
+            continue
+        confidence = min(1.0, n / _LEAD_SKILL_MIN_N_OBS)
+        shrunk_sigma = (1.0 - confidence) * prior + confidence * mae_f
+        rows.append((shrunk_sigma, weight))
+    if len(rows) < 2:
+        return None
+    total_w = sum(w for _, w in rows)
+    if total_w <= 0:
+        return None
+    return max(1.0 * unit_mult, sum(sigma * w for sigma, w in rows) / total_w)
 
 
 def _spread_or_none(values) -> Optional[float]:
@@ -299,8 +344,24 @@ def apply_forecast_source_quality_gates(
 
     ref = float(statistics.median(trusted_refs))
     gates: dict[str, dict] = {}
+    if "hrrr_15min" in clean_values and "hrrr" in clean_values:
+        parent = clean_values["hrrr"]
+        val = clean_values["hrrr_15min"]
+        threshold = _HRRR_15MIN_PARENT_MAX_DELTA_F * unit_mult
+        delta = abs(val - parent)
+        if delta > threshold:
+            gates["hrrr_15min"] = {
+                "reason": "companion_divergence_vs_hrrr",
+                "value": round(val, 2),
+                "reference_source": "hrrr",
+                "reference": round(parent, 2),
+                "delta": round(delta, 2),
+                "threshold": round(threshold, 2),
+            }
     live_values: dict[str, float] = {}
     for src, val in clean_values.items():
+        if src in gates:
+            continue
         threshold = _GENERAL_OUTLIER_THRESHOLD_F * unit_mult
         if (
             src in _AI_FORECAST_SOURCES
@@ -365,15 +426,16 @@ def _lead_skill_factors(
 ) -> dict[str, float]:
     """Per-source weight multiplier from lead-time MAE skill (clamped ±30%).
 
-    For each source with sufficient evidence (n_obs >= threshold and mae > 0),
-    multiplier = clamp(median_mae / mae, 0.7, 1.3). Sources with thin or
-    missing data get 1.0 (no adjustment) and are excluded from the median.
+    For each source with evidence, multiplier = clamp(median_mae / mae, 0.7,
+    1.3). Thin but nonzero data gets an empirical-Bayes partial adjustment:
+    factor = 1 + confidence * (raw_factor - 1), confidence = n / threshold.
+    Missing/zero-n data gets 1.0 and is excluded from the median.
     Need at least 2 sources with valid evidence to compute a meaningful median.
     """
     n_obs = n_obs_by_source or {}
     valid = {
         s: m for s, m in mae_by_source.items()
-        if m is not None and m > 0 and n_obs.get(s, 0) >= _LEAD_SKILL_MIN_N_OBS
+        if m is not None and m > 0 and n_obs.get(s, 0) > 0
     }
     if len(valid) < 2:
         return {s: 1.0 for s in mae_by_source}
@@ -383,7 +445,9 @@ def _lead_skill_factors(
         m = mae_by_source.get(s)
         if s in valid and median_mae > 0:
             ratio = median_mae / m
-            out[s] = max(_LEAD_SKILL_CLAMP[0], min(_LEAD_SKILL_CLAMP[1], ratio))
+            raw_factor = max(_LEAD_SKILL_CLAMP[0], min(_LEAD_SKILL_CLAMP[1], ratio))
+            confidence = min(1.0, max(0, int(n_obs.get(s, 0))) / _LEAD_SKILL_MIN_N_OBS)
+            out[s] = 1.0 + confidence * (raw_factor - 1.0)
         else:
             out[s] = 1.0
     return out
@@ -1039,9 +1103,20 @@ def compute_model(
         src: ts for src, ts in (model_run_at_by_source or {}).items()
         if src in calibrated
     }
-    sigma_lead = _lead_time_sigma_growth(
+    live_weights_by_source = {
+        src: weight for src, (_, weight) in calibrated.items()
+    }
+    sigma_lead_skill = _lead_skill_sigma(
+        lead_skill_mae_by_source,
+        lead_skill_n_obs_by_source,
+        live_weights_by_source,
+        unit_mult,
+    )
+    sigma_lead_generic = _lead_time_sigma_growth(
         live_model_run_at_by_source, event_settlement_utc, unit_mult,
     )
+    sigma_lead_source = "lead_skill_shrinkage" if sigma_lead_skill is not None else "generic_lead_growth"
+    sigma_lead = sigma_lead_skill if sigma_lead_skill is not None else sigma_lead_generic
     if sigma_lead > 0.0:
         sigma_raw = math.sqrt(sigma_raw * sigma_raw + sigma_lead * sigma_lead)
 
@@ -1074,7 +1149,20 @@ def compute_model(
         )
 
     # ── METAR intraday adjustment ──────────────────────────────────────────────
-    w_metar = _metar_weight(hour_local)
+    w_metar_base = _metar_weight(hour_local)
+    w_metar = w_metar_base
+    w_metar_gate: Optional[str] = None
+    has_intraday_observation = (
+        daily_high_metar is not None
+        or observed_high is not None
+        or current_temp_f is not None
+    )
+    if not has_intraday_observation:
+        # Next-day/future market pages can render late at night with no station
+        # observation for the event date. Do not let clock time alone tighten
+        # sigma toward a same-day METAR projection that does not exist.
+        w_metar = 0.0
+        w_metar_gate = "no_intraday_observation"
 
     # Use ML-based remaining rise prediction if features are available
     _ml = ml_features or {}
@@ -1199,7 +1287,7 @@ def compute_model(
         w_metar *= (1.0 - penalty * 0.50)
         log.debug(
             "model: divergence penalty %.1f°F → w_metar %.3f → %.3f",
-            divergence_f, _metar_weight(hour_local), w_metar,
+            divergence_f, w_metar_base, w_metar,
         )
 
     # ── Observation-density gating ────────────────────────────────────────────
@@ -1215,7 +1303,7 @@ def compute_model(
                 n_obs, density_factor, w_metar,
             )
 
-    metar_projection_gate: Optional[str] = None
+    metar_projection_gate: Optional[str] = w_metar_gate
     projected_high_for_blend = projected_high
     projected_high_raw = projected_high
     fallback_peak_hour_local = None
@@ -1474,7 +1562,8 @@ def compute_model(
         "metar_projection_gate": metar_projection_gate,
         "metar_forecast_divergence_f": round(divergence_f, 2),
         "w_metar": float(w_metar),
-        "w_metar_base": float(_metar_weight(hour_local)),
+        "w_metar_base": float(w_metar_base),
+        "w_metar_gate": w_metar_gate,
         "remaining_rise": remaining_rise,
         "hour_local": hour_local,
         "spread": float(trusted_spread),
@@ -1483,6 +1572,9 @@ def compute_model(
         "trusted_reference_median": source_quality.get("trusted_reference_median"),
         "source_quality_gates": source_quality_gates,
         "sigma_raw": float(sigma_raw),
+        "sigma_lead": float(sigma_lead) if sigma_lead else 0.0,
+        "sigma_lead_source": sigma_lead_source if sigma_lead else None,
+        "sigma_lead_generic": float(sigma_lead_generic) if sigma_lead_generic else 0.0,
         "same_day_sigma_cap_applied": same_day_sigma_cap_applied,
         "same_day_sigma_cap_f": same_day_sigma_cap_value,
         "same_day_sigma_cap_source": same_day_sigma_cap_source,

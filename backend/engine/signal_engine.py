@@ -35,6 +35,7 @@ from backend.modeling.regime import (
     regime_sigma_inflation,
 )
 from backend.strategy.kelly import calculate_ev_per_share
+from backend.strategy.posterior_kelly import posterior_aware_kelly
 from backend.storage.db import get_session
 from backend.storage.models import Bucket, Event, City
 from backend.storage.repos import (
@@ -867,6 +868,24 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
                 if mkt_snap.yes_bid is not None
                 else None
             )
+            posterior_kelly_payload = None
+            try:
+                pk = posterior_aware_kelly(
+                    bma_shadow=model.inputs.get("bma_shadow"),
+                    low_f=bucket.low_f,
+                    high_f=bucket.high_f,
+                    yes_price=mkt_snap.yes_ask or mkt_prob,
+                    fractional_kelly=Config.KELLY_FRACTION,
+                    max_position_size=Config.MAX_POSITION_PCT,
+                )
+                if pk is not None:
+                    posterior_kelly_payload = {
+                        **pk.to_dict(),
+                        "sizing_price": float(round(mkt_snap.yes_ask or mkt_prob, 4)),
+                        "source": "bma_component_weighted_median",
+                    }
+            except Exception:
+                log.debug("signal: posterior Kelly failed for bucket %s", bucket.id, exc_info=True)
 
             reason = {
                 **model.inputs,
@@ -880,6 +899,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
                 "true_edge": float(round(true_edge, 4)),
                 "ev_per_share": float(round(ev_per_share, 6)),
                 "ev_at_bid": (float(round(ev_at_bid, 6)) if ev_at_bid is not None else None),
+                "posterior_kelly": posterior_kelly_payload,
                 "spread": spread,
                 "ask_depth": ask_depth,
                 "city_state": city_state,
@@ -900,6 +920,11 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
             }
 
             gate_failures: list[str] = []
+            if (
+                posterior_kelly_payload is not None
+                and posterior_kelly_payload.get("conservative_kelly_f", 0.0) <= 0.0
+            ):
+                gate_failures.append("posterior_kelly_no_size")
             trusted_ref = model.inputs.get("trusted_reference_median")
             market_sanity_gate = None
             try:

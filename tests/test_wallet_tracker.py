@@ -582,6 +582,58 @@ def test_weather_smart_money_payload_returns_current_global_city_rows(tmp_path, 
     _run(engine.dispose())
 
 
+def test_weather_smart_money_payload_shows_unscored_current_exposures(tmp_path, monkeypatch):
+    engine, session_factory = _run(_setup_test_db(tmp_path, monkeypatch))
+    monkeypatch.setattr(Config, "WALLET_TRACKER_ENABLED", True, raising=False)
+    ts = datetime.now(timezone.utc) - timedelta(minutes=12)
+    wallet = "0x9999999999999999999999999999999999999999"
+
+    async def run_test():
+        async with session_factory() as session:
+            await upsert_wallet_market_exposure(
+                session,
+                wallet_address=wallet,
+                city_slug="atlanta",
+                date="2026-05-16",
+                market_slug="atlanta-high",
+                condition_id="cond-a",
+                bucket_idx=2,
+                bucket_label="88-89F",
+                net_position_qty=30.0,
+                net_notional_usd=18.0,
+                trade_count=1,
+                volume_usd=18.0,
+                avg_entry_price=0.6,
+                realized_pnl=0.0,
+                unrealized_pnl=2.0,
+                last_trade_ts=ts,
+                last_updated_ts=ts,
+            )
+
+        payload = await get_weather_smart_money_payload(
+            "atlanta",
+            "2026-05-16",
+            buckets=[
+                {"bucket_idx": 1, "label": "86-87F", "model_prob": 0.25},
+                {"bucket_idx": 2, "label": "88-89F", "model_prob": 0.55},
+            ],
+            limit=50,
+        )
+
+        assert payload["status"] == "ok"
+        assert payload["current_source"] == "wallet_market_exposures"
+        assert payload["current_market"][0]["wallet_address"] == wallet
+        assert payload["current_market"][0]["is_ranked"] is False
+        assert payload["current_market"][0]["skill_source"] == "unscored_current_exposure"
+        assert payload["bucket_consensus"][1]["wallets_long"] == 1
+        assert payload["bucket_consensus"][1]["ranked_wallets_long"] == 0
+        assert payload["confluence"]["status"] == "unavailable"
+        assert payload["confluence"]["reason"] == "no_ranked_wallet_flow"
+
+    _run(run_test())
+    _run(engine.dispose())
+
+
 def test_wallet_leaderboard_with_buckets_uses_wallet_stats_fallback(tmp_path, monkeypatch):
     engine, session_factory = _run(_setup_test_db(tmp_path, monkeypatch))
     monkeypatch.setattr(Config, "WALLET_TRACKER_ENABLED", True, raising=False)

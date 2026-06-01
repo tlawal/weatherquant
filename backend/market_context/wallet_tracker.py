@@ -337,8 +337,9 @@ class PolymarketDataApiTradeAdapter:
                         "market": ",".join(chunk),
                         "limit": str(page_size),
                         "offset": str(page_offset),
-                        "takerOnly": "true",
                     }
+                    if Config.WALLET_TRACKER_TAKER_ONLY:
+                        params["takerOnly"] = "true"
                     url = f"{DATA_API}/trades"
                     log.info(
                         "wallet_tracker: fetching public trades markets=%d page_offset=%d page_size=%d",
@@ -1186,17 +1187,28 @@ def serialize_current_exposure_row(
     truncate_addresses: bool = True,
     now: datetime | None = None,
 ) -> dict[str, Any] | None:
-    if global_skill is None:
-        return None
-    global_score = float(getattr(global_skill, "adjusted_score", 0.0) or 0.0)
-    if global_score < Config.WALLET_TRACKER_MIN_ADJUSTED_SCORE:
-        return None
+    has_global_skill = global_skill is not None
+    global_score = (
+        float(getattr(global_skill, "adjusted_score", 0.0) or 0.0)
+        if has_global_skill else 0.0
+    )
+    is_ranked = has_global_skill and global_score >= Config.WALLET_TRACKER_MIN_ADJUSTED_SCORE
     city_score = float(getattr(city_skill, "adjusted_score", 0.0) or 0.0) if city_skill else 0.75
     net_notional = float(getattr(exposure, "net_notional_usd", 0.0) or 0.0)
     net_qty = float(getattr(exposure, "net_position_qty", 0.0) or 0.0)
+    if abs(net_notional) <= 1e-9 and abs(net_qty) <= 1e-9:
+        return None
     last_trade_ts = getattr(exposure, "last_trade_ts", None)
     recency = _recency_weight(last_trade_ts, now=now)
-    alpha_score = round(global_score * city_score * _notional_weight(net_notional) * recency, 4)
+    if is_ranked:
+        alpha_score = global_score * city_score * _notional_weight(net_notional) * recency
+        skill_source = "wallet_skill_scores"
+    else:
+        # Show live positioning even before skill is mature, but keep the
+        # alpha score deliberately small so unproven wallets do not dominate
+        # smart-money/model confluence.
+        alpha_score = 0.05 * _notional_weight(net_notional) * recency
+        skill_source = "unscored_current_exposure"
     address = str(getattr(exposure, "wallet_address", "") or "").lower()
     if isinstance(last_trade_ts, datetime):
         if last_trade_ts.tzinfo is None:
@@ -1214,14 +1226,16 @@ def serialize_current_exposure_row(
         "profile_url": wallet_profile_url(address),
         "global_rank": getattr(global_skill, "rank", None),
         "city_rank": getattr(city_skill, "rank", None) if city_skill else None,
-        "global_score": global_score,
+        "global_score": global_score if has_global_skill else None,
         "city_score": getattr(city_skill, "adjusted_score", None) if city_skill else None,
-        "alpha_score": alpha_score,
-        "win_rate": getattr(global_skill, "win_rate", None),
-        "wilson_win_rate": getattr(global_skill, "wilson_win_rate", None),
-        "resolved_markets": getattr(global_skill, "resolved_markets", 0) or 0,
-        "roi": getattr(global_skill, "roi", None),
-        "profit_factor": getattr(global_skill, "profit_factor", None),
+        "alpha_score": round(alpha_score, 4),
+        "is_ranked": bool(is_ranked),
+        "skill_source": skill_source,
+        "win_rate": getattr(global_skill, "win_rate", None) if global_skill else None,
+        "wilson_win_rate": getattr(global_skill, "wilson_win_rate", None) if global_skill else None,
+        "resolved_markets": getattr(global_skill, "resolved_markets", 0) if global_skill else 0,
+        "roi": getattr(global_skill, "roi", None) if global_skill else None,
+        "profit_factor": getattr(global_skill, "profit_factor", None) if global_skill else None,
         "bucket_idx": getattr(exposure, "bucket_idx", None),
         "bucket_label": getattr(exposure, "bucket_label", None),
         "condition_id": getattr(exposure, "condition_id", None),
@@ -1253,6 +1267,7 @@ def build_bucket_consensus(
             "bucket_idx": idx_int,
             "bucket_label": bucket.get("label"),
             "model_prob": bucket.get("model_prob"),
+            "wallets_long": 0,
             "ranked_wallets_long": 0,
             "net_notional_usd": 0.0,
             "net_position_qty": 0.0,
@@ -1270,7 +1285,9 @@ def build_bucket_consensus(
         if net_qty <= 0 and net_notional <= 0:
             continue
         c = consensus_by_idx[idx]
-        c["ranked_wallets_long"] += 1
+        c["wallets_long"] += 1
+        if row.get("is_ranked", True):
+            c["ranked_wallets_long"] += 1
         c["net_notional_usd"] += net_notional
         c["net_position_qty"] += net_qty
         score_weight = float(

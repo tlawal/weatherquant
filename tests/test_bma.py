@@ -193,7 +193,7 @@ def test_build_predictive_uses_lead_skill_mae_when_well_supported():
     assert sigmas["nws"] == pytest.approx(2.4)
 
 
-def test_build_predictive_falls_back_to_prior_when_low_n():
+def test_build_predictive_shrinks_low_n_sigma_toward_prior():
     p = build_bma_predictive(
         calibrated_means={"hrrr": 82.0, "nws": 81.0},
         weights_by_source={"hrrr": 0.5, "nws": 0.5},
@@ -202,8 +202,10 @@ def test_build_predictive_falls_back_to_prior_when_low_n():
     )
     assert p.fallback_used is True
     sigmas = {c.source: c.sigma for c in p.components}
-    assert sigmas["hrrr"] == pytest.approx(BMA_PRIOR_SIGMA_F)
+    expected_hrrr = (25 / 30) * BMA_PRIOR_SIGMA_F + (5 / 30) * 0.5
+    assert sigmas["hrrr"] == pytest.approx(expected_hrrr)
     assert sigmas["nws"] == pytest.approx(2.4)
+    assert any("hrrr: n=5<30, σ=shrinkage" in note for note in p.notes)
 
 
 def test_build_predictive_drops_zero_weight_sources():

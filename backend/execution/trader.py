@@ -375,6 +375,10 @@ async def execute_signal(
             open_exposure=open_exposure,
             ask_depth=signal.yes_ask_depth,
             regime_multiplier=_rmult,
+            kelly_fraction_override=(
+                (signal.reason.get("posterior_kelly") or {}).get("conservative_kelly_f")
+                if isinstance(signal.reason, dict) else None
+            ),
         )
 
         if sizing.rejected:
@@ -388,6 +392,7 @@ async def execute_signal(
                     payload={**result, "sizing": {
                         "kelly_f": sizing.kelly_f,
                         "kelly_size": sizing.kelly_size,
+                        "kelly_source": sizing.kelly_source,
                         "reject_reason": sizing.reject_reason,
                     }},
                     ok=False,
@@ -396,6 +401,14 @@ async def execute_signal(
 
         shares = sizing.size
         cost = round(shares * limit_price, 2)
+        result["sizing"] = {
+            "kelly_f": sizing.kelly_f,
+            "kelly_size": sizing.kelly_size,
+            "kelly_source": sizing.kelly_source,
+            "position_cap": sizing.position_cap,
+            "liquidity_cap": sizing.liquidity_cap,
+            "bankroll_remaining": sizing.bankroll_remaining,
+        }
 
     # ── Enforce Polymarket $1 minimum notional for market BUY orders ──────────
     # Polymarket's CLOB rejects market BUY orders with notional < $1. Rather

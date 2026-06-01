@@ -172,6 +172,7 @@ class Config:
     WALLET_TRACKER_LOOKBACK_DAYS: int = _int("WALLET_TRACKER_LOOKBACK_DAYS", 14)
     WALLET_TRACKER_FETCH_LIMIT: int = _int("WALLET_TRACKER_FETCH_LIMIT", 10000)
     WALLET_TRACKER_FETCH_PAUSE_SECONDS: float = _float("WALLET_TRACKER_FETCH_PAUSE_SECONDS", 0.25)
+    WALLET_TRACKER_TAKER_ONLY: bool = _bool("WALLET_TRACKER_TAKER_ONLY", default=False)
 
     # ── Logging ───────────────────────────────────────────────────────────────
     LOG_LEVEL: str = os.environ.get("LOG_LEVEL", "INFO").upper()

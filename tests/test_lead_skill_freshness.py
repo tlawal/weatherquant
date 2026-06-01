@@ -15,6 +15,7 @@ from backend.modeling.temperature_model import (
     _LEAD_SKILL_CLAMP,
     _LEAD_SKILL_MIN_N_OBS,
     _freshness_factor,
+    _lead_skill_sigma,
     _lead_time_sigma_growth,
     _lead_skill_factors,
     compute_model,
@@ -39,8 +40,8 @@ def test_lead_skill_single_source_returns_unity():
     assert out == {"nws": 1.0}
 
 
-def test_lead_skill_below_min_n_obs_skipped():
-    """A source with insufficient n_obs is excluded from the median and gets 1.0."""
+def test_lead_skill_below_min_n_obs_gets_partial_adjustment():
+    """Thin but nonzero samples get shrunken, not ignored, before n=30."""
     mae = {"nws": 1.5, "hrrr": 0.8, "wu_hourly": 5.0}
     n = {
         "nws": _LEAD_SKILL_MIN_N_OBS + 10,
@@ -48,11 +49,19 @@ def test_lead_skill_below_min_n_obs_skipped():
         "wu_hourly": _LEAD_SKILL_MIN_N_OBS - 5,  # too thin
     }
     out = _lead_skill_factors(mae, n)
-    assert out["wu_hourly"] == 1.0  # excluded
-    # Median across {nws=1.5, hrrr=0.8} is 1.15. Better-than-median (lower mae)
-    # gets factor > 1; worse-than-median gets factor < 1.
+    # Median across all nonzero-evidence sources is 1.5. WU's raw factor clamps
+    # to 0.7, then shrinks 25/30 of the way from 1.0.
+    assert out["wu_hourly"] == pytest.approx(1.0 + (25 / 30) * (0.7 - 1.0))
+    # Better-than-median (lower mae) gets factor > 1; median source stays ~1.
     assert out["hrrr"] > 1.0
-    assert out["nws"] < 1.0
+    assert out["nws"] == pytest.approx(1.0)
+
+
+def test_lead_skill_zero_n_obs_still_skipped():
+    mae = {"nws": 1.5, "hrrr": 0.8, "wu_hourly": 5.0}
+    n = {"nws": 40, "hrrr": 40, "wu_hourly": 0}
+    out = _lead_skill_factors(mae, n)
+    assert out["wu_hourly"] == 1.0
 
 
 def test_lead_skill_better_source_gets_uplift_capped_at_high():
@@ -82,6 +91,28 @@ def test_lead_skill_mae_zero_or_none_treated_as_invalid():
     assert out["ecmwf_ifs"] == 1.0
     assert out["hrrr"] == pytest.approx(1.25 / 1.0, abs=1e-6)
     assert out["nbm"] == pytest.approx(1.25 / 1.5, abs=1e-6)
+
+
+def test_lead_skill_sigma_uses_pre_threshold_shrinkage():
+    sigma = _lead_skill_sigma(
+        {"hrrr": 1.5, "nws": 2.1},
+        {"hrrr": 25, "nws": 20},
+        {"hrrr": 0.6, "nws": 0.4},
+        1.0,
+    )
+
+    hrrr = (5 / 30) * 3.0 + (25 / 30) * 1.5
+    nws = (10 / 30) * 3.0 + (20 / 30) * 2.1
+    assert sigma == pytest.approx(0.6 * hrrr + 0.4 * nws)
+
+
+def test_lead_skill_sigma_requires_two_sources():
+    assert _lead_skill_sigma(
+        {"hrrr": 1.5},
+        {"hrrr": 25},
+        {"hrrr": 1.0},
+        1.0,
+    ) is None
 
 
 # ── _freshness_factor: pure-logic tests ─────────────────────────────────
@@ -190,7 +221,7 @@ def test_wu_hourly_uses_fetched_at_for_lead_skill_and_bma_sigma_note():
     assert model is not None
     bma_notes = model.inputs["bma_shadow"]["notes"]
     assert "wu_hourly: no SourceLeadTimeSkill row, σ=prior" not in bma_notes
-    assert "wu_hourly: n=5<30, σ=prior" in bma_notes
+    assert any("wu_hourly: n=5<30, σ=shrinkage" in note for note in bma_notes)
 
 
 def test_pre_model_regime_spread_uses_trusted_sources_not_ai_outlier():
@@ -260,3 +291,34 @@ def test_compute_model_freshness_lowers_stale_source_weight(monkeypatch):
     # WU stale (factor 0.5) → mu pulled toward NWS (80) — should be < 85
     assert fresh_only is not None and with_stale_wu is not None
     assert with_stale_wu.mu_forecast < fresh_only.mu_forecast
+
+
+def test_compute_model_uses_lead_skill_sigma_before_n30():
+    fixed_now = datetime(2026, 5, 31, 18, 0, tzinfo=timezone.utc)
+    model_run = fixed_now - timedelta(hours=2)
+    settlement = fixed_now + timedelta(hours=30)
+
+    model = compute_model(
+        nws_high=86.0,
+        wu_hourly_peak=85.5,
+        hrrr_high=85.0,
+        nbm_high=None,
+        ecmwf_ifs_high=None,
+        daily_high_metar=None,
+        current_temp_f=None,
+        calibration={"weight_nws": 0.5, "weight_wu_hourly": 0.5, "weight_hrrr": 0.5},
+        buckets=[(None, 83.0), (84.0, 85.0), (86.0, None)],
+        model_run_at_by_source={
+            "nws": model_run,
+            "wu_hourly": model_run,
+            "hrrr": model_run,
+        },
+        lead_skill_mae_by_source={"nws": 1.6, "wu_hourly": 1.8, "hrrr": 1.4},
+        lead_skill_n_obs_by_source={"nws": 25, "wu_hourly": 24, "hrrr": 23},
+        now_utc=fixed_now,
+        event_settlement_utc=settlement,
+    )
+
+    assert model is not None
+    assert model.inputs["sigma_lead_source"] == "lead_skill_shrinkage"
+    assert model.inputs["sigma_lead"] < model.inputs["sigma_lead_generic"]
