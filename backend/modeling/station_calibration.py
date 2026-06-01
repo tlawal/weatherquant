@@ -15,12 +15,16 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select, func, distinct
+from sqlalchemy import or_, select, func, distinct
 
 from backend.storage.db import get_session
 from backend.storage.models import (
     City, Event, ForecastObs, MetarObs, ModelSnapshot, Order, Bucket, Position,
     SourceLeadTimeSkill,
+)
+from backend.modeling.station_weights import (
+    ENSEMBLE_SOURCES,
+    station_weight_checkpoint_utc,
 )
 
 log = logging.getLogger(__name__)
@@ -69,10 +73,11 @@ async def _get_daily_highs(
 
 async def _get_forecast_highs(
     city_id: int,
+    city_tz: str,
     dates: list[str],
     sources: list[str] = ("nws", "wu_hourly", "hrrr", "nbm"),
 ) -> dict[str, dict[str, float]]:
-    """For each date, get each source's latest forecast high_f.
+    """For each date, get each source's checkpoint-safe forecast high_f.
 
     Returns: {date_et: {source: high_f}}
     """
@@ -81,6 +86,7 @@ async def _get_forecast_highs(
     async with get_session() as sess:
         for source in sources:
             for date_et in dates:
+                checkpoint_utc = station_weight_checkpoint_utc(date_et, city_tz)
                 row = await sess.execute(
                     select(ForecastObs.high_f)
                     .where(
@@ -88,6 +94,12 @@ async def _get_forecast_highs(
                         ForecastObs.source == source,
                         ForecastObs.date_et == date_et,
                         ForecastObs.high_f.isnot(None),
+                        ForecastObs.parse_error.is_(None),
+                        ForecastObs.fetched_at <= checkpoint_utc,
+                        or_(
+                            ForecastObs.model_run_at.is_(None),
+                            ForecastObs.model_run_at <= checkpoint_utc,
+                        ),
                     )
                     .order_by(ForecastObs.fetched_at.desc())
                     .limit(1)
@@ -101,13 +113,15 @@ async def _get_forecast_highs(
 
 async def _get_model_snapshot_highs(
     city_id: int,
+    city_tz: str,
     dates: list[str],
 ) -> dict[str, float]:
-    """Get the model's fused forecast (mu) from the latest ModelSnapshot per event/date."""
+    """Get the model's fused forecast (mu) at the station-calibration checkpoint."""
     result: dict[str, float] = {}
 
     async with get_session() as sess:
         for date_et in dates:
+            checkpoint_utc = station_weight_checkpoint_utc(date_et, city_tz)
             # Find event for city+date
             event_q = await sess.execute(
                 select(Event.id).where(
@@ -122,7 +136,10 @@ async def _get_model_snapshot_highs(
             # Latest model snapshot
             snap_q = await sess.execute(
                 select(ModelSnapshot.mu)
-                .where(ModelSnapshot.event_id == event_id)
+                .where(
+                    ModelSnapshot.event_id == event_id,
+                    ModelSnapshot.computed_at <= checkpoint_utc,
+                )
                 .order_by(ModelSnapshot.computed_at.desc())
                 .limit(1)
             )
@@ -237,18 +254,11 @@ async def compute_station_calibration(
     # Source identifiers must match those used by the ingestion pipeline:
     #   - ecmwf_aifs / gfs_graphcast: Open-Meteo (_OM_MODELS in forecasts.py)
     #   - pangu_weather / fourcastnet_v2: NOAA AIWP S3 (AIWP_MODELS in aiwp.py)
-    sources = [
-        # Physics / human / scraped
-        "nws", "wu_hourly", "hrrr", "hrrr_15min", "nbm", "ecmwf_ifs",
-        # AI-NWP foundation models (experimental — flagged in
-        # EXPERIMENTAL_FORECAST_SOURCES in backend/ingestion/forecasts.py)
-        "ecmwf_aifs", "gfs_graphcast", "pangu_weather", "fourcastnet_v2",
-        "aurora",
-    ]
-    fc_highs = await _get_forecast_highs(city.id, dates, sources)
+    sources = list(ENSEMBLE_SOURCES)
+    fc_highs = await _get_forecast_highs(city.id, city_tz, dates, sources)
 
     # Fetch model mu (fused ensemble)
-    model_highs = await _get_model_snapshot_highs(city.id, dates)
+    model_highs = await _get_model_snapshot_highs(city.id, city_tz, dates)
 
     # ── Compute per-source errors ───────────────────────────────────────────
     source_errors: dict[str, list[float]] = defaultdict(list)

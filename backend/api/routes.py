@@ -12,6 +12,7 @@ import logging
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Body
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -3152,6 +3153,8 @@ async def station_calibration_diagnostics():
     cities_with_station_count = 0
     total_metar_rows_30d = 0
     total_forecast_rows_30d = 0
+    suspicious_late_day_target_date_rows_30d = 0
+    suspicious_late_day_target_date_rows_by_source_30d: dict[str, int] = {}
     cutoff = datetime.now(timezone.utc) - timedelta(days=30)
     try:
         async with get_session() as sess:
@@ -3188,6 +3191,74 @@ async def station_calibration_diagnostics():
                 )
             )
             total_forecast_rows_30d = forecast_q.scalar_one()
+
+            from backend.modeling.station_weights import ENSEMBLE_SOURCES
+            leak_diagnostic_sources = tuple(dict.fromkeys((*ENSEMBLE_SOURCES, "open_meteo")))
+            forecast_rows = (
+                await sess.execute(
+                    select(ForecastObs, City)
+                    .join(City, City.id == ForecastObs.city_id)
+                    .where(
+                        ForecastObs.source.in_(leak_diagnostic_sources),
+                        ForecastObs.fetched_at >= cutoff,
+                        ForecastObs.high_f.isnot(None),
+                    )
+                    .order_by(
+                        ForecastObs.city_id,
+                        ForecastObs.source,
+                        ForecastObs.date_et,
+                        ForecastObs.fetched_at,
+                    )
+                )
+            ).all()
+            rows_by_city_source_date: dict[tuple[int, str, str], list[ForecastObs]] = {}
+            city_tz_by_id: dict[int, str] = {}
+            for row, city in forecast_rows:
+                rows_by_city_source_date.setdefault(
+                    (row.city_id, row.source, row.date_et), []
+                ).append(row)
+                city_tz_by_id[row.city_id] = getattr(city, "tz", None) or "America/New_York"
+
+            for row, _city in forecast_rows:
+                fetched_at = row.fetched_at
+                if fetched_at is None:
+                    continue
+                if fetched_at.tzinfo is None:
+                    fetched_at = fetched_at.replace(tzinfo=timezone.utc)
+                city_tz = city_tz_by_id.get(row.city_id, "America/New_York")
+                if fetched_at.astimezone(ZoneInfo(city_tz)).hour < 18:
+                    continue
+                try:
+                    next_date = (
+                        datetime.strptime(row.date_et, "%Y-%m-%d") + timedelta(days=1)
+                    ).strftime("%Y-%m-%d")
+                except Exception:
+                    continue
+                candidates = rows_by_city_source_date.get(
+                    (row.city_id, row.source, next_date), []
+                )
+                for candidate in candidates:
+                    if candidate.high_f != row.high_f:
+                        continue
+                    same_model_run = (
+                        row.model_run_at is not None
+                        and candidate.model_run_at is not None
+                        and row.model_run_at == candidate.model_run_at
+                    )
+                    candidate_fetched = candidate.fetched_at
+                    if candidate_fetched is not None and candidate_fetched.tzinfo is None:
+                        candidate_fetched = candidate_fetched.replace(tzinfo=timezone.utc)
+                    same_fetch_window = (
+                        candidate_fetched is not None
+                        and abs((candidate_fetched - fetched_at).total_seconds()) <= 20 * 60
+                    )
+                    if same_model_run or same_fetch_window:
+                        suspicious_late_day_target_date_rows_30d += 1
+                        suspicious_late_day_target_date_rows_by_source_30d[row.source] = (
+                            suspicious_late_day_target_date_rows_by_source_30d.get(row.source, 0)
+                            + 1
+                        )
+                        break
     except Exception as e:
         error = str(e)
 
@@ -3200,6 +3271,8 @@ async def station_calibration_diagnostics():
         "cities_with_station_count": cities_with_station_count,
         "total_metar_rows_30d": total_metar_rows_30d,
         "total_forecast_rows_30d": total_forecast_rows_30d,
+        "suspicious_late_day_target_date_rows_30d": suspicious_late_day_target_date_rows_30d,
+        "suspicious_late_day_target_date_rows_by_source_30d": suspicious_late_day_target_date_rows_by_source_30d,
         "error": error,
     }
 

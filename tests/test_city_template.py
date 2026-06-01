@@ -27,6 +27,9 @@ def test_station_calibration_card_separates_overall_and_current_lead_skill():
     assert "n < 30 are provisional" in template
     assert "23:59:59 local time" in template
     assert "Lower MAE is better" in template
+    assert "Latest scored error" in template
+    assert "Forecast - observed at the station-calibration checkpoint" in template
+    assert "latest forecast available by ~6 AM local" in template
 
 
 def test_buckets_table_surfaces_execution_microstructure():

@@ -565,8 +565,12 @@
           <div class="flex justify-between w-full"><span style="color:var(--text-muted)">Bias</span><span class="mono">{{ "%+.2f"|format(skill.bias_f) }}°F</span></div>
           {% endif %}
           {% if skill.yesterday_err_f is not none %}
-          <div class="flex justify-between w-full"><span style="color:var(--text-muted)">Yesterday</span><span class="mono">{{ "%+.1f"|format(skill.yesterday_err_f) }}°F</span></div>
+          <div class="flex justify-between w-full"><span style="color:var(--text-muted)">Latest scored error</span><span class="mono">{{ "%+.1f"|format(skill.yesterday_err_f) }}°F</span></div>
           {% endif %}
+        </div>
+        <div class="mt-2 text-[9px] leading-snug" style="color:var(--text-muted)">
+          Forecast - observed at the station-calibration checkpoint; positive means too hot.
+          Station source weights are scored from the latest forecast available by ~6 AM local, not late-night revisions.
         </div>
       </div>
       {% endif %}

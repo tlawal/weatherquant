@@ -121,7 +121,7 @@ def test_weights_floor_holds_and_sum_is_one():
 def test_defaults_cover_all_ensemble_sources():
     """Sanity: fallback defaults defined for every source the model uses."""
     for src in (
-        "nws", "wu_hourly", "hrrr", "hrrr_15min", "nbm", "ecmwf_ifs",
+        "nws", "open_meteo", "wu_hourly", "hrrr", "hrrr_15min", "nbm", "ecmwf_ifs",
         "ecmwf_aifs", "gfs_graphcast", "pangu_weather", "fourcastnet_v2", "aurora",
     ):
         assert src in DEFAULT_WEIGHTS
@@ -162,7 +162,7 @@ def test_live_station_weight_gates_require_mature_samples():
     assert _use_live_station_bias(noisy) is False
 
 
-def test_backfill_forecast_daily_errors_upserts_latest_pre_event_forecast(tmp_path, monkeypatch):
+def test_backfill_forecast_daily_errors_upserts_latest_checkpoint_forecast(tmp_path, monkeypatch):
     _engine, session_factory = _run(_setup_test_db(tmp_path, monkeypatch))
     date_et = _past_date()
     event_end = _event_end_utc(date_et)
@@ -203,8 +203,8 @@ def test_backfill_forecast_daily_errors_upserts_latest_pre_event_forecast(tmp_pa
                 err_f=0.0,
             ))
             for high, fetched_at in (
-                (79.0, event_end - timedelta(hours=12)),
-                (81.0, event_end - timedelta(hours=1)),
+                (79.0, event_end - timedelta(hours=20)),
+                (81.0, event_end - timedelta(hours=17)),
                 (90.0, event_end + timedelta(hours=1)),
             ):
                 session.add(ForecastObs(
@@ -239,6 +239,81 @@ def test_backfill_forecast_daily_errors_upserts_latest_pre_event_forecast(tmp_pa
 
     row = _run(_load_row())
     assert written >= 1
-    assert row.forecast_high_f == pytest.approx(81.0)
+    assert row.forecast_high_f == pytest.approx(79.0)
     assert row.observed_high_f == pytest.approx(80.0)
+    assert row.err_f == pytest.approx(-1.0)
+
+
+@pytest.mark.parametrize("source", ["nws", "hrrr", "open_meteo"])
+def test_backfill_forecast_daily_errors_ignores_late_night_next_day_like_forecast_for_all_sources(
+    tmp_path, monkeypatch, source
+):
+    _engine, session_factory = _run(_setup_test_db(tmp_path, monkeypatch))
+    date_et = _past_date()
+    event_end = _event_end_utc(date_et)
+
+    async def _seed():
+        async with session_factory() as session:
+            city = City(
+                city_slug="atlanta",
+                display_name="Atlanta",
+                metar_station="KATL",
+                enabled=True,
+                is_us=True,
+                unit="F",
+                tz="America/New_York",
+            )
+            session.add(city)
+            await session.flush()
+            session.add(Event(
+                city_id=city.id,
+                date_et=date_et,
+                status="ok",
+                resolution_station_id="KATL",
+            ))
+            session.add(MetarObs(
+                city_id=city.id,
+                metar_station="KATL",
+                observed_at=event_end - timedelta(hours=9),
+                temp_f=78.0,
+                temp_c=(78.0 - 32.0) * 5.0 / 9.0,
+            ))
+            for high, fetched_at in (
+                (79.0, event_end - timedelta(hours=20)),
+                (88.0, event_end - timedelta(hours=1)),
+            ):
+                session.add(ForecastObs(
+                    city_id=city.id,
+                    source=source,
+                    date_et=date_et,
+                    fetched_at=fetched_at,
+                    high_f=high,
+                ))
+            await session.commit()
+            return city.id
+
+    city_id = _run(_seed())
+    written = _run(backfill_forecast_daily_errors(
+        "KATL",
+        city_id,
+        "America/New_York",
+        max_days=3,
+    ))
+
+    async def _load_row():
+        async with session_factory() as session:
+            return (
+                await session.execute(
+                    select(ForecastDailyError).where(
+                        ForecastDailyError.station_id == "KATL",
+                        ForecastDailyError.date_et == date_et,
+                        ForecastDailyError.source == source,
+                    )
+                )
+            ).scalar_one()
+
+    row = _run(_load_row())
+    assert written >= 1
+    assert row.forecast_high_f == pytest.approx(79.0)
+    assert row.observed_high_f == pytest.approx(78.0)
     assert row.err_f == pytest.approx(1.0)

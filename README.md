@@ -198,6 +198,22 @@ Per-station rolling 30-day MAE/bias/RMSE, refreshed every 6h (`job_refresh_stati
 - **Per-source weighting** via NIG empirical-Bayes shrinkage (`station_weights.py:58-90` — the one genuinely Bayesian component in the legacy stack: `λ = n / (n+7), mse = λ·m̂se + (1−λ)·9.0`)
 - **Tradeability flag** GREEN (<1.5°F MAE) / AMBER (1.5–3.0°F) / RED (>3.0°F) — informational today, M7 plan promotes it to a hard signal-engine gate
 
+Station/source scoring is checkpoint-safe. `ForecastDailyError`, `StationSourceWeight`, and the station-card per-source MAE use the latest forecast available by a fixed morning checkpoint, currently `18h` before the `23:59:59` local settlement time (~6 AM local), rather than late-night revisions after the daily high has likely occurred. This applies across the ensemble sources (`nws`, `open_meteo`, `wu_hourly`, HRRR, NBM, IFS/AIFS, GraphCast, Pangu, FCN-v2, Aurora). Rows with parse errors or missing target dates are skipped for calibration.
+
+NWS target-date handling is strict: `api.weather.gov` daytime periods are parsed into the city timezone and must match the requested market date. If a late-night NWS response only contains tomorrow's daytime period, the system stores a failed `ForecastObs` with `parse_error="target_date_not_in_nws_periods"` instead of writing tomorrow's high under today's `date_et`. Open-Meteo rows also store requested-date and available-date metadata; missing target dates are marked `target_date_not_in_source_payload`.
+
+The station calibration diagnostics endpoint reports suspicious late-day target-date leakage counts across all forecast sources:
+
+```text
+GET /api/station-calibrations/diagnostics
+```
+
+After deploying forecast-date fixes, rebuild derived calibration rows so old late-night rows stop affecting live weights:
+
+```text
+POST /api/admin/recompute-forecast-daily-errors?max_days=60
+```
+
 Sortable analytics + Leaflet station-health map at `/calibration`.
 
 The complementary **Lead-Time Skill** table (`SourceLeadTimeSkill`) is refreshed on its own 6h job. It tracks `MAE_f` and `bias_f` per `(city, source, lead_bucket)` ∈ {0, 1, 3, 6, 12, 18, 24, 36, 48, 72h}. Surfaced on city pages and used immediately with empirical-Bayes shrinkage: `0 < n_obs < 30` partially blends observed MAE into BMA σᵢ and source-weight factors, while `n_obs ≥ 30` uses the lead-bucket MAE at full strength.
@@ -352,13 +368,27 @@ python -m backend.main           # full stack incl. scheduler
 PYTHONPATH=. .venv/bin/pytest tests/ -q --ignore=tests/test_market_context.py
 ```
 
-Train the ML residual tracker after data has accumulated:
+Train the ML residual tracker after data has accumulated. The trainer builds a remaining-rise model from METAR observations, uses a chronological date-grouped holdout to avoid same-day leakage, and requires at least 50 usable daytime samples:
 
 ```bash
 python -m backend.modeling.ml_trainer
 ```
 
-Prints MAE improvement vs static baseline. By default it saves `backend/modeling/residual_model_shadow.pkl`; set `PROMOTE_RESIDUAL_ML=1` to write `backend/modeling/residual_model.pkl` only when chronological date-holdout MAE beats the static table by at least `0.20°F`. It can train from a local SQLite snapshot or the app `DATABASE_URL` through the normal SQLAlchemy storage layer, so Railway/Postgres data can be used without exporting SQLite first. Signal engine picks the promoted model up on next restart; until then, the static lookup-table fallback is used.
+By default this is shadow-only and writes `backend/modeling/residual_model_shadow.pkl` plus `backend/modeling/residual_model_shadow_meta.json`. The metadata records train/test MAE, baseline MAE, date split, sample count, city count, and whether promotion is ready.
+
+Use the live Railway database without exporting SQLite:
+
+```bash
+railway run python -m backend.modeling.ml_trainer
+```
+
+Promote only when the chronological holdout beats the static table by at least `0.20°F`:
+
+```bash
+railway run env PROMOTE_RESIDUAL_ML=1 python -m backend.modeling.ml_trainer
+```
+
+Promotion writes `backend/modeling/residual_model.pkl` plus `backend/modeling/residual_model_meta.json`; otherwise it still saves the shadow model and logs why promotion was blocked. The signal engine loads a promoted model on restart. Until a promoted model exists, `residual_tracker.py` uses the static remaining-rise lookup table.
 
 ---
 
@@ -402,8 +432,9 @@ Prints MAE improvement vs static baseline. By default it saves `backend/modeling
 | `backend/modeling/adaptive.py` | Kalman + regression + station-time predictions |
 | `backend/modeling/distribution.py` | Single-Gaussian bucket integration (legacy path) |
 | `backend/modeling/calibration_engine.py` | Brier-driven probability calibration + lead-time skill computation |
-| `backend/modeling/station_calibration.py` | 30-day rolling MAE/bias per station |
-| `backend/modeling/station_weights.py` | NIG empirical-Bayes per-source weights |
+| `backend/modeling/station_calibration.py` | 30-day rolling MAE/bias per station using checkpoint-safe source selection |
+| `backend/modeling/station_weights.py` | Checkpoint-safe `ForecastDailyError` rebuild + NIG empirical-Bayes per-source weights |
+| `backend/modeling/ml_trainer.py` | Remaining-rise ML trainer; shadow by default, promotion gated by chronological holdout MAE |
 | `backend/modeling/regime.py` | CALM/NORMAL/VOLATILE label + σ multiplier |
 | `backend/engine/signal_engine.py` | Per-event orchestration → bucket signals + persistence |
 | `backend/ingestion/aiwp.py` | NOAA AIWP S3 fetcher (Pangu + FCN-v2) |

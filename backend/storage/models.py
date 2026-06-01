@@ -1047,7 +1047,7 @@ class ForecastDailyError(Base):
     """One row per (station, date_et, source): forecast high vs observed high.
 
     Materialized after settlement from ForecastObs + MetarObs daily high.
-    Powers the dynamic per-station ensemble weights and the "yesterday's error"
+    Powers the dynamic per-station ensemble weights and the latest scored error
     field in the Forecast Sources tooltip.
     """
     __tablename__ = "forecast_daily_errors"

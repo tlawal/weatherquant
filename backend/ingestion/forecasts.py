@@ -155,12 +155,17 @@ async def fetch_nws_all() -> None:
                     model_run_at = now_utc.replace(minute=0, second=0, microsecond=0)
 
             async with get_session() as sess:
+                wq_meta = (nws_data or {}).get("_weatherquant") or {}
+                props = (nws_data.get("properties") or {}) if nws_data else {}
                 raw = json.dumps({
                     "source": "nws",
                     "high_f": high_f,
-                    "nws_update_time": (nws_data.get("properties") or {}).get("updateTime") if nws_data else None,
-                    "nws_generated_at": (nws_data.get("properties") or {}).get("generatedAt") if nws_data else None,
+                    "requested_date": active_date,
+                    "nws_update_time": props.get("updateTime"),
+                    "nws_generated_at": props.get("generatedAt"),
+                    "nws_target_match": wq_meta.get("nws_target_match"),
                 })
+                parse_error = wq_meta.get("parse_error")
                 await insert_forecast_obs(
                     sess,
                     city_id=city.id,
@@ -170,7 +175,7 @@ async def fetch_nws_all() -> None:
                     high_f=high_f,
                     raw_payload_hash=hashlib.md5(raw.encode()).hexdigest(),
                     raw_json=raw,
-                    parse_error=None if high_f is not None else "parse_failed",
+                    parse_error=None if high_f is not None else (parse_error or "parse_failed"),
                 )
             # Phase A5 — log ingestion latency: how stale is this forecast cycle?
             age_s = None
@@ -209,9 +214,15 @@ async def fetch_open_meteo_all() -> None:
 
         for active_date in active_dates:
             high_f = highs_by_date.get(active_date)
+            target_missing = active_date not in highs_by_date
 
             async with get_session() as sess:
-                raw = json.dumps({"source": "open_meteo", "high_f": high_f})
+                raw = json.dumps({
+                    "source": "open_meteo",
+                    "requested_date": active_date,
+                    "high_f": high_f,
+                    "available_dates": sorted(highs_by_date.keys()),
+                })
                 await insert_forecast_obs(
                     sess,
                     city_id=city.id,
@@ -221,7 +232,11 @@ async def fetch_open_meteo_all() -> None:
                     high_f=high_f,
                     raw_payload_hash=hashlib.md5(raw.encode()).hexdigest(),
                     raw_json=raw,
-                    parse_error=None if high_f is not None else "parse_failed",
+                    parse_error=(
+                        None if high_f is not None
+                        else "target_date_not_in_source_payload" if target_missing
+                        else "parse_failed"
+                    ),
                 )
             log.info("open-meteo: %s date=%s high_f=%s", city.city_slug, active_date, high_f)
 
@@ -417,6 +432,7 @@ async def fetch_open_meteo_models_all(source_filter: Optional[set[str]] = None) 
                         model_run_at = _compute_model_run_at(source_key, datetime.now(timezone.utc))
 
             for active_date in active_dates:
+                target_missing = active_date not in data_by_date
                 high_f, hourly_data = data_by_date.get(active_date, (None, None))
                 reference_median = None
                 if source_key in _OPEN_METEO_OUTLIER_SOURCES and high_f is not None:
@@ -433,13 +449,23 @@ async def fetch_open_meteo_models_all(source_filter: Optional[set[str]] = None) 
                 async with get_session() as sess:
                     raw = json.dumps({
                         "source": source_key, "model": om_model,
+                        "requested_date": active_date,
                         "high_f": store_high_f,
                         "raw_high_f": high_f,
                         "hourly": hourly_data,
                         "model_run_at": model_run_at.isoformat() if model_run_at else None,
                         "openmeteo_metadata": meta,
                         "outlier_gate": outlier_gate,
+                        "available_dates": sorted(data_by_date.keys()),
                     })
+                    source_parse_error = (
+                        parse_error
+                        or (
+                            "target_date_not_in_source_payload"
+                            if target_missing and store_high_f is None
+                            else None
+                        )
+                    )
                     await insert_forecast_obs(
                         sess,
                         city_id=city.id,
@@ -449,7 +475,7 @@ async def fetch_open_meteo_models_all(source_filter: Optional[set[str]] = None) 
                         high_f=store_high_f,
                         raw_payload_hash=hashlib.md5(raw.encode()).hexdigest(),
                         raw_json=raw,
-                        parse_error=parse_error,
+                        parse_error=source_parse_error,
                     )
                 if store_high_f is not None:
                     # Phase A5 — log ingestion latency per Open-Meteo model run
@@ -525,8 +551,70 @@ async def _fetch_open_meteo_model_high(
     return out
 
 
+def _parse_nws_period_time(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _nws_daytime_period_dates(data: dict, city_tz: str) -> list[str]:
+    tz = ZoneInfo(city_tz or "America/New_York")
+    dates: list[str] = []
+    for period in (data.get("properties") or {}).get("periods") or []:
+        if not period.get("isDaytime", True):
+            continue
+        start_dt = _parse_nws_period_time(period.get("startTime"))
+        if start_dt is None:
+            continue
+        dates.append(start_dt.astimezone(tz).strftime("%Y-%m-%d"))
+    return sorted(set(dates))
+
+
+def _extract_nws_high_for_date(
+    data: dict,
+    city: City,
+    active_date_str: str,
+) -> tuple[Optional[float], Optional[dict], Optional[str]]:
+    """Extract the NWS daytime high for the requested local date only."""
+    tz = ZoneInfo(getattr(city, "tz", None) or "America/New_York")
+    available_dates = _nws_daytime_period_dates(data, str(tz))
+    for period in (data.get("properties") or {}).get("periods") or []:
+        if not period.get("isDaytime", True):
+            continue
+        start_dt = _parse_nws_period_time(period.get("startTime"))
+        if start_dt is None:
+            continue
+        local_date = start_dt.astimezone(tz).strftime("%Y-%m-%d")
+        if local_date != active_date_str:
+            continue
+        temp = period.get("temperature")
+        unit = period.get("temperatureUnit", "F")
+        if temp is None:
+            continue
+        temp_f = float(temp)
+        if unit == "C":
+            temp_f = temp_f * 9 / 5 + 32
+        return round(temp_f, 1), {
+            "requested_date": active_date_str,
+            "matched_start_time": period.get("startTime"),
+            "matched_end_time": period.get("endTime"),
+            "matched_period_name": period.get("name"),
+            "matched_period_number": period.get("number"),
+            "matched_local_date": local_date,
+            "available_daytime_period_dates": available_dates,
+        }, None
+
+    return None, {
+        "requested_date": active_date_str,
+        "available_daytime_period_dates": available_dates,
+    }, "target_date_not_in_nws_periods"
+
+
 async def _fetch_nws_high(city: City, active_date_str: str) -> tuple[Optional[float], Optional[dict]]:
-    """Fetch NWS gridpoint forecast and return (today's daytime high °F, raw response dict)."""
+    """Fetch NWS gridpoint forecast and return the requested local daytime high."""
     if not city.is_us or not city.nws_office:
         return None, None
     url = (
@@ -551,28 +639,21 @@ async def _fetch_nws_high(city: City, active_date_str: str) -> tuple[Optional[fl
                         return None, None
                     data = await resp.json(content_type=None)
 
-            periods = (data.get("properties") or {}).get("periods") or []
-            # Find active_date's daytime period
-            for period in periods:
-                if not period.get("isDaytime", True):
-                    continue
-                start = period.get("startTime", "")
-                if active_date_str in start:
-                    temp = period.get("temperature")
-                    unit = period.get("temperatureUnit", "F")
-                    if temp is None:
-                        continue
-                    temp_f = float(temp)
-                    if unit == "C":
-                        temp_f = temp_f * 9 / 5 + 32
-                    return round(temp_f, 1), data
-
-            # Fallback — first daytime period
-            for period in periods:
-                if period.get("isDaytime", True):
-                    temp = period.get("temperature")
-                    if temp is not None:
-                        return round(float(temp), 1), data
+            high_f, match_meta, parse_error = _extract_nws_high_for_date(
+                data, city, active_date_str
+            )
+            data["_weatherquant"] = {
+                "nws_target_match": match_meta,
+                "parse_error": parse_error,
+            }
+            if parse_error:
+                log.warning(
+                    "nws: %s date=%s target date absent from daytime periods; available=%s",
+                    city.city_slug,
+                    active_date_str,
+                    (match_meta or {}).get("available_daytime_period_dates"),
+                )
+            return high_f, data
 
         except asyncio.TimeoutError:
             log.warning("nws: timeout for %s (attempt %d/3)", city.city_slug, attempt + 1)

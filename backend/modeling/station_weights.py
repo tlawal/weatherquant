@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select, func
+from sqlalchemy import or_, select, func
 from backend.storage.db import get_session
 from backend.storage.models import (
     Event,
@@ -42,6 +42,9 @@ GLOBAL_MSE_PRIOR = 9.0  # ≈ 3°F RMSE, typical day-ahead NWP error
 # Clamp bounds on final normalized weight so no source dominates or zeros
 WEIGHT_FLOOR = 0.05
 WEIGHT_CAP = 0.60
+# Score station/source skill at a fixed actionable checkpoint instead of using
+# late-night revisions after the daily high has likely already occurred.
+STATION_WEIGHT_SCORING_LEAD_HOURS = 18
 # Live-trading safety gates. Station weights and biases are learned from daily
 # errors, and 3-5 rows is enough to be actively harmful. Keep live probabilities
 # on defaults until the station/source pair has a minimally credible sample.
@@ -52,12 +55,13 @@ MAX_LIVE_STATION_BIAS_MAE_7D_F = 4.0
 # station_calibration.py and signal_engine.py so every traded source can receive
 # per-station bias/weight corrections once it has errors.
 ENSEMBLE_SOURCES = (
-    "nws", "wu_hourly", "hrrr", "hrrr_15min", "nbm", "ecmwf_ifs",
+    "nws", "open_meteo", "wu_hourly", "hrrr", "hrrr_15min", "nbm", "ecmwf_ifs",
     "ecmwf_aifs", "gfs_graphcast", "pangu_weather", "fourcastnet_v2", "aurora",
 )
 # Default fallback weights (match prior hardcoded defaults in temperature_model.py)
 DEFAULT_WEIGHTS: dict[str, float] = {
     "nws": 0.5,
+    "open_meteo": 0.5,
     "wu_hourly": 0.5,
     "hrrr": 0.5,
     "hrrr_15min": 0.35,
@@ -265,12 +269,18 @@ def _day_window(date_et: str, city_tz: str) -> tuple[datetime, datetime, datetim
     return start_dt, end_dt, end_dt.astimezone(timezone.utc)
 
 
+def station_weight_checkpoint_utc(date_et: str, city_tz: str) -> datetime:
+    _, _, event_end_utc = _day_window(date_et, city_tz)
+    return event_end_utc - timedelta(hours=STATION_WEIGHT_SCORING_LEAD_HOURS)
+
+
 async def load_source_skill_summary(
     station_id: Optional[str],
 ) -> dict[str, dict[str, Optional[float]]]:
     """Return per-source skill dict for the tooltip/API.
 
     {source: {weight, bias_f, mae_7d, mae_30d, yesterday_err_f, n_samples}}
+    The legacy key name `yesterday_err_f` is the latest scored checkpoint error.
     """
     out: dict[str, dict[str, Optional[float]]] = {}
     if not station_id:
@@ -329,11 +339,9 @@ async def backfill_forecast_daily_errors(
             )
         ).scalars().all()
         events_by_date = {e.date_et: e for e in event_rows}
-        event_end_by_date: dict[str, datetime] = {}
 
         for d in dates:
-            start_dt, end_dt, event_end_utc = _day_window(d, city_tz)
-            event_end_by_date[d] = event_end_utc
+            start_dt, end_dt, _ = _day_window(d, city_tz)
             event = events_by_date.get(d)
             target_station = (
                 (event.resolution_station_id if event else None)
@@ -382,12 +390,13 @@ async def backfill_forecast_daily_errors(
         if not obs_highs:
             return 0
 
-        # Forecast highs per (source, date) — latest fetch available before the
-        # event day ends. This prevents late/revised rows from rewriting history.
+        # Forecast highs per (source, date) — latest fetch available by the
+        # fixed station-weight checkpoint. This prevents late-night rows after
+        # the peak, including next-day leakage, from rewriting station skill.
         fc: dict[tuple[str, str], float] = {}
         for src in ENSEMBLE_SOURCES:
             for d in dates:
-                cutoff_utc = event_end_by_date.get(d)
+                cutoff_utc = station_weight_checkpoint_utc(d, city_tz)
                 val = (
                     await sess.execute(
                         select(ForecastObs.high_f)
@@ -396,7 +405,12 @@ async def backfill_forecast_daily_errors(
                             ForecastObs.source == src,
                             ForecastObs.date_et == d,
                             ForecastObs.high_f.isnot(None),
+                            ForecastObs.parse_error.is_(None),
                             ForecastObs.fetched_at <= cutoff_utc,
+                            or_(
+                                ForecastObs.model_run_at.is_(None),
+                                ForecastObs.model_run_at <= cutoff_utc,
+                            ),
                         )
                         .order_by(ForecastObs.fetched_at.desc(), ForecastObs.id.desc())
                         .limit(1)
