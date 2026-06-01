@@ -1,5 +1,5 @@
 """
-ML Trainer — extracts historical METAR observations from SQLite,
+ML Trainer — extracts historical METAR observations from the app database,
 engineers features (temp slope, peak timing persistence, seasonality),
 and trains a GradientBoostingRegressor to predict remaining temperature rise.
 
@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import sqlite3
+import asyncio
 
 import numpy as np
 import pandas as pd
@@ -89,29 +90,79 @@ def _old_remaining_rise(hour: int) -> float:
     return 0.0
 
 
-def extract_features_and_train():
-    log.info(f"Connecting to SQLite DB at {DB_PATH}")
-    if not DB_PATH.exists():
-        log.error(f"Database not found at {DB_PATH}. Cannot train.")
-        return
-    conn = sqlite3.connect(str(DB_PATH))
+async def _load_metar_dataframe_from_app_db() -> pd.DataFrame:
+    """Load METAR rows through the app DB layer for Railway/Postgres."""
+    from sqlalchemy import select
 
+    from backend.storage.db import get_session, init_db
+    from backend.storage.models import City, MetarObs
+
+    await init_db()
+    async with get_session() as sess:
+        result = await sess.execute(
+            select(
+                MetarObs.city_id,
+                MetarObs.observed_at,
+                MetarObs.temp_f,
+                City.city_slug,
+                City.tz,
+            )
+            .join(City, MetarObs.city_id == City.id)
+            .where(MetarObs.temp_f.is_not(None))
+            .order_by(MetarObs.city_id, MetarObs.observed_at)
+        )
+        rows = result.all()
+
+    return pd.DataFrame(
+        [
+            {
+                "city_id": row.city_id,
+                "observed_at": row.observed_at,
+                "temp_f": row.temp_f,
+                "city_slug": row.city_slug,
+                "tz": row.tz,
+            }
+            for row in rows
+        ]
+    )
+
+
+def _load_metar_dataframe() -> pd.DataFrame | None:
+    if DB_PATH.exists():
+        log.info(f"Connecting to SQLite DB at {DB_PATH}")
+        conn = sqlite3.connect(str(DB_PATH))
+
+        # Fetch all MetarObs with city timezone
+        query = """
+        SELECT
+            m.city_id,
+            m.observed_at,
+            m.temp_f,
+            c.city_slug,
+            c.tz
+        FROM metar_obs m
+        JOIN cities c ON m.city_id = c.id
+        WHERE m.temp_f IS NOT NULL
+        ORDER BY m.city_id, m.observed_at
+        """
+        log.info("Loading METAR observations from SQLite database...")
+        df = pd.read_sql_query(query, conn, parse_dates=["observed_at"])
+        conn.close()
+        return df
+
+    if os.environ.get("DATABASE_URL"):
+        log.info("SQLite training DB not found at %s; loading from app DATABASE_URL", DB_PATH)
+        return asyncio.run(_load_metar_dataframe_from_app_db())
+
+    log.error(f"Database not found at {DB_PATH}. Cannot train.")
+    return None
+
+
+def extract_features_and_train():
     # 1. Fetch all MetarObs with city timezone
-    query = """
-    SELECT 
-        m.city_id,
-        m.observed_at,
-        m.temp_f,
-        c.city_slug,
-        c.tz
-    FROM metar_obs m
-    JOIN cities c ON m.city_id = c.id
-    WHERE m.temp_f IS NOT NULL
-    ORDER BY m.city_id, m.observed_at
-    """
-    log.info("Loading METAR observations from database...")
-    df = pd.read_sql_query(query, conn, parse_dates=["observed_at"])
-    conn.close()
+    df = _load_metar_dataframe()
+    if df is None:
+        return
 
     if df.empty:
         log.warning("No METAR observations found. Cannot train.")

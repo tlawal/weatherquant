@@ -578,6 +578,7 @@ async def start_scheduler() -> AsyncIOScheduler:
         (job_fetch_open_meteo, "fetch_open_meteo"),
         (job_fetch_open_meteo_models, "fetch_om_models"),
         (job_refresh_missing_station_profiles, "refresh_missing_station_profiles"),
+        (job_update_wallet_rankings, "update_wallet_rankings"),
     ]:
         try:
             await _run_with_heartbeat(name, coro_fn)

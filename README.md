@@ -101,6 +101,8 @@ On `/city/<slug>`, Weather Smart Money first uses V2 exposure and skill rows whe
 
 Bucket Consensus tiles are generated from the current city/date buckets shown on the page. Each tile uses the stored market bucket label, displays the full title with wrapping, and shows ranked long wallet count, net flow, and average entry when available.
 
+Manual refresh is exposed as `POST /api/wallet-rankings/refresh` and the city-page `REFRESH FLOW` control. It refreshes public trades for the selected city/date, writes `wallet_trades` and `wallet_market_exposures`, and updates city-specific weather-wallet skill without overwriting global rankings from a one-city slice. The scheduler also runs `update_wallet_rankings` on worker startup and then at `WALLET_TRACKER_UPDATE_INTERVAL_MINUTES`.
+
 Known limitations: the tracker depends on public Polymarket API availability and scheduler ingestion; V2 skill quality depends on historical resolved markets; normalized trade backfill may lag the v1 read model; PnL estimates are analytics approximations rather than execution ledger accounting; and wallet output is corroborating context only, not a copy-trading signal.
 
 ### Why BMA matters here
@@ -356,7 +358,7 @@ Train the ML residual tracker after data has accumulated:
 python -m backend.modeling.ml_trainer
 ```
 
-Prints MAE improvement vs static baseline; saves `backend/modeling/residual_model.pkl`. Signal engine picks it up on next restart. Until trained, the static lookup-table fallback is used (zero-risk deployment).
+Prints MAE improvement vs static baseline. By default it saves `backend/modeling/residual_model_shadow.pkl`; set `PROMOTE_RESIDUAL_ML=1` to write `backend/modeling/residual_model.pkl` only when chronological date-holdout MAE beats the static table by at least `0.20°F`. It can train from a local SQLite snapshot or the app `DATABASE_URL` through the normal SQLAlchemy storage layer, so Railway/Postgres data can be used without exporting SQLite first. Signal engine picks the promoted model up on next restart; until then, the static lookup-table fallback is used.
 
 ---
 

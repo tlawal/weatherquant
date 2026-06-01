@@ -539,6 +539,73 @@ async def refresh_market_context(
         )
 
 
+# ─── Weather Smart Money ─────────────────────────────────────────────────────
+
+class WalletRankingsRefreshRequest(BaseModel):
+    city_slug: str
+    date_et: Optional[str] = None
+    include_global_skills: bool = False
+
+
+@router.post("/api/wallet-rankings/refresh")
+async def refresh_wallet_rankings(
+    body: WalletRankingsRefreshRequest,
+    actor: str = Depends(require_admin),
+):
+    """Refresh read-only public-wallet analytics for one city/date."""
+    from backend.market_context.wallet_tracker import refresh_wallet_rankings_for_city_date
+
+    city_slug = body.city_slug.strip().lower()
+    async with get_session() as sess:
+        city = await _get_city_or_404(sess, city_slug)
+    target_date = body.date_et or city_local_date(city)
+
+    try:
+        summary = await refresh_wallet_rankings_for_city_date(
+            city_slug,
+            target_date,
+            include_global_skills=body.include_global_skills,
+        )
+        payload = {
+            "ok": summary.enabled and not summary.errors,
+            "enabled": summary.enabled,
+            "city_slug": city_slug,
+            "date_et": target_date,
+            "cities_scanned": summary.cities_scanned,
+            "condition_ids_scanned": summary.condition_ids_scanned,
+            "trades_fetched": summary.trades_fetched,
+            "wallets_updated": summary.wallets_updated,
+            "top_wallet_score": summary.top_wallet_score,
+            "errors": list(summary.errors),
+            "include_global_skills": body.include_global_skills,
+        }
+        async with get_session() as sess:
+            await append_audit(
+                sess,
+                actor=actor,
+                action="wallet_rankings_refresh",
+                payload=payload,
+                ok=payload["ok"],
+                error_msg=";".join(summary.errors) if summary.errors else None,
+            )
+        return payload
+    except Exception as exc:
+        log.exception("wallet_rankings_refresh failed city=%s date=%s", city_slug, target_date)
+        async with get_session() as sess:
+            await append_audit(
+                sess,
+                actor=actor,
+                action="wallet_rankings_refresh",
+                payload={"city_slug": city_slug, "date_et": target_date},
+                ok=False,
+                error_msg=f"{type(exc).__name__}: {exc}",
+            )
+        raise HTTPException(
+            status_code=500,
+            detail=f"wallet_rankings_refresh failed: {type(exc).__name__}: {exc}",
+        )
+
+
 # ─── Markets ─────────────────────────────────────────────────────────────────
 
 @router.get("/markets/{city_slug}")

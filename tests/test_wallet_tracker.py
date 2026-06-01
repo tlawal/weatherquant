@@ -23,6 +23,7 @@ from backend.market_context.wallet_tracker import (
     get_wallet_leaderboard_payload,
     get_weather_smart_money_payload,
     infer_strategy_style,
+    refresh_wallet_rankings_for_city_date,
     truncate_wallet_address,
     update_wallet_rankings,
     wilson_lower_bound,
@@ -429,6 +430,47 @@ def test_scheduler_update_handles_empty_market_data(tmp_path, monkeypatch):
             )
             await session.commit()
         summary = await update_wallet_rankings()
+        assert summary.enabled is True
+        assert summary.cities_scanned == 1
+        assert summary.condition_ids_scanned == 0
+        assert summary.wallets_updated == 0
+
+    _run(run_test())
+    _run(engine.dispose())
+
+
+def test_city_date_wallet_refresh_scans_only_requested_city(tmp_path, monkeypatch):
+    engine, session_factory = _run(_setup_test_db(tmp_path, monkeypatch))
+    monkeypatch.setattr(Config, "WALLET_TRACKER_ENABLED", True, raising=False)
+    monkeypatch.setattr(Config, "WALLET_TRACKER_START_CITY", "all", raising=False)
+
+    async def run_test():
+        async with session_factory() as session:
+            session.add_all([
+                City(
+                    city_slug="atlanta",
+                    display_name="Atlanta",
+                    metar_station="KATL",
+                    enabled=True,
+                    is_us=True,
+                    unit="F",
+                    tz="America/New_York",
+                ),
+                City(
+                    city_slug="miami",
+                    display_name="Miami",
+                    metar_station="KMIA",
+                    enabled=True,
+                    is_us=True,
+                    unit="F",
+                    tz="America/New_York",
+                ),
+            ])
+            await session.commit()
+        summary = await refresh_wallet_rankings_for_city_date(
+            "atlanta",
+            "2026-06-01",
+        )
         assert summary.enabled is True
         assert summary.cities_scanned == 1
         assert summary.condition_ids_scanned == 0

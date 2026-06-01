@@ -962,11 +962,18 @@ async def _discover_market_refs_for_city(city: Any, *, as_of_date: str) -> list[
     return market_refs
 
 
-async def _wallet_tracker_cities() -> list[Any]:
+async def _wallet_tracker_cities(city_slugs: Iterable[str] | None = None) -> list[Any]:
     from backend.storage.db import get_session
     from backend.storage.repos import get_all_cities, get_city_by_slug
 
-    configured = (Config.WALLET_TRACKER_START_CITY or "atlanta").strip().lower()
+    explicit_slugs = [
+        str(s).strip().lower()
+        for s in (city_slugs or [])
+        if str(s).strip()
+    ]
+    configured = ",".join(explicit_slugs) if explicit_slugs else (
+        Config.WALLET_TRACKER_START_CITY or "atlanta"
+    ).strip().lower()
     async with get_session() as sess:
         if configured == "all":
             return await get_all_cities(sess, enabled_only=True)
@@ -980,6 +987,10 @@ async def _wallet_tracker_cities() -> list[Any]:
 
 async def update_wallet_rankings(
     adapter: PolymarketDataApiTradeAdapter | None = None,
+    *,
+    city_slugs: Iterable[str] | None = None,
+    as_of_date: str | None = None,
+    write_global_skills: bool = True,
 ) -> WalletTrackerSummary:
     _warn_if_execution_caller()
     if not Config.WALLET_TRACKER_READ_ONLY:
@@ -998,7 +1009,7 @@ async def update_wallet_rankings(
     from backend.tz_utils import city_local_date
 
     adapter = adapter or PolymarketDataApiTradeAdapter()
-    cities = await _wallet_tracker_cities()
+    cities = await _wallet_tracker_cities(city_slugs)
     total_conditions = 0
     total_trades = 0
     total_wallets = 0
@@ -1008,8 +1019,8 @@ async def update_wallet_rankings(
     all_exposures: list[WalletExposureMetric] = []
 
     for city in cities:
-        as_of_date = city_local_date(city)
-        market_refs = await _discover_market_refs_for_city(city, as_of_date=as_of_date)
+        city_as_of_date = as_of_date or city_local_date(city)
+        market_refs = await _discover_market_refs_for_city(city, as_of_date=city_as_of_date)
         condition_ids = [m.condition_id for m in market_refs]
         total_conditions += len(condition_ids)
         if not condition_ids:
@@ -1042,7 +1053,7 @@ async def update_wallet_rankings(
             min_trades=Config.WALLET_TRACKER_MIN_TRADES,
             min_active_days=Config.WALLET_TRACKER_MIN_ACTIVE_DAYS,
             max_wallets=Config.WALLET_TRACKER_MAX_WALLETS_PER_CITY,
-            as_of_date=as_of_date,
+            as_of_date=city_as_of_date,
         )
         async with get_session() as sess:
             for metric in metrics:
@@ -1061,14 +1072,17 @@ async def update_wallet_rankings(
         )
 
     if all_exposures:
-        global_skills = compute_wallet_skill_scores(
-            all_exposures,
-            all_market_refs,
-            scope="global",
-            window_days=Config.WALLET_TRACKER_SKILL_WINDOW_DAYS,
-            min_resolved_markets=Config.WALLET_TRACKER_MIN_RESOLVED_MARKETS,
-            min_volume_usd=Config.WALLET_TRACKER_MIN_VOLUME_USD,
-            min_active_days=Config.WALLET_TRACKER_MIN_ACTIVE_DAYS,
+        global_skills = (
+            compute_wallet_skill_scores(
+                all_exposures,
+                all_market_refs,
+                scope="global",
+                window_days=Config.WALLET_TRACKER_SKILL_WINDOW_DAYS,
+                min_resolved_markets=Config.WALLET_TRACKER_MIN_RESOLVED_MARKETS,
+                min_volume_usd=Config.WALLET_TRACKER_MIN_VOLUME_USD,
+                min_active_days=Config.WALLET_TRACKER_MIN_ACTIVE_DAYS,
+            )
+            if write_global_skills else []
         )
         city_skill_rows: list[WalletSkillMetric] = []
         for city in cities:
@@ -1096,6 +1110,26 @@ async def update_wallet_rankings(
         wallets_updated=total_wallets,
         top_wallet_score=top_score,
         errors=tuple(errors),
+    )
+
+
+async def refresh_wallet_rankings_for_city_date(
+    city_slug: str,
+    date_et: str,
+    adapter: PolymarketDataApiTradeAdapter | None = None,
+    *,
+    include_global_skills: bool = False,
+) -> WalletTrackerSummary:
+    """Refresh read-only wallet analytics for one city page/date.
+
+    Manual city refreshes should not overwrite global skill rankings with a
+    one-city slice unless the caller explicitly opts in.
+    """
+    return await update_wallet_rankings(
+        adapter=adapter,
+        city_slugs=[city_slug],
+        as_of_date=date_et,
+        write_global_skills=include_global_skills,
     )
 
 

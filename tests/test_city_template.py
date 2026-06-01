@@ -50,6 +50,9 @@ def test_wallet_leaderboard_disclaimer_is_read_only():
     template = Path("web/templates/city.html").read_text()
 
     assert "Weather Smart Money" in template
+    assert "REFRESH FLOW" in template
+    assert "refreshSmartMoney" in template
+    assert "/api/wallet-rankings/refresh" in template
     assert "CURRENT MARKET" in template
     assert "GLOBAL LEADERS" in template
     assert "CITY LEADERS" in template

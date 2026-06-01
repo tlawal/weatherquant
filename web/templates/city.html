@@ -1327,16 +1327,25 @@
         {{ wallet_leaderboard.disclaimer if wallet_leaderboard else "Wallet leaderboard is read-only public-market analytics. It is not a copy-trading signal and does not trigger automated trades." }}
       </p>
     </div>
-    <div class="text-[10px] mono sm:text-right" style="color:var(--text-muted)">
-      {% if wallet_leaderboard and wallet_leaderboard.current_market %}
-        {{ wallet_leaderboard.current_market|length }} current wallet{{ '' if wallet_leaderboard.current_market|length == 1 else 's' }}
-      {% elif wallet_leaderboard and wallet_leaderboard.global_leaders %}
-        {{ wallet_leaderboard.global_leaders|length }} global leader{{ '' if wallet_leaderboard.global_leaders|length == 1 else 's' }}
-      {% else %}
-        no wallet data
-      {% endif %}
-      <div>limit {{ wallet_leaderboard.display_limit if wallet_leaderboard else 50 }}</div>
-      <div>source {{ wallet_coverage.current_source or (wallet_leaderboard.current_source if wallet_leaderboard else 'none') }}</div>
+    <div class="flex flex-col items-start gap-2 sm:items-end">
+      <button
+        onclick="refreshSmartMoney('{{ city.city_slug }}', '{{ today_et }}', this)"
+        class="px-3 py-1.5 rounded-lg text-[10px] font-bold tracking-widest transition-all border"
+        style="{% if wallet_leaderboard and wallet_leaderboard.enabled %}background:var(--bg-panel);border-color:var(--cyan);color:var(--cyan){% else %}background:var(--bg-panel);border-color:var(--border);color:var(--text-muted);opacity:0.5;cursor:not-allowed{% endif %}"
+        {% if not wallet_leaderboard or not wallet_leaderboard.enabled %}disabled title="Set WALLET_TRACKER_ENABLED=true to enable public wallet refresh"{% endif %}>
+        REFRESH FLOW
+      </button>
+      <div class="text-[10px] mono sm:text-right" style="color:var(--text-muted)">
+        {% if wallet_leaderboard and wallet_leaderboard.current_market %}
+          {{ wallet_leaderboard.current_market|length }} current wallet{{ '' if wallet_leaderboard.current_market|length == 1 else 's' }}
+        {% elif wallet_leaderboard and wallet_leaderboard.global_leaders %}
+          {{ wallet_leaderboard.global_leaders|length }} global leader{{ '' if wallet_leaderboard.global_leaders|length == 1 else 's' }}
+        {% else %}
+          no wallet data
+        {% endif %}
+        <div>limit {{ wallet_leaderboard.display_limit if wallet_leaderboard else 50 }}</div>
+        <div>source {{ wallet_coverage.current_source or (wallet_leaderboard.current_source if wallet_leaderboard else 'none') }}</div>
+      </div>
     </div>
   </div>
   <div class="mb-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-4 text-[10px] mono"
@@ -1346,7 +1355,6 @@
     <div class="panel rounded p-2">Skill rows <span style="color:var(--cyan)">{{ smart_skill_count }}</span></div>
     <div class="panel rounded p-2">Last refresh <span style="color:var(--cyan)">{{ wallet_coverage.last_refresh[:16]|replace('T', ' ') if wallet_coverage.last_refresh else 'unknown' }}</span></div>
   </div>
-
   <div id="weather-smart-money-panel"
        x-show="smartOpen"
        x-cloak
@@ -3321,6 +3329,53 @@ async function refreshMarketContext(citySlug, dateEt, buttonEl) {
     window.location.reload();
   } catch (err) {
     alert(`Market Context refresh failed: ${err.message}`);
+    buttonEl.disabled = false;
+    buttonEl.textContent = originalText;
+  }
+}
+
+async function refreshSmartMoney(citySlug, dateEt, buttonEl) {
+  if (!buttonEl || buttonEl.disabled) return;
+
+  const originalText = buttonEl.textContent;
+  buttonEl.disabled = true;
+  buttonEl.textContent = 'REFRESHING';
+
+  try {
+    const tok = getAdminToken() || promptForToken();
+    if (!tok) throw new Error('Admin token required');
+
+    const res = await fetch('/api/wallet-rankings/refresh', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Admin-Token': tok,
+      },
+      body: JSON.stringify({
+        city_slug: citySlug,
+        date_et: dateEt,
+        include_global_skills: false,
+      }),
+    });
+
+    let payload = null;
+    try {
+      payload = await res.json();
+    } catch (e) {
+      payload = null;
+    }
+
+    if (!res.ok) {
+      throw new Error((payload && payload.detail) || `HTTP ${res.status}`);
+    }
+    if (payload && payload.errors && payload.errors.length) {
+      throw new Error(payload.errors.join(', '));
+    }
+
+    buttonEl.textContent = payload ? `DONE ${payload.trades_fetched || 0}` : 'DONE';
+    setTimeout(() => window.location.reload(), 500);
+  } catch (err) {
+    alert(`Smart Money refresh failed: ${err.message}`);
     buttonEl.disabled = false;
     buttonEl.textContent = originalText;
   }
