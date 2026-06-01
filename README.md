@@ -206,7 +206,7 @@ The complementary **Lead-Time Skill** table (`SourceLeadTimeSkill`) is refreshed
 
 ### Sizing
 
-- **Kelly criterion**, fractional (default 0.10 from `KELLY_FRACTION` env var), capped at `MAX_POSITION_PCT` (default 0.05) of bankroll per single trade.
+- **Kelly criterion**, fractional (default 0.10 from `KELLY_FRACTION` env var), capped at `MAX_POSITION_PCT` (default 0.10) of bankroll per single trade. Auto sizing respects Polymarket's `$1` notional floor: it may bump a positive-Kelly order up to the legal minimum only when position cap, remaining bankroll, top-book liquidity, and `MIN_NOTIONAL_BUMP_MAX_KELLY_MULTIPLE` all permit it.
 - **Daily loss limit**: automated halt when realized daily loss exceeds 2% of bankroll.
 - **Signal gates**: `min_true_edge`, `max_entry_price`, `max_spread`, `min_liquidity_shares`. Bypassable via `POST /api/trade-override` (audit-logged with operator-supplied reason; the `⚡` button on city-page bucket rows triggers this).
 
@@ -323,8 +323,10 @@ The boot path **fail-fast aborts** if `DATABASE_URL` is missing on Railway and f
 **Trading**
 - `ADMIN_TOKEN` — Bearer for admin/trade endpoints.
 - `KELLY_FRACTION` — Default `0.10` (1/10th Kelly).
-- `MAX_POSITION_PCT` — Default `0.05`.
+- `MAX_POSITION_PCT` — Default `0.10`.
 - `BANKROLL_CAP` — Optional override; otherwise read from on-chain balance.
+- `MIN_ORDER_NOTIONAL_DOLLARS` — Default `1.00`; Polymarket's executable notional floor for dust rejection.
+- `MIN_NOTIONAL_BUMP_MAX_KELLY_MULTIPLE` — Default `3.00`; maximum allowed multiple from desired Kelly dollars to a legal minimum-size order.
 
 **Market Context Agent (optional)**
 - `MARKET_CONTEXT_LLM_PROVIDER` ∈ `{openai, anthropic, gemini, openrouter}`

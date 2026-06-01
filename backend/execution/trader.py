@@ -382,19 +382,27 @@ async def execute_signal(
         )
 
         if sizing.rejected:
+            sizing_payload = {
+                "kelly_f": sizing.kelly_f,
+                "kelly_size": sizing.kelly_size,
+                "kelly_source": sizing.kelly_source,
+                "position_cap": sizing.position_cap,
+                "liquidity_cap": sizing.liquidity_cap,
+                "bankroll_remaining": sizing.bankroll_remaining,
+                "min_order_notional": sizing.min_order_notional,
+                "liquidity_haircut": sizing.liquidity_haircut,
+                "min_notional_bump": sizing.min_notional_bump,
+                "reject_reason": sizing.reject_reason,
+            }
             result["status"] = "sizing_rejected"
             result["error"] = sizing.reject_reason
+            result["sizing"] = sizing_payload
             async with get_session() as sess:
                 await append_audit(
                     sess,
                     actor=actor,
                     action="trade_sizing_rejected",
-                    payload={**result, "sizing": {
-                        "kelly_f": sizing.kelly_f,
-                        "kelly_size": sizing.kelly_size,
-                        "kelly_source": sizing.kelly_source,
-                        "reject_reason": sizing.reject_reason,
-                    }},
+                    payload={**result, "sizing": sizing_payload},
                     ok=False,
                 )
             return result
@@ -408,6 +416,9 @@ async def execute_signal(
             "position_cap": sizing.position_cap,
             "liquidity_cap": sizing.liquidity_cap,
             "bankroll_remaining": sizing.bankroll_remaining,
+            "min_order_notional": sizing.min_order_notional,
+            "liquidity_haircut": sizing.liquidity_haircut,
+            "min_notional_bump": sizing.min_notional_bump,
         }
 
     # ── Enforce Polymarket $1 minimum notional for market BUY orders ──────────

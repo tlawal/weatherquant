@@ -68,6 +68,8 @@ class Config:
     KELLY_FRACTION: float = _float("KELLY_FRACTION", 0.10)
     MAX_DAILY_LOSS: float = _float("MAX_DAILY_LOSS", 5.0)  # positive number, max loss
     MIN_TRUE_EDGE: float = _float("MIN_TRUE_EDGE", 0.10)
+    MIN_ORDER_NOTIONAL_DOLLARS: float = _float("MIN_ORDER_NOTIONAL_DOLLARS", 1.0)
+    MIN_NOTIONAL_BUMP_MAX_KELLY_MULTIPLE: float = _float("MIN_NOTIONAL_BUMP_MAX_KELLY_MULTIPLE", 3.0)
     MIN_LIQUIDITY_SHARES: float = _float("MIN_LIQUIDITY_SHARES", 10.0)
     MAX_POSITIONS_PER_EVENT: int = _int("MAX_POSITIONS_PER_EVENT", 2)
     MAX_LIQUIDITY_PCT: float = _float("MAX_LIQUIDITY_PCT", 0.20)
@@ -210,6 +212,11 @@ class Config:
             warnings.append("ARMING_SECRET not set — arming disabled")
         if cls.BANKROLL_CAP > 100:
             warnings.append(f"BANKROLL_CAP={cls.BANKROLL_CAP} exceeds $100 safety limit!")
+        if cls.BANKROLL_CAP * cls.MAX_POSITION_PCT < cls.MIN_ORDER_NOTIONAL_DOLLARS:
+            warnings.append(
+                "BANKROLL_CAP × MAX_POSITION_PCT is below Polymarket minimum notional — "
+                "auto sizing can only trade via the min-notional bump"
+            )
         if cls.MARKET_CONTEXT_LLM_PROVIDER and not cls.market_context_llm_ready():
             warnings.append(
                 "MARKET_CONTEXT_LLM_PROVIDER configured but model/API key incomplete — Market Context refresh disabled"
