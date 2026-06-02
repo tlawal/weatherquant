@@ -386,19 +386,27 @@ python -m backend.modeling.ml_trainer
 
 By default this is shadow-only and writes `backend/modeling/residual_model_shadow.pkl` plus `backend/modeling/residual_model_shadow_meta.json`. The metadata records train/test MAE, baseline MAE, date split, sample count, city count, and whether promotion is ready.
 
-Use the live Railway database without exporting SQLite:
+Use the live Railway database from inside the deployed service network:
 
 ```bash
-railway run python -m backend.modeling.ml_trainer
+railway ssh "python -m backend.modeling.ml_trainer"
 ```
+
+`railway run` only injects Railway environment variables into a local process; it does not join Railway's private network. If `DATABASE_URL` uses `postgres.railway.internal`, run through `railway ssh` or the trainer will fail DNS resolution from your laptop.
 
 Promote only when the chronological holdout beats the static table by at least `0.20°F`:
 
 ```bash
-railway run env PROMOTE_RESIDUAL_ML=1 python -m backend.modeling.ml_trainer
+railway ssh "PROMOTE_RESIDUAL_ML=1 python -m backend.modeling.ml_trainer"
 ```
 
 Promotion writes `backend/modeling/residual_model.pkl` plus `backend/modeling/residual_model_meta.json`; otherwise it still saves the shadow model and logs why promotion was blocked. The signal engine loads a promoted model on restart. Until a promoted model exists, `residual_tracker.py` uses the static remaining-rise lookup table.
+
+Operator prompt for a shadow-only production check:
+
+```text
+Run the WeatherQuant residual ML trainer in shadow mode on the live Railway database from inside the service network. Do not promote or change live inference. Report train MAE, test MAE, static-table baseline MAE, improvement in degrees F, sample count, city count, chronological train/test dates, and promotion_ready. If the trainer fails, patch the trainer first, rerun it in shadow, then summarize the exact error and fix.
+```
 
 ---
 

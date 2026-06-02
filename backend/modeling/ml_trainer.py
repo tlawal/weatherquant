@@ -179,11 +179,13 @@ def extract_features_and_train():
             return row["observed_at"].tz_convert(ZoneInfo("America/New_York"))
 
     log.info("Converting timestamps to local timezones...")
+    # Per-city timezones produce an object dtype Series when mixed in one
+    # DataFrame, so pandas' `.dt` accessor is not safe here.
     df["local_time"] = df.apply(to_local, axis=1)
-    df["date_local"] = df["local_time"].dt.date
-    df["hour_local"] = df["local_time"].dt.hour
-    df["minute_local"] = df["local_time"].dt.minute
-    df["day_of_year"] = df["local_time"].dt.dayofyear
+    df["date_local"] = df["local_time"].apply(lambda dt: dt.date())
+    df["hour_local"] = df["local_time"].apply(lambda dt: dt.hour)
+    df["minute_local"] = df["local_time"].apply(lambda dt: dt.minute)
+    df["day_of_year"] = df["local_time"].apply(lambda dt: dt.timetuple().tm_yday)
     df["minutes_since_midnight"] = df["hour_local"] * 60 + df["minute_local"]
 
     log.info(f"Loaded {len(df)} total METAR observations across {df['city_id'].nunique()} cities.")
