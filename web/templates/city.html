@@ -1352,9 +1352,11 @@
       </div>
     </div>
   </div>
-  <div class="mb-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-4 text-[10px] mono"
+  <div class="mb-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-6 text-[10px] mono"
        style="color:var(--text-muted)">
-    <div class="panel rounded p-2">Current rows <span style="color:var(--cyan)">{{ smart_current_count }}</span></div>
+    <div class="panel rounded p-2">Current wallets <span style="color:var(--cyan)">{{ smart_current_count }}</span></div>
+    <div class="panel rounded p-2">Trade rows <span style="color:var(--cyan)">{{ wallet_coverage.wallet_trade_rows|default(0) }}</span></div>
+    <div class="panel rounded p-2">Conditions <span style="color:var(--cyan)">{{ wallet_coverage.condition_ids_scanned|default(0) }}</span></div>
     <div class="panel rounded p-2">Exposure rows <span style="color:var(--cyan)">{{ wallet_coverage.exposure_rows|default(0) }}</span></div>
     <div class="panel rounded p-2">Skill rows <span style="color:var(--cyan)">{{ smart_skill_count }}</span></div>
     <div class="panel rounded p-2">Last refresh <span style="color:var(--cyan)">{{ wallet_coverage.last_refresh[:16]|replace('T', ' ') if wallet_coverage.last_refresh else 'unknown' }}</span></div>
@@ -2033,7 +2035,7 @@
               <th class="px-2 py-2 text-right" style="color:#FBBF24" title="M1 BMA shadow probability — Gaussian-mixture predictive over the same per-source forecasts, conditioned on observed high when available. Read-only; does not affect trade decisions during shadow phase.">BMA</th>
               <th class="px-2 py-2 text-right" title="Best bid / ask / spread from the latest stored orderbook snapshot.">Book</th>
               <th class="px-2 py-2 text-right" title="Bid depth / ask depth in shares at the top of book.">Depth</th>
-              <th class="px-2 py-2 text-right" style="color:var(--cyan)" title="Estimated model edge: model probability - market probability - execution cost.">Est. Model Edge</th>
+              <th class="px-2 py-2 text-right" style="color:var(--cyan)" title="Entry EV after costs: calibrated model probability minus current market midpoint minus estimated execution cost. Use Hold Edge @ Bid for positions you already own.">Entry EV</th>
               <th class="px-2 py-2 text-right" title="Conservative size cap based on the configured max liquidity participation.">Max Size</th>
               <th class="px-2 py-2 text-left">Trade State</th>
               <th class="px-2 py-2 text-center">▶</th>
@@ -2178,7 +2180,7 @@
                 <span style="color:var(--text-muted)">Monitor</span>
                 {% endif %}
                 {% if b.ev_at_bid is not none %}
-                <div class="mono text-[9px]" style="color:{% if b.ev_at_bid >= 0 %}#86EFAC{% else %}#FCA5A5{% endif %}" title="Estimated hold edge at bid: model fair value minus current bid; negative means selling is favored by the model.">Hold Edge @ Bid {{ "%+.1f"|format(b.ev_at_bid * 100) }}c/share</div>
+                <div class="mono text-[9px]" style="color:{% if b.ev_at_bid >= 0 %}#86EFAC{% else %}#FCA5A5{% endif %}" title="Hold EV at the current bid: calibrated model probability minus the executable sell bid. This is an exit-side mark, not proof that forecasts changed.">Hold EV @ Bid {{ "%+.1f"|format(b.ev_at_bid * 100) }}c/share</div>
                 {% endif %}
               </td>
               <td class="px-2 py-2.5 text-center">

@@ -35,7 +35,8 @@ def test_station_calibration_card_separates_overall_and_current_lead_skill():
 def test_buckets_table_surfaces_execution_microstructure():
     template = Path("web/templates/city.html").read_text()
 
-    assert "Est. Model Edge" in template
+    assert "Entry EV" in template
+    assert "Hold EV @ Bid" in template
     assert "Intraday" in template
     assert "Legacy Daily-High PDF" in template
     assert "Intraday Threshold" in template
@@ -61,7 +62,9 @@ def test_wallet_leaderboard_disclaimer_is_read_only():
     assert "CITY LEADERS" in template
     assert "smartOpen" in template
     assert "weather-smart-money-panel" in template
-    assert "Current rows" in template
+    assert "Current wallets" in template
+    assert "Trade rows" in template
+    assert "Conditions" in template
     assert "Exposure rows" in template
     assert "Skill rows" in template
     assert "Last refresh" in template

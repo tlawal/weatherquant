@@ -326,11 +326,12 @@ class PolymarketDataApiTradeAdapter:
             return []
         limit = min(limit or Config.WALLET_TRACKER_FETCH_LIMIT, 10000)
         page_size = min(500, limit)
+        condition_chunk_size = max(1, min(20, Config.WALLET_TRACKER_CONDITION_CHUNK_SIZE))
         timeout = aiohttp.ClientTimeout(total=self.timeout_s)
         trades: list[PublicTrade] = []
         async with aiohttp.ClientSession(timeout=timeout, headers=_USER_AGENT) as http:
-            for chunk_offset in range(0, len(ids), 20):
-                chunk = ids[chunk_offset:chunk_offset + 20]
+            for chunk_offset in range(0, len(ids), condition_chunk_size):
+                chunk = ids[chunk_offset:chunk_offset + condition_chunk_size]
                 fetched_for_chunk = 0
                 for page_offset in range(0, limit, page_size):
                     params = {
@@ -342,10 +343,11 @@ class PolymarketDataApiTradeAdapter:
                         params["takerOnly"] = "true"
                     url = f"{DATA_API}/trades"
                     log.info(
-                        "wallet_tracker: fetching public trades markets=%d page_offset=%d page_size=%d",
+                        "wallet_tracker: fetching public trades markets=%d page_offset=%d page_size=%d chunk_size=%d",
                         len(chunk),
                         page_offset,
                         page_size,
+                        condition_chunk_size,
                     )
                     try:
                         async with http.get(url, params=params) as resp:
@@ -918,9 +920,16 @@ def compute_wallet_skill_scores(
     ]
 
 
-async def _discover_market_refs_for_city(city: Any, *, as_of_date: str) -> list[MarketRef]:
+async def _discover_market_refs_for_city(
+    city: Any,
+    *,
+    as_of_date: str,
+    lookback_days: int | None = None,
+    exact_date: bool = False,
+) -> list[MarketRef]:
     from backend.storage.db import get_session
     from backend.storage.repos import (
+        get_event,
         get_buckets_for_event,
         get_latest_market_snapshots_bulk,
         get_recent_events_for_city,
@@ -928,12 +937,16 @@ async def _discover_market_refs_for_city(city: Any, *, as_of_date: str) -> list[
 
     market_refs: list[MarketRef] = []
     async with get_session() as sess:
-        events = await get_recent_events_for_city(
-            sess,
-            city.id,
-            before_or_on_date_et=as_of_date,
-            limit=max(1, Config.WALLET_TRACKER_LOOKBACK_DAYS),
-        )
+        if exact_date:
+            event = await get_event(sess, city.id, as_of_date)
+            events = [event] if event else []
+        else:
+            events = await get_recent_events_for_city(
+                sess,
+                city.id,
+                before_or_on_date_et=as_of_date,
+                limit=max(1, lookback_days or Config.WALLET_TRACKER_LOOKBACK_DAYS),
+            )
         bucket_rows = []
         for event in events:
             buckets = await get_buckets_for_event(sess, event.id)
@@ -990,6 +1003,8 @@ async def update_wallet_rankings(
     *,
     city_slugs: Iterable[str] | None = None,
     as_of_date: str | None = None,
+    lookback_days: int | None = None,
+    exact_date: bool = False,
     write_global_skills: bool = True,
 ) -> WalletTrackerSummary:
     _warn_if_execution_caller()
@@ -1020,7 +1035,12 @@ async def update_wallet_rankings(
 
     for city in cities:
         city_as_of_date = as_of_date or city_local_date(city)
-        market_refs = await _discover_market_refs_for_city(city, as_of_date=city_as_of_date)
+        market_refs = await _discover_market_refs_for_city(
+            city,
+            as_of_date=city_as_of_date,
+            lookback_days=lookback_days,
+            exact_date=exact_date,
+        )
         condition_ids = [m.condition_id for m in market_refs]
         total_conditions += len(condition_ids)
         if not condition_ids:
@@ -1129,6 +1149,8 @@ async def refresh_wallet_rankings_for_city_date(
         adapter=adapter,
         city_slugs=[city_slug],
         as_of_date=date_et,
+        lookback_days=1,
+        exact_date=True,
         write_global_skills=include_global_skills,
     )
 
@@ -1639,6 +1661,8 @@ async def get_weather_smart_money_payload(
         get_wallet_market_exposures_for_event,
         get_wallet_skill_scores,
     )
+    from sqlalchemy import func, select
+    from backend.storage.models import WalletTrade
 
     limit = limit or Config.WALLET_TRACKER_DISPLAY_LIMIT
     buckets = buckets or []
@@ -1688,6 +1712,18 @@ async def get_weather_smart_money_payload(
             date_et,
             limit=max(500, limit * 20),
         )
+        trade_coverage = (
+            await sess.execute(
+                select(
+                    func.count(WalletTrade.id),
+                    func.count(func.distinct(WalletTrade.wallet_address)),
+                    func.count(func.distinct(WalletTrade.condition_id)),
+                ).where(
+                    WalletTrade.city_slug == city_slug,
+                    WalletTrade.date == date_et,
+                )
+            )
+        ).one()
 
     global_by_wallet = {
         str(row.wallet_address).lower(): row
@@ -1771,6 +1807,9 @@ async def get_weather_smart_money_payload(
         "legacy_current_rows": len(legacy_current_rows),
         "legacy_city_rows": len(legacy_city_rows),
         "legacy_global_rows": len(legacy_global_rows),
+        "wallet_trade_rows": int(trade_coverage[0] or 0),
+        "wallets_scanned": int(trade_coverage[1] or 0),
+        "condition_ids_scanned": int(trade_coverage[2] or 0),
         "exposure_rows": len(exposure_rows),
         "global_skill_rows": len(global_rows),
         "city_skill_rows": len(city_rows),

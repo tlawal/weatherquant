@@ -207,13 +207,17 @@ def _run(coro):
 
 
 def test_cascade_edge_decay_fires_after_n_consecutive_negative_evs(stub_db):
-    """EV decays over EDGE_DECAY_DEBOUNCE_RUNS runs → EDGE_DECAY exit fires."""
+    """EV decays and model probability drops → EDGE_DECAY exit fires."""
     n = Config.EDGE_DECAY_DEBOUNCE_RUNS
     bucket_id = 100
     ee._ev_cache[bucket_id] = [Config.EDGE_DECAY_THRESHOLD - 0.01] * n
 
     pos = _make_position(bucket_id=bucket_id, age_seconds=7200)
-    signal = _make_signal(bucket_id=bucket_id, ev_at_bid=Config.EDGE_DECAY_THRESHOLD - 0.01)
+    signal = _make_signal(
+        bucket_id=bucket_id,
+        ev_at_bid=Config.EDGE_DECAY_THRESHOLD - 0.01,
+        model_prob=0.35,
+    )
 
     result = _run(ee._run_exit_cascade_for_position(pos, signal, None, None))
     assert result is not None
@@ -221,6 +225,35 @@ def test_cascade_edge_decay_fires_after_n_consecutive_negative_evs(stub_db):
     assert result["reason"] == "ev_decayed"
     assert result["diagnostics"]["entry_ev_at_bid"] == pytest.approx(0.04)
     assert result["diagnostics"]["ev_drop"] >= Config.EDGE_DECAY_MIN_EV_DROP
+    assert result["diagnostics"]["model_prob_drop"] >= Config.EDGE_DECAY_MIN_MODEL_PROB_DROP
+
+
+def test_edge_decay_suppresses_market_reprice_without_model_deterioration():
+    """A higher bid can make hold EV negative; that alone is not model edge decay."""
+    n = Config.EDGE_DECAY_DEBOUNCE_RUNS
+    bucket_id = 100
+    ee._ev_cache[bucket_id] = [Config.EDGE_DECAY_THRESHOLD - 0.01] * n
+    pos = _make_position(
+        bucket_id=bucket_id,
+        avg_cost=0.40,
+        age_seconds=7200,
+        entry_ev_at_bid=0.04,
+        entry_model_prob=0.40,
+    )
+    signal = _make_signal(
+        bucket_id=bucket_id,
+        ev_at_bid=Config.EDGE_DECAY_THRESHOLD - 0.01,
+        yes_bid=0.415,
+        model_prob=0.40,
+    )
+
+    allowed, diagnostics = ee._edge_decay_exit_allowed(
+        pos, signal, age_s=7200, bid=signal.yes_bid
+    )
+    assert allowed is False
+    assert diagnostics["blocked_reason"] == "no_model_deterioration"
+    assert diagnostics["model_prob_drop"] == pytest.approx(0.0)
+    assert diagnostics["bid_delta"] > 0
 
 
 def test_cascade_edge_decay_does_not_sell_manual_negative_edge_that_improved(stub_db):
@@ -280,7 +313,11 @@ def test_cascade_consensus_shift_with_decayed_ev_fires_edge_decay_first(stub_db)
     ee._ev_cache[bucket_id] = [Config.EDGE_DECAY_THRESHOLD - 0.01] * n
 
     pos = _make_position(bucket_id=bucket_id, age_seconds=7200)
-    signal = _make_signal(bucket_id=bucket_id, ev_at_bid=Config.EDGE_DECAY_THRESHOLD - 0.01)
+    signal = _make_signal(
+        bucket_id=bucket_id,
+        ev_at_bid=Config.EDGE_DECAY_THRESHOLD - 0.01,
+        model_prob=0.35,
+    )
     consensus_sig = _make_signal(
         bucket_id=consensus_bucket_id, ev_at_bid=0.10, model_prob=0.55, bucket_idx=4,
     )

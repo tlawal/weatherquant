@@ -6,8 +6,8 @@ Interval: 300 seconds (5 min)
     1. EMERGENCY: METAR obs contradicts bucket by >= 3°F (Market sell)
     1b. EDGE_DECAY: ev_at_bid <= EDGE_DECAY_THRESHOLD for EDGE_DECAY_DEBOUNCE_RUNS
         consecutive runs, plus a material deterioration from the stored entry
-        EV baseline (Limit sell at bid). Fires before URGENT so EV-based exits
-        take priority over structural-shift exits.
+        EV baseline and model/source thesis (Limit sell at bid). Fires before
+        URGENT so EV-based exits take priority over structural-shift exits.
     2. URGENT: Model consensus shifted to different bucket (Limit sell bid - 1c)
        — debounced: requires CONSENSUS_DEBOUNCE_RUNS consecutive shifts
        — spread-guarded: suppressed when spread > URGENT_EXIT_MAX_SPREAD
@@ -270,6 +270,37 @@ def _source_highs(reason: dict | None) -> dict[str, float]:
     return highs
 
 
+def _bucket_miss_distance_f(signal: BucketSignal, temp_f: float | None) -> float | None:
+    """Distance outside the held bucket; 0 means the forecast is inside it."""
+    temp = _safe_float(temp_f)
+    if temp is None:
+        return None
+    low = _safe_float(signal.low_f)
+    high = _safe_float(signal.high_f)
+    if low is not None and temp < low:
+        return low - temp
+    if high is not None and temp > high:
+        return temp - high
+    return 0.0
+
+
+def _source_forecast_deteriorations(signal: BucketSignal, entry_sources: dict, current_sources: dict) -> dict[str, float]:
+    """Per-source increase in distance from the held bucket since entry."""
+    deteriorations: dict[str, float] = {}
+    for key, current in current_sources.items():
+        entry = _safe_float(entry_sources.get(key))
+        if entry is None:
+            continue
+        entry_distance = _bucket_miss_distance_f(signal, entry)
+        current_distance = _bucket_miss_distance_f(signal, current)
+        if entry_distance is None or current_distance is None:
+            continue
+        deterioration = current_distance - entry_distance
+        if deterioration > 0:
+            deteriorations[key] = round(deterioration, 3)
+    return deteriorations
+
+
 def _entry_ev_at_bid(entry_decision: dict) -> float | None:
     ev = _safe_float(entry_decision.get("ev_at_bid"))
     if ev is not None:
@@ -300,11 +331,16 @@ def _edge_decay_diagnostics(pos, signal: BucketSignal, entry_decision: dict) -> 
         entry = _safe_float(entry_sources.get(key))
         if entry is not None:
             source_deltas[key] = round(current - entry, 3)
+    source_deteriorations = _source_forecast_deteriorations(signal, entry_sources, current_sources)
 
     entry_ev = _entry_ev_at_bid(entry_decision)
     current_ev = _safe_float(signal.ev_at_bid)
     entry_model_prob = _safe_float(entry_decision.get("model_prob"))
     current_model_prob = _safe_float(signal.model_prob)
+    model_prob_drop = (
+        round(entry_model_prob - current_model_prob, 6)
+        if current_model_prob is not None and entry_model_prob is not None else None
+    )
     entry_market_prob = _safe_float(entry_decision.get("market_prob"))
     current_market_prob = _safe_float(signal.mkt_prob)
     entry_true_edge = _safe_float(entry_decision.get("true_edge"))
@@ -329,6 +365,7 @@ def _edge_decay_diagnostics(pos, signal: BucketSignal, entry_decision: dict) -> 
             round(current_model_prob - entry_model_prob, 6)
             if current_model_prob is not None and entry_model_prob is not None else None
         ),
+        "model_prob_drop": model_prob_drop,
         "entry_market_prob": entry_market_prob,
         "current_market_prob": current_market_prob,
         "market_prob_delta": (
@@ -348,6 +385,10 @@ def _edge_decay_diagnostics(pos, signal: BucketSignal, entry_decision: dict) -> 
             if current_bid is not None and entry_bid is not None else None
         ),
         "source_high_deltas": source_deltas,
+        "source_forecast_deterioration_f": source_deteriorations,
+        "max_source_forecast_deterioration_f": (
+            max(source_deteriorations.values()) if source_deteriorations else 0.0
+        ),
         "recent_ev_at_bid": [
             round(e, 6)
             for e in _ev_cache.get(pos.bucket_id, [])[-Config.EDGE_DECAY_DEBOUNCE_RUNS:]
@@ -363,6 +404,9 @@ def _edge_decay_exit_allowed(pos, signal: BucketSignal, age_s: float, bid: float
     diagnostics["threshold"] = Config.EDGE_DECAY_THRESHOLD
     diagnostics["required_min_drop"] = Config.EDGE_DECAY_MIN_EV_DROP
     diagnostics["required_entry_min_ev"] = Config.EDGE_DECAY_ENTRY_MIN_EV
+    diagnostics["require_model_deterioration"] = Config.EDGE_DECAY_REQUIRE_MODEL_DETERIORATION
+    diagnostics["required_model_prob_drop"] = Config.EDGE_DECAY_MIN_MODEL_PROB_DROP
+    diagnostics["required_source_temp_deterioration_f"] = Config.EDGE_DECAY_MIN_SOURCE_TEMP_DETERIORATION_F
 
     if signal.ev_at_bid is None:
         diagnostics["blocked_reason"] = "missing_current_ev_at_bid"
@@ -414,6 +458,19 @@ def _edge_decay_exit_allowed(pos, signal: BucketSignal, age_s: float, bid: float
         if ev_drop < Config.EDGE_DECAY_MIN_EV_DROP:
             diagnostics["blocked_reason"] = "auto_ev_not_worse_by_min_drop"
             return False, diagnostics
+
+    model_prob_drop = _safe_float(diagnostics.get("model_prob_drop"), 0.0) or 0.0
+    source_temp_deterioration = _safe_float(
+        diagnostics.get("max_source_forecast_deterioration_f"), 0.0
+    ) or 0.0
+    model_deteriorated = (
+        model_prob_drop >= Config.EDGE_DECAY_MIN_MODEL_PROB_DROP
+        or source_temp_deterioration >= Config.EDGE_DECAY_MIN_SOURCE_TEMP_DETERIORATION_F
+    )
+    diagnostics["model_deteriorated"] = model_deteriorated
+    if Config.EDGE_DECAY_REQUIRE_MODEL_DETERIORATION and not model_deteriorated:
+        diagnostics["blocked_reason"] = "no_model_deterioration"
+        return False, diagnostics
 
     diagnostics["blocked_reason"] = None
     return True, diagnostics

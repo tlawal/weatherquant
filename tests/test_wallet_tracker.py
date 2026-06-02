@@ -9,6 +9,7 @@ import backend.storage.db as storage_db
 from backend.config import Config
 from backend.market_context.wallet_tracker import (
     MarketRef,
+    PolymarketDataApiTradeAdapter,
     PublicTrade,
     WalletExposureMetric,
     build_bucket_consensus,
@@ -30,7 +31,9 @@ from backend.market_context.wallet_tracker import (
 )
 from backend.storage.models import (
     Base,
+    Bucket,
     City,
+    Event,
     WalletMarketExposure,
     WalletSkillScore,
     WalletStat,
@@ -145,6 +148,48 @@ def test_wilson_lower_bound_penalizes_tiny_perfect_records():
 
     assert tiny_perfect < 0.6
     assert broad_strong > tiny_perfect
+
+
+def test_data_api_adapter_fetches_one_condition_per_request_by_default(monkeypatch):
+    seen_markets = []
+    monkeypatch.setattr(Config, "WALLET_TRACKER_CONDITION_CHUNK_SIZE", 1, raising=False)
+
+    class FakeResponse:
+        status = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def json(self, content_type=None):
+            return []
+
+    class FakeSession:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        def get(self, url, params):
+            seen_markets.append(params["market"])
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        "backend.market_context.wallet_tracker.aiohttp.ClientSession",
+        FakeSession,
+    )
+
+    adapter = PolymarketDataApiTradeAdapter(fetch_pause_seconds=0)
+    trades = _run(adapter.fetch_trades_for_markets(["cond-a", "cond-b"], limit=5))
+
+    assert trades == []
+    assert seen_markets == ["cond-a", "cond-b"]
 
 
 def test_filter_wallets_below_min_volume_and_trades():
@@ -475,6 +520,68 @@ def test_city_date_wallet_refresh_scans_only_requested_city(tmp_path, monkeypatc
         assert summary.cities_scanned == 1
         assert summary.condition_ids_scanned == 0
         assert summary.wallets_updated == 0
+
+    _run(run_test())
+    _run(engine.dispose())
+
+
+def test_city_date_wallet_refresh_scans_exact_requested_event(tmp_path, monkeypatch):
+    engine, session_factory = _run(_setup_test_db(tmp_path, monkeypatch))
+    monkeypatch.setattr(Config, "WALLET_TRACKER_ENABLED", True, raising=False)
+    monkeypatch.setattr(Config, "WALLET_TRACKER_START_CITY", "all", raising=False)
+
+    class CapturingAdapter:
+        def __init__(self):
+            self.condition_ids = []
+
+        async def fetch_trades_for_markets(self, condition_ids):
+            self.condition_ids = list(condition_ids)
+            return []
+
+    async def run_test():
+        async with session_factory() as session:
+            city = City(
+                city_slug="atlanta",
+                display_name="Atlanta",
+                metar_station="KATL",
+                enabled=True,
+                is_us=True,
+                unit="F",
+                tz="America/New_York",
+            )
+            session.add(city)
+            await session.flush()
+            old_event = Event(
+                city_id=city.id,
+                date_et="2026-06-01",
+                gamma_slug="highest-temperature-in-atlanta-on-june-1-2026",
+                status="ok",
+            )
+            target_event = Event(
+                city_id=city.id,
+                date_et="2026-06-02",
+                gamma_slug="highest-temperature-in-atlanta-on-june-2-2026",
+                status="ok",
+            )
+            session.add_all([old_event, target_event])
+            await session.flush()
+            session.add_all([
+                Bucket(event_id=old_event.id, bucket_idx=0, condition_id="old-cond"),
+                Bucket(event_id=target_event.id, bucket_idx=0, condition_id="target-cond-a"),
+                Bucket(event_id=target_event.id, bucket_idx=1, condition_id="target-cond-b"),
+            ])
+            await session.commit()
+
+        adapter = CapturingAdapter()
+        summary = await refresh_wallet_rankings_for_city_date(
+            "atlanta",
+            "2026-06-02",
+            adapter=adapter,
+        )
+        assert summary.enabled is True
+        assert summary.cities_scanned == 1
+        assert summary.condition_ids_scanned == 2
+        assert adapter.condition_ids == ["target-cond-a", "target-cond-b"]
 
     _run(run_test())
     _run(engine.dispose())

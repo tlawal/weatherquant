@@ -101,7 +101,7 @@ On `/city/<slug>`, Weather Smart Money first uses V2 exposure and skill rows whe
 
 Bucket Consensus tiles are generated from the current city/date buckets shown on the page. Each tile uses the stored market bucket label, displays the full title with wrapping, and shows ranked long wallet count, net flow, and average entry when available.
 
-Manual refresh is exposed as `POST /api/wallet-rankings/refresh` and the city-page `REFRESH FLOW` control. It refreshes public trades for the selected city/date, writes `wallet_trades` and `wallet_market_exposures`, and updates city-specific weather-wallet skill without overwriting global rankings from a one-city slice. The scheduler also runs `update_wallet_rankings` on worker startup and then at `WALLET_TRACKER_UPDATE_INTERVAL_MINUTES`.
+Manual refresh is exposed as `POST /api/wallet-rankings/refresh` and the city-page `REFRESH FLOW` control. It refreshes public trades for the exact selected city/date event, writes `wallet_trades` and `wallet_market_exposures`, and updates city-specific weather-wallet skill without overwriting global rankings from a one-city slice. The Polymarket data-api is queried one condition at a time by default (`WALLET_TRACKER_CONDITION_CHUNK_SIZE=1`) because multi-condition comma batches can time out on active weather markets. The scheduler also runs `update_wallet_rankings` on worker startup and then at `WALLET_TRACKER_UPDATE_INTERVAL_MINUTES`.
 
 Known limitations: the tracker depends on public Polymarket API availability and scheduler ingestion; V2 skill quality depends on historical resolved markets; normalized trade backfill may lag the v1 read model; PnL estimates are analytics approximations rather than execution ledger accounting; and wallet output is corroborating context only, not a copy-trading signal.
 
@@ -230,14 +230,16 @@ The complementary **Lead-Time Skill** table (`SourceLeadTimeSkill`) is refreshed
 
 ### Exit cascade (5-min sweep)
 
-Four-level priority gate evaluated by `run_exit_engine`:
+Priority gate evaluated by `run_exit_engine`:
 
-1. **Emergency** — METAR observed temp contradicts bucket by ≥3°F → immediate market sell.
-2. **Urgent** — model consensus shifted into a different bucket → aggressive limit sell.
-3. **Quick Flip** — market ask is +5¢ over entry VWAP → realize profit.
-4. **Ladder** — normal scaling as the position appreciates.
+1. **Emergency** — observed high has already busted the held bucket, or a deep miss is confirmed late day.
+2. **EDGE_DECAY** — exits only when `ev_at_bid` is debounced below threshold, the stored entry EV has materially deteriorated, and the model/source thesis has actually worsened since entry. Pure market repricing is suppressed with `blocked_reason="no_model_deterioration"` and is handled by profit or hold logic instead.
+3. **Urgent** — debounced model consensus shifted to a different bucket, with spread, confidence, depth, adjacent-bucket, and EV corroboration guards.
+4. **OBS_PROXIMITY** — pre-observation profit protection for fragile buckets near scheduled station observations.
+5. **Profit / Ladder** — tier-1 50% at +8¢, tier-2 25% at +15¢, trailing stop after tier-1, and legacy Quick Flip for uninitialized positions.
+6. **Expiry** — late-day likely winners hold to redeem or passively offer near par; risk exits are capped by positive-EV and P&L guards. Near-par CLOB limit prices are normalized to the legal `[0.01, 0.99]` range while preserving the reference bid in diagnostics.
 
-Tiered exits track `original_qty`, `tier_1_exited`, `tier_2_exited`, `moon_bag_qty`, `trailing_stop_price`, `max_bid_seen` per position.
+Tiered exits track `original_qty`, `tier_1_exited`, `tier_2_exited`, `moon_bag_qty`, `trailing_stop_price`, `max_bid_seen` per position. EDGE_DECAY diagnostics include entry/current EV, model-probability delta, market-probability delta, bid delta, and per-source forecast deterioration.
 
 ### Night Owl
 
@@ -337,6 +339,10 @@ The boot path **fail-fast aborts** if `DATABASE_URL` is missing on Railway and f
 - `POLYMARKET_HOST` — Defaults to `https://clob.polymarket.com`. Do not point at the deprecated `clob-v2.polymarket.com` staging host.
 - `CHAIN_ID` — `137` (Polygon mainnet).
 - `POLYGON_RPC_URL` — Direct `eth_sendRawTransaction` for approvals + redemptions.
+- `WALLET_TRACKER_ENABLED` — Enables read-only public wallet analytics. Default `false`.
+- `WALLET_TRACKER_CONDITION_CHUNK_SIZE` — Number of condition IDs per Polymarket data-api trade request. Default `1`; keep this at `1` unless data-api multi-market batching is verified healthy.
+- `WALLET_TRACKER_LOOKBACK_DAYS` — Background scheduler lookback for skill history. Manual city refreshes scan the selected event date exactly.
+- `WALLET_TRACKER_MIN_RESOLVED_MARKETS`, `WALLET_TRACKER_MIN_VOLUME_USD`, `WALLET_TRACKER_MIN_ACTIVE_DAYS` — Weather-wallet skill quality gates.
 
 **Trading**
 - `ADMIN_TOKEN` — Bearer for admin/trade endpoints.
@@ -345,6 +351,10 @@ The boot path **fail-fast aborts** if `DATABASE_URL` is missing on Railway and f
 - `BANKROLL_CAP` — Optional override; otherwise read from on-chain balance.
 - `MIN_ORDER_NOTIONAL_DOLLARS` — Default `1.00`; Polymarket's executable notional floor for dust rejection.
 - `MIN_NOTIONAL_BUMP_MAX_KELLY_MULTIPLE` — Default `3.00`; maximum allowed multiple from desired Kelly dollars to a legal minimum-size order.
+- `EDGE_DECAY_REQUIRE_MODEL_DETERIORATION` — Default `true`; prevents EDGE_DECAY exits caused only by bid movement.
+- `EDGE_DECAY_MIN_MODEL_PROB_DROP` — Default `0.03`; minimum bucket model-probability drop from entry to qualify as thesis deterioration.
+- `EDGE_DECAY_MIN_SOURCE_TEMP_DETERIORATION_F` — Default `0.75`; minimum source forecast movement farther outside the held bucket.
+- `EDGE_DECAY_MIN_EV_DROP` — Default `0.03`; minimum entry-to-current EV deterioration before EDGE_DECAY can fire.
 
 **Market Context Agent (optional)**
 - `MARKET_CONTEXT_LLM_PROVIDER` ∈ `{openai, anthropic, gemini, openrouter}`

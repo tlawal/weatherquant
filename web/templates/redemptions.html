@@ -362,12 +362,12 @@ function planBadge(plan) {
 
 function exitPlanDetails(b) {
   const p = b.exit_plan || {};
-  const edgeTitle = 'model probability - market probability - execution cost';
-  const holdEdgeTitle = 'model fair value minus current bid; negative means selling is favored by the model';
+  const edgeTitle = 'entry-side EV after costs: calibrated model probability minus market midpoint minus estimated execution cost';
+  const holdEdgeTitle = 'exit-side hold EV: calibrated model probability minus current executable bid; negative does not by itself prove forecasts changed';
   const journal = (b.exit_events || []).map(e => `
     <div class="border-t border-[rgba(255,255,255,0.08)] pt-1 mt-1">
       <div class="text-gray-300">${exitReasonLabel(e)} · ${esc(e.execution_status || '')}</div>
-      <div class="text-gray-500">${e.ts ? new Date(e.ts).toLocaleString() : '--'} · exited ${Number(e.shares_exited || 0).toFixed(2)} · bid ${e.market_bid == null ? '--' : '$' + Number(e.market_bid).toFixed(3)} · Hold Edge @ Bid ${fmtCentsPerShare(e.ev_at_bid_pre)}</div>
+      <div class="text-gray-500">${e.ts ? new Date(e.ts).toLocaleString() : '--'} · exited ${Number(e.shares_exited || 0).toFixed(2)} · bid ${e.market_bid == null ? '--' : '$' + Number(e.market_bid).toFixed(3)} · Hold EV @ Bid ${fmtCentsPerShare(e.ev_at_bid_pre)}</div>
     </div>
   `).join('') || '<div class="text-gray-500">No exit events recorded yet.</div>';
   const sellNow = p.sell_now_pnl === null || p.sell_now_pnl === undefined ? '--' : `${Number(p.sell_now_pnl) >= 0 ? '+' : ''}${fmtUsd(p.sell_now_pnl)}`;
@@ -377,7 +377,7 @@ function exitPlanDetails(b) {
       <summary class="cursor-pointer text-cyan-400 font-bold">Exit plan</summary>
       <div class="mt-2 space-y-1">
         <div>${planBadge(p)} <span class="text-gray-500">${esc(p.next_trigger || '')}</span></div>
-        <div>Prob ${p.model_prob == null ? '--' : (Number(p.model_prob) * 100).toFixed(1) + '%'} · <span title="${holdEdgeTitle}">Estimated Hold Edge @ Bid ${fmtCentsPerShare(p.ev_at_bid)}</span> · <span title="${edgeTitle}">Estimated Model Edge ${fmtPp(p.true_edge)}</span></div>
+        <div>Prob ${p.model_prob == null ? '--' : (Number(p.model_prob) * 100).toFixed(1) + '%'} · <span title="${holdEdgeTitle}">Estimated Hold EV @ Bid ${fmtCentsPerShare(p.ev_at_bid)}</span> · <span title="${edgeTitle}">Entry EV After Costs ${fmtPp(p.true_edge)}</span></div>
         <div>Bid ${p.live_bid == null ? '--' : '$' + Number(p.live_bid).toFixed(3)} · Ask ${p.live_ask == null ? '--' : '$' + Number(p.live_ask).toFixed(3)} · Spread ${p.spread == null ? '--' : (Number(p.spread) * 100).toFixed(1) + 'c'} · Age ${p.snapshot_age_s == null ? '--' : Math.round(Number(p.snapshot_age_s)) + 's'}</div>
         <div>Observed high ${p.observed_high_f == null ? '--' : Number(p.observed_high_f).toFixed(1) + '\u00B0F'} · Bucket ${esc(p.bucket_lock_status || '--')}</div>
         <div>Sell now P&L ${sellNow} · Hold-if-win P&L ${holdWin}</div>

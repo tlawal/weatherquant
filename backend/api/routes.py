@@ -3193,72 +3193,107 @@ async def station_calibration_diagnostics():
             total_forecast_rows_30d = forecast_q.scalar_one()
 
             from backend.modeling.station_weights import ENSEMBLE_SOURCES
-            leak_diagnostic_sources = tuple(dict.fromkeys((*ENSEMBLE_SOURCES, "open_meteo")))
-            forecast_rows = (
-                await sess.execute(
-                    select(ForecastObs, City)
-                    .join(City, City.id == ForecastObs.city_id)
-                    .where(
-                        ForecastObs.source.in_(leak_diagnostic_sources),
-                        ForecastObs.fetched_at >= cutoff,
-                        ForecastObs.high_f.isnot(None),
-                    )
-                    .order_by(
-                        ForecastObs.city_id,
-                        ForecastObs.source,
-                        ForecastObs.date_et,
-                        ForecastObs.fetched_at,
-                    )
-                )
-            ).all()
-            rows_by_city_source_date: dict[tuple[int, str, str], list[ForecastObs]] = {}
-            city_tz_by_id: dict[int, str] = {}
-            for row, city in forecast_rows:
-                rows_by_city_source_date.setdefault(
-                    (row.city_id, row.source, row.date_et), []
-                ).append(row)
-                city_tz_by_id[row.city_id] = getattr(city, "tz", None) or "America/New_York"
 
-            for row, _city in forecast_rows:
-                fetched_at = row.fetched_at
-                if fetched_at is None:
-                    continue
-                if fetched_at.tzinfo is None:
-                    fetched_at = fetched_at.replace(tzinfo=timezone.utc)
-                city_tz = city_tz_by_id.get(row.city_id, "America/New_York")
-                if fetched_at.astimezone(ZoneInfo(city_tz)).hour < 18:
-                    continue
-                try:
-                    next_date = (
-                        datetime.strptime(row.date_et, "%Y-%m-%d") + timedelta(days=1)
-                    ).strftime("%Y-%m-%d")
-                except Exception:
-                    continue
-                candidates = rows_by_city_source_date.get(
-                    (row.city_id, row.source, next_date), []
-                )
-                for candidate in candidates:
-                    if candidate.high_f != row.high_f:
-                        continue
-                    same_model_run = (
-                        row.model_run_at is not None
-                        and candidate.model_run_at is not None
-                        and row.model_run_at == candidate.model_run_at
-                    )
-                    candidate_fetched = candidate.fetched_at
-                    if candidate_fetched is not None and candidate_fetched.tzinfo is None:
-                        candidate_fetched = candidate_fetched.replace(tzinfo=timezone.utc)
-                    same_fetch_window = (
-                        candidate_fetched is not None
-                        and abs((candidate_fetched - fetched_at).total_seconds()) <= 20 * 60
-                    )
-                    if same_model_run or same_fetch_window:
-                        suspicious_late_day_target_date_rows_30d += 1
-                        suspicious_late_day_target_date_rows_by_source_30d[row.source] = (
-                            suspicious_late_day_target_date_rows_by_source_30d.get(row.source, 0)
-                            + 1
+            # Keep this diagnostic cheap. The table can hold hundreds of
+            # thousands of forecast rows, so do indexed city/date/source window
+            # probes instead of one global ORDER BY that can spill temp files.
+            diagnostic_days = 7
+            leak_diagnostic_sources = tuple(dict.fromkeys((*ENSEMBLE_SOURCES, "open_meteo")))
+            enabled_cities = (
+                await sess.execute(select(City).where(City.enabled == True))  # noqa: E712
+            ).scalars().all()
+
+            for city in enabled_cities:
+                city_tz = getattr(city, "tz", None) or "America/New_York"
+                tz = ZoneInfo(city_tz)
+                now_local = datetime.now(tz)
+                for days_back in range(1, diagnostic_days + 1):
+                    date_local = now_local - timedelta(days=days_back)
+                    date_et = date_local.strftime("%Y-%m-%d")
+                    next_date_et = (date_local + timedelta(days=1)).strftime("%Y-%m-%d")
+                    late_start = date_local.replace(
+                        hour=18, minute=0, second=0, microsecond=0
+                    ).astimezone(timezone.utc)
+                    late_end = (date_local + timedelta(days=1)).replace(
+                        hour=0, minute=0, second=0, microsecond=0
+                    ).astimezone(timezone.utc)
+
+                    late_rows = (
+                        await sess.execute(
+                            select(ForecastObs)
+                            .where(
+                                ForecastObs.city_id == city.id,
+                                ForecastObs.date_et == date_et,
+                                ForecastObs.source.in_(leak_diagnostic_sources),
+                                ForecastObs.high_f.isnot(None),
+                                ForecastObs.fetched_at >= late_start,
+                                ForecastObs.fetched_at < late_end,
+                            )
+                            .order_by(ForecastObs.source, ForecastObs.fetched_at.desc())
+                            .limit(250)
                         )
-                        break
+                    ).scalars().all()
+                    if not late_rows:
+                        continue
+
+                    sources_present = sorted({row.source for row in late_rows})
+                    late_fetches = [
+                        row.fetched_at.replace(tzinfo=timezone.utc)
+                        if row.fetched_at and row.fetched_at.tzinfo is None
+                        else row.fetched_at
+                        for row in late_rows
+                        if row.fetched_at is not None
+                    ]
+                    if not late_fetches:
+                        continue
+                    min_fetch = min(late_fetches)
+                    max_fetch = max(late_fetches)
+                    next_rows = (
+                        await sess.execute(
+                            select(ForecastObs)
+                            .where(
+                                ForecastObs.city_id == city.id,
+                                ForecastObs.date_et == next_date_et,
+                                ForecastObs.source.in_(sources_present),
+                                ForecastObs.high_f.isnot(None),
+                                ForecastObs.fetched_at >= min_fetch - timedelta(minutes=20),
+                                ForecastObs.fetched_at <= max_fetch + timedelta(minutes=20),
+                            )
+                            .limit(500)
+                        )
+                    ).scalars().all()
+                    by_source: dict[str, list[ForecastObs]] = {}
+                    for row in next_rows:
+                        by_source.setdefault(row.source, []).append(row)
+
+                    for row in late_rows:
+                        fetched_at = row.fetched_at
+                        if fetched_at is None:
+                            continue
+                        if fetched_at.tzinfo is None:
+                            fetched_at = fetched_at.replace(tzinfo=timezone.utc)
+                        for candidate in by_source.get(row.source, []):
+                            if candidate.high_f != row.high_f:
+                                continue
+                            same_model_run = (
+                                row.model_run_at is not None
+                                and candidate.model_run_at is not None
+                                and row.model_run_at == candidate.model_run_at
+                            )
+                            candidate_fetched = candidate.fetched_at
+                            if candidate_fetched is not None and candidate_fetched.tzinfo is None:
+                                candidate_fetched = candidate_fetched.replace(tzinfo=timezone.utc)
+                            same_fetch_window = (
+                                candidate_fetched is not None
+                                and abs((candidate_fetched - fetched_at).total_seconds()) <= 20 * 60
+                            )
+                            if same_model_run or same_fetch_window:
+                                suspicious_late_day_target_date_rows_30d += 1
+                                suspicious_late_day_target_date_rows_by_source_30d[row.source] = (
+                                    suspicious_late_day_target_date_rows_by_source_30d.get(row.source, 0)
+                                    + 1
+                                )
+                                break
     except Exception as e:
         error = str(e)
 
