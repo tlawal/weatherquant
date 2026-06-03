@@ -8,6 +8,7 @@ Usage:
 from __future__ import annotations
 
 import logging
+import re
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
@@ -25,6 +26,10 @@ log = logging.getLogger(__name__)
 
 _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
+_ADD_COLUMN_RE = re.compile(
+    r"^\s*ALTER\s+TABLE\s+([A-Za-z_][A-Za-z0-9_]*)\s+ADD\s+COLUMN(?:\s+IF\s+NOT\s+EXISTS)?\s+([A-Za-z_][A-Za-z0-9_]*)\b",
+    re.IGNORECASE,
+)
 
 
 def _build_engine() -> AsyncEngine:
@@ -159,6 +164,25 @@ async def _run_ddl(ddl: str) -> None:
     try:
         from sqlalchemy import text
         async with _engine.begin() as conn:
+            add_column_match = _ADD_COLUMN_RE.match(ddl)
+            if add_column_match and _engine.dialect.name != "sqlite":
+                table_name, column_name = add_column_match.groups()
+                exists = await conn.scalar(
+                    text(
+                        """
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_schema = current_schema()
+                          AND table_name = :table_name
+                          AND column_name = :column_name
+                        LIMIT 1
+                        """
+                    ),
+                    {"table_name": table_name, "column_name": column_name},
+                )
+                if exists:
+                    log.debug("ddl: skipped (column already exists): %s.%s", table_name, column_name)
+                    return
             if _engine.dialect.name != "sqlite":
                 await conn.execute(text("SET LOCAL lock_timeout = '3s'"))
                 await conn.execute(text("SET LOCAL statement_timeout = '60s'"))
