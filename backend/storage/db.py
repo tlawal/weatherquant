@@ -296,6 +296,15 @@ async def init_db() -> None:
     await _run_ddl("CREATE INDEX IF NOT EXISTS ix_signal_snapshot ON signals (model_snapshot_id)")
     await _run_ddl("CREATE INDEX IF NOT EXISTS ix_events_date_et ON events (date_et)")
     await _run_ddl("CREATE INDEX IF NOT EXISTS ix_modelsnap_event_id ON model_snapshots (event_id, id)")
+    await _run_ddl("""
+        CREATE TABLE IF NOT EXISTS model_artifacts (
+            id SERIAL PRIMARY KEY,
+            name VARCHAR(64) NOT NULL UNIQUE,
+            model_bytes BYTEA NOT NULL,
+            metadata_json TEXT,
+            updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+        )
+    """)
 
     # calibration_params — HRRR/GFS support
     await _run_ddl("ALTER TABLE calibration_params ADD COLUMN bias_hrrr FLOAT DEFAULT 0.0")

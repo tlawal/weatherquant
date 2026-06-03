@@ -40,6 +40,14 @@ _features: list[str] = []
 _loaded = False
 
 
+def reset_model_cache() -> None:
+    """Clear the singleton model cache after hydrating a new artifact."""
+    global _model, _features, _loaded
+    _model = None
+    _features = []
+    _loaded = False
+
+
 def _ensure_model():
     global _model, _features, _loaded
     if _loaded:

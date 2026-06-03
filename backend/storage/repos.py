@@ -30,6 +30,7 @@ from backend.storage.models import (
     MadisObs,
     MetarObs,
     MetarObsExtended,
+    ModelArtifact,
     ModelSnapshot,
     Order,
     Position,
@@ -1350,6 +1351,44 @@ async def get_recent_model_snapshots(
         .limit(limit)
     )
     return list(result.scalars().all())
+
+
+async def upsert_model_artifact(
+    session: AsyncSession,
+    *,
+    name: str,
+    model_bytes: bytes,
+    metadata_json: str | None = None,
+) -> ModelArtifact:
+    result = await session.execute(
+        select(ModelArtifact).where(ModelArtifact.name == name)
+    )
+    row = result.scalar_one_or_none()
+    if row is None:
+        row = ModelArtifact(
+            name=name,
+            model_bytes=model_bytes,
+            metadata_json=metadata_json,
+            updated_at=datetime.now(timezone.utc),
+        )
+        session.add(row)
+    else:
+        row.model_bytes = model_bytes
+        row.metadata_json = metadata_json
+        row.updated_at = datetime.now(timezone.utc)
+    await session.commit()
+    await session.refresh(row)
+    return row
+
+
+async def get_model_artifact(
+    session: AsyncSession,
+    name: str,
+) -> ModelArtifact | None:
+    result = await session.execute(
+        select(ModelArtifact).where(ModelArtifact.name == name)
+    )
+    return result.scalar_one_or_none()
 
 
 # ─── Market Context ───────────────────────────────────────────────────────────

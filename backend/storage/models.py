@@ -11,7 +11,7 @@ from typing import Optional
 
 from sqlalchemy import (
     Boolean, DateTime, Float, ForeignKey, Index, Integer,
-    String, Text, UniqueConstraint, func,
+    LargeBinary, String, Text, UniqueConstraint, func,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -302,6 +302,20 @@ class ModelSnapshot(Base):
     forecast_quality: Mapped[str] = mapped_column(String(16), default="ok")
 
     event: Mapped[Event] = relationship("Event", back_populates="model_snapshots")
+
+
+class ModelArtifact(Base):
+    """Promoted ML model artifact persisted in Postgres-backed storage."""
+    __tablename__ = "model_artifacts"
+    __table_args__ = (
+        UniqueConstraint("name", name="uq_model_artifact_name"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(64), nullable=False)
+    model_bytes: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    metadata_json: Mapped[Optional[str]] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
 
 class SourceLeadTimeSkill(Base):

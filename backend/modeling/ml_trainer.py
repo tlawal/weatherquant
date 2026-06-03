@@ -349,6 +349,14 @@ def extract_features_and_train():
     }
     output_meta_path.write_text(json.dumps(meta, indent=2))
     log.info(f"Saved metadata to {output_meta_path}")
+    if output_model_path == MODEL_PATH:
+        from backend.modeling.residual_artifacts import save_promoted_residual_artifact_to_db
+
+        saved_to_db = asyncio.run(save_promoted_residual_artifact_to_db())
+        if saved_to_db:
+            log.info("Saved promoted model artifact to Postgres")
+        else:
+            log.warning("Promoted model was not saved to Postgres")
     log.info("Done.")
 
 

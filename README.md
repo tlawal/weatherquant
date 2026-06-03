@@ -386,18 +386,14 @@ python -m backend.modeling.ml_trainer
 
 By default this is shadow-only and writes `backend/modeling/residual_model_shadow.pkl` plus `backend/modeling/residual_model_shadow_meta.json`. The metadata records train/test MAE, baseline MAE, date split, sample count, city count, and whether promotion is ready.
 
-On Railway, do not write promoted ML artifacts into `/app/backend/modeling`: `/app` is the deployed image and is replaced on every deploy. Mount a persistent volume on the app service and set:
+On Railway, promoted ML artifacts are persisted in the existing Postgres database as `model_artifacts` rows. This uses the Postgres volume already attached to the `Postgres` service; do not add a separate app volume just for the residual model. On startup, the app hydrates the promoted artifact from Postgres into the local runtime path before the scheduler computes signals.
 
-```bash
-RESIDUAL_MODEL_DIR=/data/models
-```
-
-The trainer and live residual tracker both honor `RESIDUAL_MODEL_DIR`. Advanced overrides are also available via `RESIDUAL_MODEL_PATH`, `RESIDUAL_MODEL_META_PATH`, `RESIDUAL_SHADOW_MODEL_PATH`, and `RESIDUAL_SHADOW_MODEL_META_PATH`.
+The trainer and live residual tracker still honor optional local-path overrides via `RESIDUAL_MODEL_DIR`, `RESIDUAL_MODEL_PATH`, `RESIDUAL_MODEL_META_PATH`, `RESIDUAL_SHADOW_MODEL_PATH`, and `RESIDUAL_SHADOW_MODEL_META_PATH`, but persistence comes from Postgres.
 
 Use the live Railway database from inside the deployed service network:
 
 ```bash
-railway ssh -s weatherquant "mkdir -p /data/models && python -m backend.modeling.ml_trainer"
+railway ssh -s weatherquant "python -m backend.modeling.ml_trainer"
 ```
 
 `railway run` only injects Railway environment variables into a local process; it does not join Railway's private network. If `DATABASE_URL` uses `postgres.railway.internal`, run through `railway ssh` or the trainer will fail DNS resolution from your laptop.
@@ -405,10 +401,10 @@ railway ssh -s weatherquant "mkdir -p /data/models && python -m backend.modeling
 Promote only when the chronological holdout beats the static table by at least `0.20°F`:
 
 ```bash
-railway ssh -s weatherquant "mkdir -p /data/models && PROMOTE_RESIDUAL_ML=1 python -m backend.modeling.ml_trainer"
+railway ssh -s weatherquant "PROMOTE_RESIDUAL_ML=1 python -m backend.modeling.ml_trainer"
 ```
 
-Promotion writes `residual_model.pkl` plus `residual_model_meta.json` inside `RESIDUAL_MODEL_DIR`; otherwise it still saves the shadow model and logs why promotion was blocked. The signal engine loads a promoted model on restart. Until a promoted model exists, `residual_tracker.py` uses the static remaining-rise lookup table.
+Promotion writes `residual_model.pkl` plus `residual_model_meta.json` locally and saves the promoted bytes/metadata into Postgres. Otherwise it still saves the shadow model and logs why promotion was blocked. The signal engine hydrates and loads the promoted model on restart. Until a promoted model artifact exists, `residual_tracker.py` uses the static remaining-rise lookup table.
 
 Operator prompt for a shadow-only production check:
 

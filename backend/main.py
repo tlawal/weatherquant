@@ -94,6 +94,17 @@ async def _run_startup_backfills() -> None:
         log.exception("startup: NWS extended backfill failed: %s", e)
 
 
+async def _hydrate_residual_ml_artifact() -> None:
+    """Hydrate promoted residual ML model from Postgres-backed storage."""
+    try:
+        from backend.modeling.residual_artifacts import hydrate_promoted_residual_artifact_from_db
+
+        loaded = await hydrate_promoted_residual_artifact_from_db()
+        log.info("startup: residual ML artifact hydrated=%s", loaded)
+    except Exception as e:
+        log.exception("startup: residual ML artifact hydration failed: %s", e)
+
+
 async def run_api(start_worker: bool = False) -> None:
     """Start API server (FastAPI + Uvicorn)."""
     import uvicorn
@@ -114,6 +125,7 @@ async def run_api(start_worker: bool = False) -> None:
             log.info("api: background init starting (db + CLOB)")
             await init_db()
             await _load_runtime_config()
+            await _hydrate_residual_ml_artifact()
             await _run_startup_backfills()
             _ready["db"] = True
             log.info("api: db init complete")
@@ -192,6 +204,7 @@ async def run_worker() -> None:
     _log_config_warnings()
     await init_db()
     await _load_runtime_config()
+    await _hydrate_residual_ml_artifact()
     await _run_startup_backfills()
 
     clob = CLOBClient()
