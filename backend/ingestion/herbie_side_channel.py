@@ -65,6 +65,63 @@ class _HerbieResult:
     available_at: Optional[datetime]
 
 
+def _as_utc_aware(dt: object) -> Optional[datetime]:
+    """Normalize Herbie/pandas datetimes before ORM persistence."""
+    if dt is None:
+        return None
+    if hasattr(dt, "to_pydatetime"):
+        dt = dt.to_pydatetime()
+    if not isinstance(dt, datetime):
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _herbie_run_arg(run: datetime) -> datetime:
+    """Herbie compares against tz-naive pandas timestamps internally."""
+    if run.tzinfo is None:
+        return run
+    return run.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _nearest_grid_value_f(ds, *, lat: float, lon: float) -> float:
+    """Extract nearest-grid 2 m temperature from Herbie/cfgrib datasets.
+
+    HRRR and NBM expose latitude/longitude as 2-D coordinates. xarray cannot
+    use ``.sel(..., method="nearest")`` on those without an explicit index, so
+    compute the nearest grid index directly.
+    """
+    import numpy as np
+
+    lat_name = "latitude" if "latitude" in ds.coords else "lat"
+    lon_name = "longitude" if "longitude" in ds.coords else "lon"
+    if lat_name not in ds.coords or lon_name not in ds.coords:
+        raise ValueError(f"missing latitude/longitude coordinates: {list(ds.coords)}")
+
+    temp_name = "t2m" if "t2m" in ds.data_vars else next(iter(ds.data_vars))
+    temp = ds[temp_name]
+    lats = ds[lat_name]
+    lons = ds[lon_name]
+
+    lon_vals = np.asarray(lons.values, dtype=float)
+    target_lon = lon % 360 if np.nanmax(lon_vals) > 180 else ((lon + 180) % 360) - 180
+
+    if lats.ndim == 1 and lons.ndim == 1:
+        cell = temp.sel({lat_name: lat, lon_name: target_lon}, method="nearest")
+        return float(np.asarray(cell.values).squeeze())
+
+    lat_vals = np.asarray(lats.values, dtype=float)
+    lon_diff = np.abs(lon_vals - target_lon)
+    lon_diff = np.minimum(lon_diff, 360 - lon_diff)
+    dist2 = (lat_vals - lat) ** 2 + lon_diff ** 2
+    flat_idx = int(np.nanargmin(dist2))
+    grid_idx = np.unravel_index(flat_idx, dist2.shape)
+    indexers = {dim: int(idx) for dim, idx in zip(lats.dims, grid_idx)}
+    cell = temp.isel(indexers)
+    return float(np.asarray(cell.values).squeeze())
+
+
 def _most_recent_run(model: str, now_utc: datetime) -> datetime:
     """Snap now_utc back to the most-recent model initialization time."""
     if model in ("hrrr", "nbm"):
@@ -94,17 +151,15 @@ def _fetch_one_sync(
 
     fetched_at = datetime.now(timezone.utc)
     try:
-        H = Herbie(run, model=model, fxx=lead_hours, save_dir="/tmp/herbie")
+        H = Herbie(_herbie_run_arg(run), model=model, fxx=lead_hours, save_dir="/tmp/herbie")
         ds = H.xarray(":TMP:2 m above ground:")
-        # Subset to nearest grid cell.
-        cell = ds.sel(latitude=lat, longitude=(lon % 360), method="nearest")
-        t_kelvin = float(cell["t2m"].values) if "t2m" in cell else float(cell.to_array().values[0])
+        t_kelvin = _nearest_grid_value_f(ds, lat=lat, lon=lon)
         high_f = (t_kelvin - 273.15) * 9 / 5 + 32
         return _HerbieResult(
             high_f=round(high_f, 2),
             model_run_at=run,
             fetched_at=fetched_at,
-            available_at=getattr(H, "available_at", None),
+            available_at=_as_utc_aware(getattr(H, "available_at", None)),
         )
     except Exception as e:
         log.debug("herbie fetch failed model=%s run=%s lead=%d: %s", model, run, lead_hours, e)
