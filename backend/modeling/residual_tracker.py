@@ -10,15 +10,16 @@ from __future__ import annotations
 
 import json
 import logging
-from pathlib import Path
 from typing import Optional
 
 import joblib
 
+from backend.modeling.residual_paths import residual_metadata_path, residual_model_path
+
 log = logging.getLogger(__name__)
 
-MODEL_PATH = Path(__file__).parent / "residual_model.pkl"
-METADATA_PATH = Path(__file__).parent / "residual_model_meta.json"
+MODEL_PATH = residual_model_path()
+METADATA_PATH = residual_metadata_path()
 
 # ─── Static fallback (identical to old _REMAINING_RISE_TABLE) ────────────────
 _FALLBACK_TABLE = [

@@ -386,10 +386,18 @@ python -m backend.modeling.ml_trainer
 
 By default this is shadow-only and writes `backend/modeling/residual_model_shadow.pkl` plus `backend/modeling/residual_model_shadow_meta.json`. The metadata records train/test MAE, baseline MAE, date split, sample count, city count, and whether promotion is ready.
 
+On Railway, do not write promoted ML artifacts into `/app/backend/modeling`: `/app` is the deployed image and is replaced on every deploy. Mount a persistent volume on the app service and set:
+
+```bash
+RESIDUAL_MODEL_DIR=/data/models
+```
+
+The trainer and live residual tracker both honor `RESIDUAL_MODEL_DIR`. Advanced overrides are also available via `RESIDUAL_MODEL_PATH`, `RESIDUAL_MODEL_META_PATH`, `RESIDUAL_SHADOW_MODEL_PATH`, and `RESIDUAL_SHADOW_MODEL_META_PATH`.
+
 Use the live Railway database from inside the deployed service network:
 
 ```bash
-railway ssh "python -m backend.modeling.ml_trainer"
+railway ssh -s weatherquant "mkdir -p /data/models && python -m backend.modeling.ml_trainer"
 ```
 
 `railway run` only injects Railway environment variables into a local process; it does not join Railway's private network. If `DATABASE_URL` uses `postgres.railway.internal`, run through `railway ssh` or the trainer will fail DNS resolution from your laptop.
@@ -397,10 +405,10 @@ railway ssh "python -m backend.modeling.ml_trainer"
 Promote only when the chronological holdout beats the static table by at least `0.20°F`:
 
 ```bash
-railway ssh "PROMOTE_RESIDUAL_ML=1 python -m backend.modeling.ml_trainer"
+railway ssh -s weatherquant "mkdir -p /data/models && PROMOTE_RESIDUAL_ML=1 python -m backend.modeling.ml_trainer"
 ```
 
-Promotion writes `backend/modeling/residual_model.pkl` plus `backend/modeling/residual_model_meta.json`; otherwise it still saves the shadow model and logs why promotion was blocked. The signal engine loads a promoted model on restart. Until a promoted model exists, `residual_tracker.py` uses the static remaining-rise lookup table.
+Promotion writes `residual_model.pkl` plus `residual_model_meta.json` inside `RESIDUAL_MODEL_DIR`; otherwise it still saves the shadow model and logs why promotion was blocked. The signal engine loads a promoted model on restart. Until a promoted model exists, `residual_tracker.py` uses the static remaining-rise lookup table.
 
 Operator prompt for a shadow-only production check:
 

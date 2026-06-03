@@ -23,6 +23,12 @@ import joblib
 from dotenv import load_dotenv
 
 from zoneinfo import ZoneInfo
+from backend.modeling.residual_paths import (
+    residual_metadata_path,
+    residual_model_path,
+    residual_shadow_metadata_path,
+    residual_shadow_model_path,
+)
 
 load_dotenv()
 
@@ -68,10 +74,10 @@ def _resolve_db_path() -> Path:
 
 
 DB_PATH = _resolve_db_path()
-MODEL_PATH = Path(__file__).parent / "residual_model.pkl"
-METADATA_PATH = Path(__file__).parent / "residual_model_meta.json"
-SHADOW_MODEL_PATH = Path(__file__).parent / "residual_model_shadow.pkl"
-SHADOW_METADATA_PATH = Path(__file__).parent / "residual_model_shadow_meta.json"
+MODEL_PATH = residual_model_path()
+METADATA_PATH = residual_metadata_path()
+SHADOW_MODEL_PATH = residual_shadow_model_path()
+SHADOW_METADATA_PATH = residual_shadow_metadata_path()
 PROMOTE_RESIDUAL_ML = os.environ.get("PROMOTE_RESIDUAL_ML", "").strip().lower() in {
     "1", "true", "yes", "on"
 }
@@ -314,6 +320,8 @@ def extract_features_and_train():
 
     # 11. Save. Default is shadow-only so a training run cannot silently change
     # live remaining-rise predictions loaded by residual_tracker.py.
+    output_model_path.parent.mkdir(parents=True, exist_ok=True)
+    output_meta_path.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(model, output_model_path)
     log.info(f"Saved {'promoted' if output_model_path == MODEL_PATH else 'shadow'} model to {output_model_path}")
     if PROMOTE_RESIDUAL_ML and not promotion_ready:
