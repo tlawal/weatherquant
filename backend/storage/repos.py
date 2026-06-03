@@ -9,10 +9,10 @@ from __future__ import annotations
 import json
 import secrets
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import desc, func, select, update
+from sqlalchemy import desc, func, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.storage.models import (
@@ -44,6 +44,11 @@ from backend.storage.models import (
     WalletTrade,
     WorkerHeartbeat,
 )
+
+
+def _chunks(items: list[Any], size: int = 1000):
+    for idx in range(0, len(items), size):
+        yield items[idx:idx + size]
 
 
 # ─── Cities ───────────────────────────────────────────────────────────────────
@@ -858,7 +863,12 @@ async def get_market_snapshots_for_event(
 
 # ─── Wallet Stats ─────────────────────────────────────────────────────────────
 
-async def upsert_wallet_stat(session: AsyncSession, **kwargs) -> WalletStat:
+async def upsert_wallet_stat(
+    session: AsyncSession,
+    *,
+    commit: bool = True,
+    **kwargs,
+) -> WalletStat:
     """Postgres-safe idempotent upsert for read-only wallet analytics."""
     wallet_address = str(kwargs["wallet_address"]).lower()
     city_slug = str(kwargs["city_slug"])
@@ -894,9 +904,74 @@ async def upsert_wallet_stat(session: AsyncSession, **kwargs) -> WalletStat:
     else:
         for key, value in clean_kwargs.items():
             setattr(row, key, value)
-    await session.commit()
-    await session.refresh(row)
+    if commit:
+        await session.commit()
+        await session.refresh(row)
+    else:
+        await session.flush()
     return row
+
+
+async def bulk_upsert_wallet_stats(
+    session: AsyncSession,
+    rows: list[dict[str, Any]],
+) -> int:
+    if not rows:
+        return 0
+    clean_rows: list[dict[str, Any]] = []
+    keys: list[tuple[str, str, str, str]] = []
+    for kwargs in rows:
+        wallet_address = str(kwargs["wallet_address"]).lower()
+        city_slug = str(kwargs["city_slug"])
+        condition_id = str(kwargs["condition_id"])
+        date_value = str(kwargs["date"])
+        clean_kwargs = {
+            key: value
+            for key, value in kwargs.items()
+            if hasattr(WalletStat, key)
+        }
+        clean_kwargs.update(
+            {
+                "wallet_address": wallet_address,
+                "city_slug": city_slug,
+                "condition_id": condition_id,
+                "date": date_value,
+            }
+        )
+        clean_rows.append(clean_kwargs)
+        keys.append((wallet_address, city_slug, condition_id, date_value))
+
+    existing: dict[tuple[str, str, str, str], WalletStat] = {}
+    for chunk in _chunks(keys):
+        result = await session.execute(
+            select(WalletStat).where(
+                tuple_(
+                    WalletStat.wallet_address,
+                    WalletStat.city_slug,
+                    WalletStat.condition_id,
+                    WalletStat.date,
+                ).in_(chunk)
+            )
+        )
+        for row in result.scalars().all():
+            existing[
+                (
+                    str(row.wallet_address).lower(),
+                    str(row.city_slug),
+                    str(row.condition_id),
+                    str(row.date),
+                )
+            ] = row
+
+    for clean_kwargs, key in zip(clean_rows, keys):
+        row = existing.get(key)
+        if row is None:
+            session.add(WalletStat(**clean_kwargs))
+        else:
+            for attr, value in clean_kwargs.items():
+                setattr(row, attr, value)
+    await session.flush()
+    return len(clean_rows)
 
 
 async def get_wallet_stats_for_city(
@@ -938,7 +1013,12 @@ async def get_wallet_stats_leaderboard(
     return list(result.scalars().all())
 
 
-async def upsert_wallet_trade(session: AsyncSession, **kwargs) -> WalletTrade:
+async def upsert_wallet_trade(
+    session: AsyncSession,
+    *,
+    commit: bool = True,
+    **kwargs,
+) -> WalletTrade:
     dedupe_key = str(kwargs["dedupe_key"])
     clean_kwargs = {
         key: value
@@ -957,13 +1037,56 @@ async def upsert_wallet_trade(session: AsyncSession, **kwargs) -> WalletTrade:
     else:
         for key, value in clean_kwargs.items():
             setattr(row, key, value)
-    await session.commit()
-    await session.refresh(row)
+    if commit:
+        await session.commit()
+        await session.refresh(row)
+    else:
+        await session.flush()
     return row
+
+
+async def bulk_upsert_wallet_trades(
+    session: AsyncSession,
+    rows: list[dict[str, Any]],
+) -> int:
+    if not rows:
+        return 0
+    clean_rows: list[dict[str, Any]] = []
+    keys: list[str] = []
+    for kwargs in rows:
+        dedupe_key = str(kwargs["dedupe_key"])
+        clean_kwargs = {
+            key: value
+            for key, value in kwargs.items()
+            if hasattr(WalletTrade, key)
+        }
+        clean_kwargs["wallet_address"] = str(clean_kwargs["wallet_address"]).lower()
+        clean_rows.append(clean_kwargs)
+        keys.append(dedupe_key)
+
+    existing: dict[str, WalletTrade] = {}
+    for chunk in _chunks(keys):
+        result = await session.execute(
+            select(WalletTrade).where(WalletTrade.dedupe_key.in_(chunk))
+        )
+        for row in result.scalars().all():
+            existing[str(row.dedupe_key)] = row
+
+    for clean_kwargs, key in zip(clean_rows, keys):
+        row = existing.get(key)
+        if row is None:
+            session.add(WalletTrade(**clean_kwargs))
+        else:
+            for attr, value in clean_kwargs.items():
+                setattr(row, attr, value)
+    await session.flush()
+    return len(clean_rows)
 
 
 async def upsert_wallet_market_exposure(
     session: AsyncSession,
+    *,
+    commit: bool = True,
     **kwargs,
 ) -> WalletMarketExposure:
     wallet_address = str(kwargs["wallet_address"]).lower()
@@ -988,13 +1111,62 @@ async def upsert_wallet_market_exposure(
     else:
         for key, value in clean_kwargs.items():
             setattr(row, key, value)
-    await session.commit()
-    await session.refresh(row)
+    if commit:
+        await session.commit()
+        await session.refresh(row)
+    else:
+        await session.flush()
     return row
+
+
+async def bulk_upsert_wallet_market_exposures(
+    session: AsyncSession,
+    rows: list[dict[str, Any]],
+) -> int:
+    if not rows:
+        return 0
+    clean_rows: list[dict[str, Any]] = []
+    keys: list[tuple[str, str]] = []
+    for kwargs in rows:
+        wallet_address = str(kwargs["wallet_address"]).lower()
+        condition_id = str(kwargs["condition_id"])
+        clean_kwargs = {
+            key: value
+            for key, value in kwargs.items()
+            if hasattr(WalletMarketExposure, key)
+        }
+        clean_kwargs.update({"wallet_address": wallet_address, "condition_id": condition_id})
+        clean_rows.append(clean_kwargs)
+        keys.append((wallet_address, condition_id))
+
+    existing: dict[tuple[str, str], WalletMarketExposure] = {}
+    for chunk in _chunks(keys):
+        result = await session.execute(
+            select(WalletMarketExposure).where(
+                tuple_(
+                    WalletMarketExposure.wallet_address,
+                    WalletMarketExposure.condition_id,
+                ).in_(chunk)
+            )
+        )
+        for row in result.scalars().all():
+            existing[(str(row.wallet_address).lower(), str(row.condition_id))] = row
+
+    for clean_kwargs, key in zip(clean_rows, keys):
+        row = existing.get(key)
+        if row is None:
+            session.add(WalletMarketExposure(**clean_kwargs))
+        else:
+            for attr, value in clean_kwargs.items():
+                setattr(row, attr, value)
+    await session.flush()
+    return len(clean_rows)
 
 
 async def upsert_wallet_skill_score(
     session: AsyncSession,
+    *,
+    commit: bool = True,
     **kwargs,
 ) -> WalletSkillScore:
     wallet_address = str(kwargs["wallet_address"]).lower()
@@ -1030,9 +1202,74 @@ async def upsert_wallet_skill_score(
     else:
         for key, value in clean_kwargs.items():
             setattr(row, key, value)
-    await session.commit()
-    await session.refresh(row)
+    if commit:
+        await session.commit()
+        await session.refresh(row)
+    else:
+        await session.flush()
     return row
+
+
+async def bulk_upsert_wallet_skill_scores(
+    session: AsyncSession,
+    rows: list[dict[str, Any]],
+) -> int:
+    if not rows:
+        return 0
+    clean_rows: list[dict[str, Any]] = []
+    keys: list[tuple[str, str, str, int]] = []
+    for kwargs in rows:
+        wallet_address = str(kwargs["wallet_address"]).lower()
+        scope = str(kwargs["scope"])
+        city_slug = str(kwargs.get("city_slug") or "")
+        window_days = int(kwargs.get("window_days") or 90)
+        clean_kwargs = {
+            key: value
+            for key, value in kwargs.items()
+            if hasattr(WalletSkillScore, key)
+        }
+        clean_kwargs.update(
+            {
+                "wallet_address": wallet_address,
+                "scope": scope,
+                "city_slug": city_slug,
+                "window_days": window_days,
+            }
+        )
+        clean_rows.append(clean_kwargs)
+        keys.append((wallet_address, scope, city_slug, window_days))
+
+    existing: dict[tuple[str, str, str, int], WalletSkillScore] = {}
+    for chunk in _chunks(keys):
+        result = await session.execute(
+            select(WalletSkillScore).where(
+                tuple_(
+                    WalletSkillScore.wallet_address,
+                    WalletSkillScore.scope,
+                    WalletSkillScore.city_slug,
+                    WalletSkillScore.window_days,
+                ).in_(chunk)
+            )
+        )
+        for row in result.scalars().all():
+            existing[
+                (
+                    str(row.wallet_address).lower(),
+                    str(row.scope),
+                    str(row.city_slug),
+                    int(row.window_days),
+                )
+            ] = row
+
+    for clean_kwargs, key in zip(clean_rows, keys):
+        row = existing.get(key)
+        if row is None:
+            session.add(WalletSkillScore(**clean_kwargs))
+        else:
+            for attr, value in clean_kwargs.items():
+                setattr(row, attr, value)
+    await session.flush()
+    return len(clean_rows)
 
 
 async def get_wallet_skill_scores(

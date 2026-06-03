@@ -57,6 +57,7 @@ def test_wallet_leaderboard_disclaimer_is_read_only():
     assert "REFRESH FLOW" in template
     assert "refreshSmartMoney" in template
     assert "/api/wallet-rankings/refresh" in template
+    assert "include_history_skills: true" in template
     assert "CURRENT MARKET" in template
     assert "GLOBAL LEADERS" in template
     assert "CITY LEADERS" in template

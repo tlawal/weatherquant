@@ -6,6 +6,7 @@ or feed automated execution decisions.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 import logging
@@ -25,6 +26,7 @@ DATA_API = "https://data-api.polymarket.com"
 GAMMA_API = "https://gamma-api.polymarket.com"
 PROFILE_URL = "https://polymarket.com/profile/{wallet_address}"
 _USER_AGENT = {"User-Agent": "WeatherQuant/1.0 (wallet-tracker; read-only)"}
+_MAX_RAW_DEDUPE_KEY_LEN = 240
 
 
 def _warn_if_execution_caller() -> None:
@@ -476,7 +478,7 @@ def _weighted_avg(items: list[tuple[float, float]]) -> float | None:
     return sum(q * price for q, price in items) / qty
 
 
-def trade_dedupe_key(trade: PublicTrade) -> str:
+def trade_dedupe_identity(trade: PublicTrade) -> str:
     tx = trade.transaction_hash or ""
     if tx:
         return "|".join(
@@ -501,6 +503,21 @@ def trade_dedupe_key(trade: PublicTrade) -> str:
             f"{trade.price:.8f}",
         ]
     )
+
+
+def trade_dedupe_key(trade: PublicTrade) -> str:
+    """Return a stable DB-safe key for one public trade.
+
+    Polymarket weather token ids can be long enough that the raw trade
+    identity exceeds the historical wallet_trades.dedupe_key VARCHAR(256)
+    column. Preserve existing short-key behavior for already-ingested rows,
+    but hash any long identity before it reaches storage.
+    """
+    identity = trade_dedupe_identity(trade)
+    if len(identity) <= _MAX_RAW_DEDUPE_KEY_LEN:
+        return identity
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    return f"sha256:{digest}"
 
 
 def dedupe_public_trades(trades: list[PublicTrade]) -> list[PublicTrade]:
@@ -1016,10 +1033,10 @@ async def update_wallet_rankings(
 
     from backend.storage.db import get_session
     from backend.storage.repos import (
-        upsert_wallet_stat,
-        upsert_wallet_market_exposure,
-        upsert_wallet_skill_score,
-        upsert_wallet_trade,
+        bulk_upsert_wallet_market_exposures,
+        bulk_upsert_wallet_skill_scores,
+        bulk_upsert_wallet_stats,
+        bulk_upsert_wallet_trades,
     )
     from backend.tz_utils import city_local_date
 
@@ -1060,12 +1077,17 @@ async def update_wallet_rankings(
         all_market_refs.extend(market_refs)
         all_exposures.extend(exposures)
         async with get_session() as sess:
-            for trade in trades:
-                market = market_by_condition.get(trade.condition_id)
-                if market:
-                    await upsert_wallet_trade(sess, **_trade_to_db_kwargs(trade, market))
-            for exposure in exposures:
-                await upsert_wallet_market_exposure(sess, **exposure.to_db_kwargs())
+            trade_rows = [
+                _trade_to_db_kwargs(trade, market)
+                for trade in trades
+                if (market := market_by_condition.get(trade.condition_id)) is not None
+            ]
+            await bulk_upsert_wallet_trades(sess, trade_rows)
+            await bulk_upsert_wallet_market_exposures(
+                sess,
+                [exposure.to_db_kwargs() for exposure in exposures],
+            )
+            await sess.commit()
         metrics = compute_wallet_metrics(
             trades,
             market_refs,
@@ -1076,8 +1098,11 @@ async def update_wallet_rankings(
             as_of_date=city_as_of_date,
         )
         async with get_session() as sess:
-            for metric in metrics:
-                await upsert_wallet_stat(sess, **metric.to_db_kwargs())
+            await bulk_upsert_wallet_stats(
+                sess,
+                [metric.to_db_kwargs() for metric in metrics],
+            )
+            await sess.commit()
         total_wallets += len(metrics)
         if metrics:
             top_score = max(top_score or 0.0, metrics[0].consistency_score or 0.0)
@@ -1119,8 +1144,11 @@ async def update_wallet_rankings(
                 )
             )
         async with get_session() as sess:
-            for skill in global_skills + city_skill_rows:
-                await upsert_wallet_skill_score(sess, **skill.to_db_kwargs())
+            await bulk_upsert_wallet_skill_scores(
+                sess,
+                [skill.to_db_kwargs() for skill in global_skills + city_skill_rows],
+            )
+            await sess.commit()
 
     return WalletTrackerSummary(
         enabled=True,
@@ -1139,19 +1167,45 @@ async def refresh_wallet_rankings_for_city_date(
     adapter: PolymarketDataApiTradeAdapter | None = None,
     *,
     include_global_skills: bool = False,
+    include_history_skills: bool = False,
 ) -> WalletTrackerSummary:
     """Refresh read-only wallet analytics for one city page/date.
 
     Manual city refreshes should not overwrite global skill rankings with a
-    one-city slice unless the caller explicitly opts in.
+    one-city slice unless the caller explicitly opts in. Historical skill
+    refreshes rebuild city-specific wallet skill from recent resolved markets
+    so the current-market table can show city rank/accuracy/PnL context.
     """
-    return await update_wallet_rankings(
+    current = await update_wallet_rankings(
         adapter=adapter,
         city_slugs=[city_slug],
         as_of_date=date_et,
         lookback_days=1,
         exact_date=True,
+        write_global_skills=False,
+    )
+    if not include_history_skills:
+        return current
+
+    history = await update_wallet_rankings(
+        adapter=adapter,
+        city_slugs=[city_slug],
+        as_of_date=date_et,
+        lookback_days=Config.WALLET_TRACKER_LOOKBACK_DAYS,
+        exact_date=False,
         write_global_skills=include_global_skills,
+    )
+    return WalletTrackerSummary(
+        enabled=current.enabled and history.enabled,
+        cities_scanned=max(current.cities_scanned, history.cities_scanned),
+        condition_ids_scanned=current.condition_ids_scanned + history.condition_ids_scanned,
+        trades_fetched=current.trades_fetched + history.trades_fetched,
+        wallets_updated=max(current.wallets_updated, history.wallets_updated),
+        top_wallet_score=max(
+            current.top_wallet_score or 0.0,
+            history.top_wallet_score or 0.0,
+        ) or None,
+        errors=tuple([*current.errors, *history.errors]),
     )
 
 
@@ -1240,6 +1294,8 @@ def serialize_current_exposure_row(
     *,
     global_skill: Any | None,
     city_skill: Any | None,
+    legacy_city_stat: Any | None = None,
+    legacy_city_rank: int | None = None,
     truncate_addresses: bool = True,
     now: datetime | None = None,
 ) -> dict[str, Any] | None:
@@ -1256,9 +1312,19 @@ def serialize_current_exposure_row(
         return None
     last_trade_ts = getattr(exposure, "last_trade_ts", None)
     recency = _recency_weight(last_trade_ts, now=now)
+    has_legacy_city_stat = legacy_city_stat is not None
+    legacy_score = (
+        float(getattr(legacy_city_stat, "consistency_score", 0.0) or 0.0)
+        if has_legacy_city_stat else 0.0
+    )
     if is_ranked:
         alpha_score = global_score * city_score * _notional_weight(net_notional) * recency
         skill_source = "wallet_skill_scores"
+    elif has_legacy_city_stat and legacy_score >= Config.WALLET_TRACKER_MIN_ADJUSTED_SCORE:
+        is_ranked = True
+        city_score = legacy_score
+        alpha_score = legacy_score * _notional_weight(net_notional) * recency
+        skill_source = "wallet_stats_city_fallback"
     else:
         # Show live positioning even before skill is mature, but keep the
         # alpha score deliberately small so unproven wallets do not dominate
@@ -1276,21 +1342,28 @@ def serialize_current_exposure_row(
         last_trade_age_min = None
         last_trade = last_trade_ts
     direction = "LONG" if net_qty > 0 else ("EXITING" if net_notional < 0 else "FLAT")
+    fallback_volume = float(getattr(legacy_city_stat, "volume_usd", 0.0) or 0.0) if legacy_city_stat else 0.0
+    fallback_pnl = (
+        float(getattr(legacy_city_stat, "realized_pnl", 0.0) or 0.0)
+        + float(getattr(legacy_city_stat, "unrealized_pnl", 0.0) or 0.0)
+        if legacy_city_stat else 0.0
+    )
+    fallback_roi = fallback_pnl / fallback_volume if fallback_volume > 0 else None
     return {
         "wallet_address": address,
         "display_address": truncate_wallet_address(address, enabled=truncate_addresses),
         "profile_url": wallet_profile_url(address),
         "global_rank": getattr(global_skill, "rank", None),
-        "city_rank": getattr(city_skill, "rank", None) if city_skill else None,
+        "city_rank": getattr(city_skill, "rank", None) if city_skill else legacy_city_rank,
         "global_score": global_score if has_global_skill else None,
-        "city_score": getattr(city_skill, "adjusted_score", None) if city_skill else None,
+        "city_score": getattr(city_skill, "adjusted_score", None) if city_skill else (legacy_score if has_legacy_city_stat else None),
         "alpha_score": round(alpha_score, 4),
         "is_ranked": bool(is_ranked),
         "skill_source": skill_source,
-        "win_rate": getattr(global_skill, "win_rate", None) if global_skill else None,
+        "win_rate": getattr(global_skill, "win_rate", None) if global_skill else getattr(legacy_city_stat, "win_rate", None),
         "wilson_win_rate": getattr(global_skill, "wilson_win_rate", None) if global_skill else None,
-        "resolved_markets": getattr(global_skill, "resolved_markets", 0) if global_skill else 0,
-        "roi": getattr(global_skill, "roi", None) if global_skill else None,
+        "resolved_markets": getattr(global_skill, "resolved_markets", 0) if global_skill else getattr(legacy_city_stat, "trade_count", 0) if legacy_city_stat else 0,
+        "roi": getattr(global_skill, "roi", None) if global_skill else fallback_roi,
         "profit_factor": getattr(global_skill, "profit_factor", None) if global_skill else None,
         "bucket_idx": getattr(exposure, "bucket_idx", None),
         "bucket_label": getattr(exposure, "bucket_label", None),
@@ -1733,14 +1806,22 @@ async def get_weather_smart_money_payload(
         str(row.wallet_address).lower(): row
         for row in city_rows
     }
+    legacy_city_by_wallet: dict[str, tuple[int, Any]] = {}
+    for idx, row in enumerate(legacy_city_rows, start=1):
+        address = str(getattr(row, "wallet_address", "") or "").lower()
+        if address and address not in legacy_city_by_wallet:
+            legacy_city_by_wallet[address] = (idx, row)
 
     current_rows = []
     for exposure in exposure_rows:
         address = str(getattr(exposure, "wallet_address", "") or "").lower()
+        legacy_rank, legacy_stat = legacy_city_by_wallet.get(address, (None, None))
         row = serialize_current_exposure_row(
             exposure,
             global_skill=global_by_wallet.get(address),
             city_skill=city_by_wallet.get(address),
+            legacy_city_stat=legacy_stat,
+            legacy_city_rank=legacy_rank,
             truncate_addresses=Config.WALLET_TRACKER_TRUNCATE_ADDRESSES,
         )
         if row:

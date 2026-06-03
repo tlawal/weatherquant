@@ -466,7 +466,7 @@ class WalletTrade(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    dedupe_key: Mapped[str] = mapped_column(String(256), nullable=False)
+    dedupe_key: Mapped[str] = mapped_column(Text, nullable=False)
     wallet_address: Mapped[str] = mapped_column(String(64), nullable=False)
     city_slug: Mapped[str] = mapped_column(String(64), nullable=False)
     date: Mapped[str] = mapped_column(String(10), nullable=False)

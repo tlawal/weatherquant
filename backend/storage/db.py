@@ -412,7 +412,7 @@ async def init_db() -> None:
     await _run_ddl("""
         CREATE TABLE IF NOT EXISTS wallet_trades (
             id SERIAL PRIMARY KEY,
-            dedupe_key VARCHAR(256) NOT NULL UNIQUE,
+            dedupe_key TEXT NOT NULL UNIQUE,
             wallet_address VARCHAR(64) NOT NULL,
             city_slug VARCHAR(64) NOT NULL,
             date VARCHAR(10) NOT NULL,
@@ -431,6 +431,7 @@ async def init_db() -> None:
             inserted_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
         )
     """)
+    await _run_ddl("ALTER TABLE wallet_trades ALTER COLUMN dedupe_key TYPE TEXT")
     await _run_ddl("CREATE INDEX IF NOT EXISTS ix_wallet_trade_wallet_ts ON wallet_trades (wallet_address, trade_ts)")
     await _run_ddl("CREATE INDEX IF NOT EXISTS ix_wallet_trade_condition ON wallet_trades (condition_id)")
     await _run_ddl("CREATE INDEX IF NOT EXISTS ix_wallet_trade_city_date ON wallet_trades (city_slug, date)")

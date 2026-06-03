@@ -546,6 +546,7 @@ class WalletRankingsRefreshRequest(BaseModel):
     city_slug: str
     date_et: Optional[str] = None
     include_global_skills: bool = False
+    include_history_skills: bool = False
 
 
 @router.post("/api/wallet-rankings/refresh")
@@ -566,6 +567,7 @@ async def refresh_wallet_rankings(
             city_slug,
             target_date,
             include_global_skills=body.include_global_skills,
+            include_history_skills=body.include_history_skills,
         )
         payload = {
             "ok": summary.enabled and not summary.errors,
@@ -579,6 +581,7 @@ async def refresh_wallet_rankings(
             "top_wallet_score": summary.top_wallet_score,
             "errors": list(summary.errors),
             "include_global_skills": body.include_global_skills,
+            "include_history_skills": body.include_history_skills,
         }
         async with get_session() as sess:
             await append_audit(

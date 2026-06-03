@@ -25,6 +25,7 @@ from backend.market_context.wallet_tracker import (
     get_weather_smart_money_payload,
     infer_strategy_style,
     refresh_wallet_rankings_for_city_date,
+    trade_dedupe_key,
     truncate_wallet_address,
     update_wallet_rankings,
     wilson_lower_bound,
@@ -140,6 +141,38 @@ def test_trade_deduping_uses_transaction_wallet_condition_side_asset():
     deduped = dedupe_public_trades([distinct, duplicate, first])
     assert len(deduped) == 2
     assert [t.side for t in deduped] == ["BUY", "SELL"]
+
+
+def test_trade_dedupe_key_hashes_long_polymarket_identity():
+    wallet = "0xb345e5a823ec9f1583f49f84942ac95efc77557a"
+    long_condition = "0x5c4ec67ae4d440aaf1daca3edc33508d62f0dcc16323b8e81e6a413227afcec6"
+    long_asset = "44083117145079190729962534518621568951125118327004537241875916753327505341145"
+    trade = PublicTrade(
+        wallet_address=wallet,
+        condition_id=long_condition,
+        side="BUY",
+        size=1.51,
+        price=0.99,
+        timestamp=datetime(2026, 6, 1, 4, 46, 3, tzinfo=timezone.utc),
+        asset_id=long_asset,
+        transaction_hash="0xa77ea28242b521e5ec508facbc4144058a42a4df43751486f8f8254b93408c8a",
+    )
+    duplicate = PublicTrade(
+        wallet_address=wallet.upper(),
+        condition_id=long_condition,
+        side="BUY",
+        size=1.51,
+        price=0.99,
+        timestamp=trade.timestamp + timedelta(seconds=1),
+        asset_id=long_asset,
+        transaction_hash=trade.transaction_hash,
+    )
+
+    key = trade_dedupe_key(trade)
+
+    assert key.startswith("sha256:")
+    assert len(key) == 71
+    assert trade_dedupe_key(duplicate) == key
 
 
 def test_wilson_lower_bound_penalizes_tiny_perfect_records():
@@ -587,6 +620,83 @@ def test_city_date_wallet_refresh_scans_exact_requested_event(tmp_path, monkeypa
     _run(engine.dispose())
 
 
+def test_city_date_wallet_refresh_stores_long_polymarket_trade_identity(tmp_path, monkeypatch):
+    engine, session_factory = _run(_setup_test_db(tmp_path, monkeypatch))
+    monkeypatch.setattr(Config, "WALLET_TRACKER_ENABLED", True, raising=False)
+    monkeypatch.setattr(Config, "WALLET_TRACKER_START_CITY", "all", raising=False)
+    long_condition = "0x5c4ec67ae4d440aaf1daca3edc33508d62f0dcc16323b8e81e6a413227afcec6"
+
+    class LongTradeAdapter:
+        async def fetch_trades_for_markets(self, condition_ids):
+            assert condition_ids == [long_condition]
+            return [
+                PublicTrade(
+                    wallet_address="0xb345e5a823ec9f1583f49f84942ac95efc77557a",
+                    condition_id=long_condition,
+                    side="BUY",
+                    size=1.51,
+                    price=0.99,
+                    timestamp=datetime(2026, 6, 1, 4, 46, 3, tzinfo=timezone.utc),
+                    asset_id="44083117145079190729962534518621568951125118327004537241875916753327505341145",
+                    transaction_hash="0xa77ea28242b521e5ec508facbc4144058a42a4df43751486f8f8254b93408c8a",
+                    raw={"asset": "long"},
+                )
+            ]
+
+    async def run_test():
+        async with session_factory() as session:
+            city = City(
+                city_slug="atlanta",
+                display_name="Atlanta",
+                metar_station="KATL",
+                enabled=True,
+                is_us=True,
+                unit="F",
+                tz="America/New_York",
+            )
+            session.add(city)
+            await session.flush()
+            event = Event(
+                city_id=city.id,
+                date_et="2026-06-03",
+                gamma_slug="highest-temperature-in-atlanta-on-june-3-2026",
+                status="ok",
+            )
+            session.add(event)
+            await session.flush()
+            session.add(
+                Bucket(
+                    event_id=event.id,
+                    bucket_idx=0,
+                    condition_id=long_condition,
+                    label="Will the highest temperature in Atlanta be 71F or below on June 3?",
+                )
+            )
+            await session.commit()
+
+        summary = await refresh_wallet_rankings_for_city_date(
+            "atlanta",
+            "2026-06-03",
+            adapter=LongTradeAdapter(),
+        )
+
+        async with session_factory() as session:
+            trades = (await session.execute(select(WalletTrade))).scalars().all()
+            exposures = (await session.execute(select(WalletMarketExposure))).scalars().all()
+
+        assert summary.enabled is True
+        assert summary.condition_ids_scanned == 1
+        assert summary.trades_fetched == 1
+        assert len(trades) == 1
+        assert trades[0].dedupe_key.startswith("sha256:")
+        assert len(trades[0].dedupe_key) == 71
+        assert len(exposures) == 1
+        assert exposures[0].net_position_qty == 1.51
+
+    _run(run_test())
+    _run(engine.dispose())
+
+
 def test_dashboard_payload_helper_returns_safe_rows():
     row = SimpleNamespace(
         wallet_address="0x1234567890abcdef1234567890abcdef12345678",
@@ -778,6 +888,76 @@ def test_weather_smart_money_payload_shows_unscored_current_exposures(tmp_path, 
         assert payload["bucket_consensus"][1]["ranked_wallets_long"] == 0
         assert payload["confluence"]["status"] == "unavailable"
         assert payload["confluence"]["reason"] == "no_ranked_wallet_flow"
+
+    _run(run_test())
+    _run(engine.dispose())
+
+
+def test_weather_smart_money_payload_uses_city_stat_skill_fallback(tmp_path, monkeypatch):
+    engine, session_factory = _run(_setup_test_db(tmp_path, monkeypatch))
+    monkeypatch.setattr(Config, "WALLET_TRACKER_ENABLED", True, raising=False)
+    ts = datetime.now(timezone.utc) - timedelta(minutes=12)
+    wallet = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+    async def run_test():
+        async with session_factory() as session:
+            await upsert_wallet_market_exposure(
+                session,
+                wallet_address=wallet,
+                city_slug="atlanta",
+                date="2026-05-16",
+                market_slug="atlanta-high",
+                condition_id="cond-a",
+                bucket_idx=2,
+                bucket_label="88-89F",
+                net_position_qty=30.0,
+                net_notional_usd=18.0,
+                trade_count=1,
+                volume_usd=18.0,
+                avg_entry_price=0.6,
+                realized_pnl=0.0,
+                unrealized_pnl=2.0,
+                last_trade_ts=ts,
+                last_updated_ts=ts,
+            )
+            await upsert_wallet_stat(
+                session,
+                wallet_address=wallet,
+                city_slug="atlanta",
+                condition_id="older-cond",
+                date="2026-05-15",
+                trade_count=9,
+                volume_usd=900.0,
+                realized_pnl=180.0,
+                unrealized_pnl=0.0,
+                win_rate=0.78,
+                consistency_score=0.82,
+                bucket_idx=3,
+                bucket_label="90-91F",
+                net_position_qty=0.0,
+                net_flow_usd=0.0,
+                last_trade_ts=ts - timedelta(days=1),
+            )
+
+        payload = await get_weather_smart_money_payload(
+            "atlanta",
+            "2026-05-16",
+            buckets=[
+                {"bucket_idx": 1, "label": "86-87F", "model_prob": 0.25},
+                {"bucket_idx": 2, "label": "88-89F", "model_prob": 0.55},
+            ],
+            limit=50,
+        )
+
+        row = payload["current_market"][0]
+        assert row["is_ranked"] is True
+        assert row["skill_source"] == "wallet_stats_city_fallback"
+        assert row["city_rank"] == 1
+        assert row["city_score"] == 0.82
+        assert row["win_rate"] == 0.78
+        assert row["roi"] == 0.2
+        assert payload["bucket_consensus"][1]["ranked_wallets_long"] == 1
+        assert payload["confluence"]["badge"] == "CONFIRMS MODEL"
 
     _run(run_test())
     _run(engine.dispose())
