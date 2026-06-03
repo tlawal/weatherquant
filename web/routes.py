@@ -2250,7 +2250,7 @@ async def api_run_backtest(request: Request):
     return {"run_id": run_id, "status": "running"}
 
 
-@dashboard_router.get("/api/backtest/{run_id}")
+@dashboard_router.get("/api/backtest/{run_id:int}")
 async def api_get_backtest(run_id: int):
     """Poll backtest status/results."""
     from backend.storage.models import BacktestRun

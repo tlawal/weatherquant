@@ -592,7 +592,11 @@ async def _audit_obs_decision(decision: dict) -> None:
 
 
 async def _run_exit_cascade_for_position(
-    pos, signal: BucketSignal, consensus_bucket_id: Optional[int], consensus_sig: Optional[BucketSignal] = None
+    pos,
+    signal: BucketSignal,
+    consensus_bucket_id: Optional[int],
+    consensus_sig: Optional[BucketSignal] = None,
+    market_leader_sig: Optional[BucketSignal] = None,
 ) -> dict | None:
     """Evaluate the 4-level cascade for a single position."""
     
@@ -644,6 +648,35 @@ async def _run_exit_cascade_for_position(
     # Exit when ev_at_bid has stayed at or below threshold for N consecutive runs.
     # Held bucket is no longer +EV; sell the non-moon-bag portion at the bid.
     edge_decay_allowed, edge_decay_diag = _edge_decay_exit_allowed(pos, signal, age_s, bid)
+    if edge_decay_allowed:
+        held_is_model_leader = bool(consensus_sig and consensus_sig.bucket_id == pos.bucket_id)
+        held_is_market_leader = bool(market_leader_sig and market_leader_sig.bucket_id == pos.bucket_id)
+        edge_decay_diag["held_is_model_leader"] = held_is_model_leader
+        edge_decay_diag["held_is_market_leader"] = held_is_market_leader
+        edge_decay_diag["model_leader_bucket_id"] = getattr(consensus_sig, "bucket_id", None)
+        edge_decay_diag["market_leader_bucket_id"] = getattr(market_leader_sig, "bucket_id", None)
+        if (
+            Config.EDGE_DECAY_PROTECT_LEADING_BUCKET
+            and (
+                (
+                    held_is_model_leader
+                    and signal.model_prob >= Config.EDGE_DECAY_LEADER_MIN_MODEL_PROB
+                )
+                or held_is_market_leader
+            )
+        ):
+            log.info(
+                "exit: EDGE_DECAY suppressed %s — held bucket still leads "
+                "(model_leader=%s market_leader=%s model_prob=%.3f ev_at_bid=%.4f)",
+                signal.city_slug,
+                held_is_model_leader,
+                held_is_market_leader,
+                signal.model_prob,
+                signal.ev_at_bid,
+            )
+            edge_decay_diag["blocked_reason"] = "held_bucket_still_leading"
+            edge_decay_allowed = False
+
     if edge_decay_allowed:
         sell_qty = pos.net_qty - (pos.moon_bag_qty or 0.0)
         if sell_qty <= 0:
@@ -995,6 +1028,21 @@ async def run_exit_engine() -> None:
         if s.event_id not in event_consensus or s.model_prob > event_consensus[s.event_id].model_prob:
             event_consensus[s.event_id] = s
 
+    # Find market-leading bucket for each event (highest mid, falling back to bid).
+    # This is only a veto for EDGE_DECAY; it does not create trade signals.
+    event_market_leader = {}
+    for s in signals:
+        price = s.yes_mid if s.yes_mid is not None else s.yes_bid
+        if price is None:
+            continue
+        current = event_market_leader.get(s.event_id)
+        current_price = (
+            current.yes_mid if current and current.yes_mid is not None
+            else (current.yes_bid if current else None)
+        )
+        if current is None or current_price is None or price > current_price:
+            event_market_leader[s.event_id] = s
+
     # Persist consensus to DB + update in-memory cache
     for event_id, sig in event_consensus.items():
         await _record_consensus(event_id, sig.bucket_id)
@@ -1031,7 +1079,14 @@ async def run_exit_engine() -> None:
 
         stable_consensus_id = _stable_consensus(signal.event_id, pos.bucket_id, multiplier)
 
-        cascade = await _run_exit_cascade_for_position(pos, signal, stable_consensus_id, consensus_sig)
+        market_leader_sig = event_market_leader.get(signal.event_id)
+        cascade = await _run_exit_cascade_for_position(
+            pos,
+            signal,
+            stable_consensus_id,
+            consensus_sig,
+            market_leader_sig,
+        )
         if cascade:
             if cascade.get("no_order"):
                 status = cascade.get("status") or cascade["level"]

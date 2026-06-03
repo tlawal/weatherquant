@@ -304,6 +304,37 @@ def test_cascade_consensus_shift_with_positive_ev_suppresses_both_exits(stub_db)
     assert result is None  # no exit fires
 
 
+def test_cascade_edge_decay_suppressed_when_held_bucket_still_leads(stub_db):
+    """A negative EV streak is not enough when the held bucket remains the top model/market bucket."""
+    n = Config.EDGE_DECAY_DEBOUNCE_RUNS
+    bucket_id = 100
+    ee._ev_cache[bucket_id] = [Config.EDGE_DECAY_THRESHOLD - 0.01] * n
+
+    pos = _make_position(
+        bucket_id=bucket_id,
+        avg_cost=0.32,
+        age_seconds=7200,
+        entry_ev_at_bid=0.05,
+        entry_model_prob=0.46,
+        entry_market_prob=0.33,
+    )
+    signal = _make_signal(
+        bucket_id=bucket_id,
+        ev_at_bid=Config.EDGE_DECAY_THRESHOLD - 0.02,
+        yes_bid=0.34,
+        model_prob=0.40,
+    )
+
+    result = _run(ee._run_exit_cascade_for_position(
+        pos,
+        signal,
+        None,
+        signal,  # current model leader is still the held bucket
+        signal,  # current market leader is still the held bucket
+    ))
+    assert result is None
+
+
 def test_cascade_consensus_shift_with_decayed_ev_fires_edge_decay_first(stub_db):
     """When both gates would fire, EDGE_DECAY supersedes URGENT (it's earlier in the cascade)."""
     n = Config.EDGE_DECAY_DEBOUNCE_RUNS

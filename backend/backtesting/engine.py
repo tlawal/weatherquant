@@ -14,7 +14,7 @@ import math
 import re
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from itertools import product
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -33,6 +33,8 @@ from backend.backtesting.metrics import (
 )
 from backend.engine.signal_engine import _execution_cost
 from backend.execution.obs_proximity import evaluate_obs_proximity_exit
+from backend.modeling.calibration_engine import resolve_canonical_settlement_high
+from backend.modeling.settlement import canonical_bucket_ranges, find_bucket_idx_for_value
 from backend.strategy.kelly import calculate_kelly_fraction
 from backend.storage.db import get_session
 from backend.storage.models import (
@@ -167,6 +169,189 @@ class Portfolio:
 
     def available(self) -> float:
         return max(0.0, self.bankroll)
+
+
+_GATE_REASON_LABELS = {
+    "missing_market": "Missing market snapshot",
+    "invalid_market_probability": "Invalid market probability",
+    "edge_below_min": "Edge below threshold",
+    "market_prob_out_of_range": "Market probability out of range",
+    "insufficient_ask_depth": "Not enough ask depth",
+    "entry_price_above_max": "Entry price above cap",
+    "spread_above_max": "Spread too wide",
+    "max_positions_per_event": "Event position limit",
+    "kelly_non_positive": "Kelly size <= 0",
+    "trade_too_small": "Trade below minimum size",
+}
+
+
+def _new_gate_diagnostics(params: BacktestParams) -> dict:
+    """Mutable diagnostics collector for strategy gate decisions."""
+    return {
+        "candidates_evaluated": 0,
+        "trades_taken": 0,
+        "rejected_total": 0,
+        "reasons": defaultdict(int),
+        "constraint_hits": defaultdict(int),
+        "per_city": defaultdict(lambda: {"candidates": 0, "trades": 0, "rejected": 0}),
+        "best_candidate": None,
+        "best_rejected": None,
+        "near_misses": [],
+        "thresholds": {
+            "min_true_edge": params.min_true_edge,
+            "max_entry_price": params.max_entry_price,
+            "max_spread": params.max_spread,
+            "min_liquidity_shares": params.min_liquidity_shares,
+            "max_positions_per_event": params.max_positions_per_event,
+            "min_trade_cost": 0.50,
+        },
+    }
+
+
+def _candidate_snapshot(
+    event_data: dict,
+    bucket_idx: int,
+    *,
+    model_prob: Optional[float] = None,
+    mkt_prob: Optional[float] = None,
+    true_edge: Optional[float] = None,
+    spread: Optional[float] = None,
+    ask_depth: Optional[float] = None,
+    entry_price: Optional[float] = None,
+    reason: Optional[str] = None,
+    violations: Optional[list[str]] = None,
+    actual: Optional[float] = None,
+    required: Optional[float] = None,
+) -> dict:
+    bucket_info = next((b for b in event_data.get("buckets", []) if b.get("idx") == bucket_idx), None)
+    out = {
+        "city_slug": event_data.get("city_slug"),
+        "date_et": event_data.get("date_et"),
+        "bucket_idx": bucket_idx,
+        "bucket_label": (bucket_info or {}).get("label") or f"Bucket {bucket_idx}",
+        "model_prob": round(model_prob, 4) if model_prob is not None else None,
+        "market_prob": round(mkt_prob, 4) if mkt_prob is not None else None,
+        "true_edge": round(true_edge, 4) if true_edge is not None else None,
+        "spread": round(spread, 4) if spread is not None else None,
+        "ask_depth": round(ask_depth, 2) if ask_depth is not None else None,
+        "entry_price": round(entry_price, 4) if entry_price is not None else None,
+        "reason": reason,
+        "reason_label": _GATE_REASON_LABELS.get(reason, reason) if reason else None,
+        "violations": violations or [],
+        "actual": round(actual, 4) if actual is not None else None,
+        "required": round(required, 4) if required is not None else None,
+    }
+    if actual is not None and required is not None:
+        out["gap"] = round(abs(actual - required), 4)
+    return out
+
+
+def _record_gate_candidate(diagnostics: Optional[dict], event_data: dict, candidate: dict) -> None:
+    if diagnostics is None:
+        return
+    diagnostics["candidates_evaluated"] += 1
+    city = event_data.get("city_slug") or "unknown"
+    diagnostics["per_city"][city]["candidates"] += 1
+    edge = candidate.get("true_edge")
+    best = diagnostics.get("best_candidate")
+    if edge is not None and (best is None or edge > (best.get("true_edge") or -999)):
+        diagnostics["best_candidate"] = dict(candidate)
+
+
+def _record_gate_rejection(
+    diagnostics: Optional[dict],
+    event_data: dict,
+    candidate: dict,
+    reason: str,
+    violations: Optional[list[str]] = None,
+) -> None:
+    if diagnostics is None:
+        return
+    diagnostics["rejected_total"] += 1
+    diagnostics["reasons"][reason] += 1
+    for violation in violations or [reason]:
+        diagnostics["constraint_hits"][violation] += 1
+    city = event_data.get("city_slug") or "unknown"
+    diagnostics["per_city"][city]["rejected"] += 1
+
+    rejected = dict(candidate)
+    rejected["reason"] = reason
+    rejected["reason_label"] = _GATE_REASON_LABELS.get(reason, reason)
+    rejected["violations"] = violations or [reason]
+    edge = rejected.get("true_edge")
+    best = diagnostics.get("best_rejected")
+    if edge is not None and (best is None or edge > (best.get("true_edge") or -999)):
+        diagnostics["best_rejected"] = rejected
+
+    near_misses = diagnostics["near_misses"]
+    near_misses.append(rejected)
+    near_misses.sort(key=lambda row: row.get("true_edge") if row.get("true_edge") is not None else -999, reverse=True)
+    del near_misses[8:]
+
+
+def _record_gate_accept(diagnostics: Optional[dict], event_data: dict, candidate: dict) -> None:
+    if diagnostics is None:
+        return
+    diagnostics["trades_taken"] += 1
+    city = event_data.get("city_slug") or "unknown"
+    diagnostics["per_city"][city]["trades"] += 1
+
+
+def _gate_actual_required(reason: str, *, actuals: dict, params: BacktestParams) -> tuple[Optional[float], Optional[float]]:
+    if reason == "edge_below_min":
+        return actuals.get("true_edge"), params.min_true_edge
+    if reason == "entry_price_above_max":
+        return actuals.get("entry_price"), params.max_entry_price
+    if reason == "spread_above_max":
+        return actuals.get("spread"), params.max_spread
+    if reason == "insufficient_ask_depth":
+        return actuals.get("ask_depth"), params.min_liquidity_shares
+    if reason == "trade_too_small":
+        return actuals.get("cost"), 0.50
+    return None, None
+
+
+def _finalize_gate_diagnostics(diagnostics: Optional[dict]) -> dict:
+    if not diagnostics:
+        return {}
+
+    reasons = [
+        {"reason": reason, "label": _GATE_REASON_LABELS.get(reason, reason), "count": count}
+        for reason, count in diagnostics["reasons"].items()
+    ]
+    reasons.sort(key=lambda row: row["count"], reverse=True)
+
+    constraint_hits = [
+        {"reason": reason, "label": _GATE_REASON_LABELS.get(reason, reason), "count": count}
+        for reason, count in diagnostics["constraint_hits"].items()
+    ]
+    constraint_hits.sort(key=lambda row: row["count"], reverse=True)
+
+    per_city = {
+        city: dict(data)
+        for city, data in sorted(
+            diagnostics["per_city"].items(),
+            key=lambda item: (item[1].get("trades", 0), item[1].get("candidates", 0)),
+            reverse=True,
+        )
+    }
+
+    return {
+        "candidates_evaluated": diagnostics["candidates_evaluated"],
+        "trades_taken": diagnostics["trades_taken"],
+        "rejected_total": diagnostics["rejected_total"],
+        "top_reasons": reasons,
+        "constraint_hits": constraint_hits,
+        "per_city": per_city,
+        "best_candidate": diagnostics.get("best_candidate"),
+        "best_rejected": diagnostics.get("best_rejected"),
+        "near_misses": diagnostics.get("near_misses", []),
+        "thresholds": diagnostics.get("thresholds", {}),
+        "description": (
+            "Strategy gate diagnostics show why modeled bucket opportunities did or did not become simulated trades. "
+            "Top reasons use the first blocking gate; constraint hits count every violated gate on the candidate."
+        ),
+    }
 
 
 # ─── Gamma API enrichment ────────────────────────────────────────────────────
@@ -671,6 +856,256 @@ async def count_resolved_sources() -> dict:
     return {"resolved_local": int(local), "resolved_gamma": int(gamma)}
 
 
+def _event_is_past_local_day(event: Event, city: City, *, now_utc: datetime | None = None) -> bool:
+    now = now_utc or datetime.now(timezone.utc)
+    try:
+        city_tz = ZoneInfo(getattr(city, "tz", None) or "America/New_York")
+        event_date = datetime.strptime(event.date_et, "%Y-%m-%d").date()
+    except Exception:
+        return False
+    return event_date < now.astimezone(city_tz).date()
+
+
+def _winner_idx_from_high(buckets: list[Bucket], high_f: float | None) -> int | None:
+    if high_f is None or not buckets:
+        return None
+    ranges = canonical_bucket_ranges([(b.low_f, b.high_f) for b in buckets])
+    return find_bucket_idx_for_value(ranges, float(high_f))
+
+
+async def _prefetch_observed_highs(
+    sess,
+    event_city_rows: list[tuple[Event, City]],
+) -> dict[tuple[int, str], float]:
+    """Bulk-load METAR daily highs keyed by (city_id, local YYYY-MM-DD)."""
+    if not event_city_rows:
+        return {}
+    city_ids = sorted({int(city.id) for _, city in event_city_rows})
+    date_vals = []
+    for event, _ in event_city_rows:
+        try:
+            date_vals.append(datetime.strptime(event.date_et, "%Y-%m-%d").date())
+        except Exception:
+            continue
+    if not city_ids or not date_vals:
+        return {}
+
+    # Broad UTC window; local-date assignment happens in Python per city TZ.
+    start_utc = datetime.combine(min(date_vals), datetime.min.time(), tzinfo=timezone.utc) - timedelta(days=1)
+    end_utc = datetime.combine(max(date_vals), datetime.min.time(), tzinfo=timezone.utc) + timedelta(days=2)
+    tz_by_city_id: dict[int, ZoneInfo] = {}
+    for _, city in event_city_rows:
+        if city.id in tz_by_city_id:
+            continue
+        try:
+            tz_by_city_id[int(city.id)] = ZoneInfo(getattr(city, "tz", None) or "America/New_York")
+        except Exception:
+            tz_by_city_id[int(city.id)] = ZoneInfo("America/New_York")
+
+    rows = (
+        await sess.execute(
+            select(MetarObs.city_id, MetarObs.observed_at, MetarObs.temp_f)
+            .where(
+                MetarObs.city_id.in_(city_ids),
+                MetarObs.temp_f.isnot(None),
+                MetarObs.observed_at >= start_utc,
+                MetarObs.observed_at < end_utc,
+            )
+        )
+    ).all()
+
+    highs: dict[tuple[int, str], float] = {}
+    for city_id, observed_at, temp_f in rows:
+        if observed_at is None or temp_f is None:
+            continue
+        if observed_at.tzinfo is None:
+            observed_at = observed_at.replace(tzinfo=timezone.utc)
+        tz = tz_by_city_id.get(int(city_id), ZoneInfo("America/New_York"))
+        date_key = observed_at.astimezone(tz).date().isoformat()
+        key = (int(city_id), date_key)
+        temp = float(temp_f)
+        if key not in highs or temp > highs[key]:
+            highs[key] = temp
+    return highs
+
+
+async def _derive_local_resolution(
+    sess,
+    *,
+    event: Event,
+    city: City,
+    buckets: list[Bucket],
+    observed_highs: dict[tuple[int, str], float] | None = None,
+    allow_slow_fallback: bool = True,
+) -> tuple[int | None, float | None, str | None]:
+    """Derive a provisional local winner from station/WU settlement data.
+
+    Polymarket/Gamma outcomes are preferred when present, but the bot already
+    stores enough station history to score past tracked events before Gamma has
+    matched them. This is what makes `/backtest` useful during live operation.
+    """
+    if event.winning_bucket_idx is not None:
+        high = (observed_highs or {}).get((int(city.id), event.date_et))
+        if high is None and allow_slow_fallback:
+            settlement = await resolve_canonical_settlement_high(
+                sess,
+                city=city,
+                event=event,
+                validate_polymarket_winner=False,
+            )
+            high = settlement.get("high_f")
+        return int(event.winning_bucket_idx), (float(high) if high is not None else None), "gamma_confirmed"
+
+    if not _event_is_past_local_day(event, city):
+        return None, None, None
+
+    source_used = "station_metar"
+    high = (observed_highs or {}).get((int(city.id), event.date_et))
+    if high is None and allow_slow_fallback:
+        settlement = await resolve_canonical_settlement_high(
+            sess,
+            city=city,
+            event=event,
+            validate_polymarket_winner=False,
+        )
+        high = settlement.get("high_f")
+        source_used = settlement.get("source_used") or "local_settlement"
+    if high is None:
+        return None, None, None
+    winner_idx = _winner_idx_from_high(buckets, float(high))
+    if winner_idx is None:
+        return None, float(high), f"{source_used}_unmapped"
+    return int(winner_idx), float(high), source_used
+
+
+def _as_float(raw) -> Optional[float]:
+    try:
+        if raw is None:
+            return None
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_probability(raw) -> Optional[float]:
+    val = _as_float(raw)
+    if val is None or val <= 0.0 or val >= 1.0:
+        return None
+    return val
+
+
+def _normalise_entry_market_row(row: dict) -> dict:
+    """Build a usable entry orderbook snapshot from stored MarketSnapshot fields.
+
+    Older rows can have null/zero `yes_mid` even when bid/ask is stored. The
+    strategy simulator needs a market probability, so derive mid from bid/ask
+    before deciding the row is untradable.
+    """
+    yes_bid = _as_probability(row.get("yes_bid"))
+    yes_ask = _as_probability(row.get("yes_ask"))
+    yes_mid = _as_probability(row.get("yes_mid"))
+    if yes_mid is None:
+        if yes_bid is not None and yes_ask is not None:
+            yes_mid = (yes_bid + yes_ask) / 2.0
+        elif yes_ask is not None:
+            yes_mid = yes_ask
+        elif yes_bid is not None:
+            yes_mid = yes_bid
+
+    spread = _as_float(row.get("spread"))
+    if spread is None and yes_bid is not None and yes_ask is not None:
+        spread = max(0.0, yes_ask - yes_bid)
+
+    return {
+        "yes_mid": yes_mid,
+        "yes_bid": yes_bid,
+        "yes_ask": yes_ask,
+        "spread": spread,
+        "bid_depth": _as_float(row.get("yes_bid_depth")) or 0.0,
+        "ask_depth": _as_float(row.get("yes_ask_depth")) or 0.0,
+    }
+
+
+def _aware_utc(dt: datetime | None) -> Optional[datetime]:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _city_tz(city: City) -> ZoneInfo:
+    try:
+        return ZoneInfo(getattr(city, "tz", None) or "America/New_York")
+    except Exception:
+        return ZoneInfo("America/New_York")
+
+
+def _select_actionable_model_snapshot(
+    event: Event,
+    city: City,
+    snapshots: list[ModelSnapshot],
+) -> Optional[ModelSnapshot]:
+    """Pick a tradable decision checkpoint instead of the latest post-close row."""
+    if not snapshots:
+        return None
+    try:
+        event_date = datetime.strptime(event.date_et, "%Y-%m-%d").date()
+    except Exception:
+        return max(snapshots, key=lambda snap: _aware_utc(snap.computed_at) or datetime.min.replace(tzinfo=timezone.utc))
+
+    tz = _city_tz(city)
+    annotated = []
+    for snap in snapshots:
+        computed_at = _aware_utc(getattr(snap, "computed_at", None))
+        if computed_at is None:
+            continue
+        annotated.append((computed_at, computed_at.astimezone(tz), snap))
+    if not annotated:
+        return None
+    annotated.sort(key=lambda row: row[0])
+
+    # Regular quick-flip checkpoint: latest same-day snapshot from 7-10 AM local.
+    morning = [
+        row for row in annotated
+        if row[1].date() == event_date and 7 <= (row[1].hour + row[1].minute / 60.0) <= 10
+    ]
+    if morning:
+        return morning[-1][2]
+
+    # Night Owl checkpoint: latest snapshot from previous 11 PM through 6 AM local.
+    overnight = [
+        row for row in annotated
+        if (
+            (row[1].date() == event_date - timedelta(days=1) and row[1].hour >= 23)
+            or (row[1].date() == event_date and row[1].hour < 6)
+        )
+    ]
+    if overnight:
+        return overnight[-1][2]
+
+    # If the market was first tracked late, use the earliest regular-session row
+    # before pre-close. This avoids selecting post-resolution 0.001/0.999 books.
+    regular_session = [
+        row for row in annotated
+        if row[1].date() == event_date and 6 <= (row[1].hour + row[1].minute / 60.0) <= 15
+    ]
+    if regular_session:
+        return regular_session[0][2]
+
+    pre_close = [
+        row for row in annotated
+        if row[1].date() == event_date and (row[1].hour + row[1].minute / 60.0) < 19.5
+    ]
+    if pre_close:
+        return pre_close[-1][2]
+
+    # Last resort: latest row before or on the event's local date. Never prefer a
+    # post-event-day row over an earlier potentially tradable snapshot.
+    non_future = [row for row in annotated if row[1].date() <= event_date]
+    return (non_future[-1][2] if non_future else annotated[0][2])
+
+
 async def get_coverage_breakdown() -> dict:
     """Three-tier coverage report driving the /backtest banner.
 
@@ -698,39 +1133,89 @@ async def get_coverage_breakdown() -> dict:
             select(func.count(MarketSnapshot.id))
         )).scalar_one() or 0
 
-        # Events that resolved AND have at least one ModelSnapshot
+        # Events with at least one ModelSnapshot. A local station-derived
+        # winner makes past tracked events replayable even before Gamma/UMA has
+        # cross-matched the market outcome into Event.winning_bucket_idx.
         events_with_model_q = (
-            select(Event.id, Event.date_et)
+            select(Event, City)
+            .join(City, Event.city_id == City.id)
             .where(Event.winning_bucket_idx.isnot(None))
-            .where(
-                Event.id.in_(select(ModelSnapshot.event_id).distinct())
-            )
+            .where(Event.id.in_(select(ModelSnapshot.event_id).distinct()))
         )
-        events_with_model = (await sess.execute(events_with_model_q)).all()
-        n_with_model = len(events_with_model)
+        local_events_with_model_q = (
+            select(Event, City)
+            .join(City, Event.city_id == City.id)
+            .where(Event.id.in_(select(ModelSnapshot.event_id).distinct()))
+        )
+        confirmed_events = (await sess.execute(events_with_model_q)).all()
+        local_events_with_model = (await sess.execute(local_events_with_model_q)).all()
+        n_with_model = len(local_events_with_model)
+        event_ids = [event.id for event, _ in local_events_with_model]
+        buckets_by_event_id: dict[int, list[Bucket]] = {}
+        covered_counts_by_event_id: dict[int, int] = {}
+        if event_ids:
+            bucket_rows = (
+                await sess.execute(
+                    select(Bucket)
+                    .where(Bucket.event_id.in_(event_ids))
+                    .order_by(Bucket.event_id, Bucket.bucket_idx)
+                )
+            ).scalars().all()
+            for bucket in bucket_rows:
+                buckets_by_event_id.setdefault(bucket.event_id, []).append(bucket)
+
+            coverage_rows = (
+                await sess.execute(
+                    select(
+                        Bucket.event_id,
+                        func.count(func.distinct(MarketSnapshot.bucket_id)).label("covered"),
+                    )
+                    .join(MarketSnapshot, MarketSnapshot.bucket_id == Bucket.id)
+                    .where(Bucket.event_id.in_(event_ids))
+                    .group_by(Bucket.event_id)
+                )
+            ).all()
+            covered_counts_by_event_id = {
+                int(event_id): int(covered or 0)
+                for event_id, covered in coverage_rows
+            }
+        observed_highs = await _prefetch_observed_highs(sess, local_events_with_model)
 
         # Of those, how many have ≥1 MarketSnapshot per bucket?
         # Tradable iff: every bucket of the event has at least one snapshot.
         replayable = 0
         replayable_dates: list[str] = []
-        for ev_id, date_et in events_with_model:
-            bucket_count = (await sess.execute(
-                select(func.count(Bucket.id))
-                .where(Bucket.event_id == ev_id)
-            )).scalar_one() or 0
+        brier_only = 0
+        local_station_resolved = 0
+        local_outcome_pending = 0
+        for event, city in local_events_with_model:
+            bucket_rows = buckets_by_event_id.get(event.id, [])
+            if not bucket_rows:
+                continue
+            winner_idx, _, status = await _derive_local_resolution(
+                sess,
+                event=event,
+                city=city,
+                buckets=list(bucket_rows),
+                observed_highs=observed_highs,
+                allow_slow_fallback=False,
+            )
+            if winner_idx is None:
+                local_outcome_pending += 1
+                continue
+            if status != "gamma_confirmed":
+                local_station_resolved += 1
+
+            bucket_count = len(bucket_rows)
             if bucket_count == 0:
                 continue
-            covered_buckets = (await sess.execute(
-                select(func.count(func.distinct(MarketSnapshot.bucket_id)))
-                .join(Bucket, Bucket.id == MarketSnapshot.bucket_id)
-                .where(Bucket.event_id == ev_id)
-            )).scalar_one() or 0
+            covered_buckets = covered_counts_by_event_id.get(event.id, 0)
             if covered_buckets >= bucket_count:
                 replayable += 1
-                if date_et:
-                    replayable_dates.append(date_et)
-
-        brier_only = max(0, n_with_model - replayable)
+                if event.date_et:
+                    replayable_dates.append(event.date_et)
+            else:
+                brier_only += 1
 
         # Gamma-resolved markets minus what's already covered locally
         gamma_resolved = (await sess.execute(
@@ -750,6 +1235,10 @@ async def get_coverage_breakdown() -> dict:
         "market_snapshots": int(n_market),
         "earliest_snapshot": earliest,
         "latest_snapshot": latest,
+        "local_events_with_model": int(n_with_model),
+        "local_gamma_confirmed": int(len(confirmed_events)),
+        "local_station_resolved": int(local_station_resolved),
+        "local_outcome_pending": int(local_outcome_pending),
         "needs_more_days": int(replayable) < needed_for_walkforward,
         "walkforward_threshold": needed_for_walkforward,
     }
@@ -765,77 +1254,161 @@ async def fetch_resolved_events() -> list[dict]:
     more events become "resolved" after enrichment without code changes here.
     """
     async with get_session() as sess:
-        # Get events with known outcomes
+        # Get events with known or locally derivable outcomes. We do not require
+        # Event.winning_bucket_idx because Gamma enrichment can lag local station
+        # data by days, while backtesting only needs the settled bucket.
         query = (
             select(Event, City)
             .join(City, Event.city_id == City.id)
-            .where(Event.winning_bucket_idx.isnot(None))
+            .where(Event.id.in_(select(ModelSnapshot.event_id).distinct()))
             .order_by(Event.date_et)
         )
         rows = (await sess.execute(query)).all()
+        observed_highs = await _prefetch_observed_highs(sess, rows)
+        event_ids = [event.id for event, _ in rows]
+        buckets_by_event_id: dict[int, list[Bucket]] = {}
+        latest_snap_by_event_id: dict[int, ModelSnapshot] = {}
+        if event_ids:
+            bucket_rows = (
+                await sess.execute(
+                    select(Bucket)
+                    .where(Bucket.event_id.in_(event_ids))
+                    .order_by(Bucket.event_id, Bucket.bucket_idx)
+                )
+            ).scalars().all()
+            for bucket in bucket_rows:
+                buckets_by_event_id.setdefault(bucket.event_id, []).append(bucket)
+
+            snap_rows = (
+                await sess.execute(
+                    select(ModelSnapshot)
+                    .where(ModelSnapshot.event_id.in_(event_ids))
+                    .order_by(ModelSnapshot.event_id, ModelSnapshot.computed_at, ModelSnapshot.id)
+                )
+            ).scalars().all()
+            snapshots_by_event_id: dict[int, list[ModelSnapshot]] = defaultdict(list)
+            for snap in snap_rows:
+                snapshots_by_event_id[int(snap.event_id)].append(snap)
+            city_by_event_id = {int(event.id): city for event, city in rows}
+            event_by_id = {int(event.id): event for event, _ in rows}
+            latest_snap_by_event_id = {}
+            for event_id, snap_list in snapshots_by_event_id.items():
+                event = event_by_id.get(event_id)
+                city = city_by_event_id.get(event_id)
+                if event is None or city is None:
+                    continue
+                selected = _select_actionable_model_snapshot(event, city, snap_list)
+                if selected is not None:
+                    latest_snap_by_event_id[event_id] = selected
+
+        entry_market_by_bucket_id: dict[int, dict] = {}
+        later_max_bid_by_bucket_id: dict[int, float] = {}
+        snap_ids = [snap.id for snap in latest_snap_by_event_id.values()]
+        if snap_ids:
+            snap_times_sub = (
+                select(
+                    ModelSnapshot.event_id.label("event_id"),
+                    ModelSnapshot.computed_at.label("computed_at"),
+                )
+                .where(ModelSnapshot.id.in_(snap_ids))
+                .subquery()
+            )
+            entry_market_sub = (
+                select(
+                    MarketSnapshot.bucket_id.label("bucket_id"),
+                    MarketSnapshot.yes_mid.label("yes_mid"),
+                    MarketSnapshot.yes_bid.label("yes_bid"),
+                    MarketSnapshot.yes_ask.label("yes_ask"),
+                    MarketSnapshot.spread.label("spread"),
+                    MarketSnapshot.yes_bid_depth.label("yes_bid_depth"),
+                    MarketSnapshot.yes_ask_depth.label("yes_ask_depth"),
+                    func.row_number().over(
+                        partition_by=MarketSnapshot.bucket_id,
+                        order_by=(MarketSnapshot.fetched_at.desc(), MarketSnapshot.id.desc()),
+                    ).label("rn"),
+                )
+                .select_from(MarketSnapshot)
+                .join(Bucket, Bucket.id == MarketSnapshot.bucket_id)
+                .join(snap_times_sub, Bucket.event_id == snap_times_sub.c.event_id)
+                .where(MarketSnapshot.fetched_at <= snap_times_sub.c.computed_at)
+                .subquery()
+            )
+            entry_rows = (
+                await sess.execute(
+                    select(entry_market_sub).where(entry_market_sub.c.rn == 1)
+                )
+            ).mappings().all()
+            for row in entry_rows:
+                entry_market_by_bucket_id[int(row["bucket_id"])] = _normalise_entry_market_row(row)
+
+            later_rows = (
+                await sess.execute(
+                    select(
+                        MarketSnapshot.bucket_id,
+                        func.max(MarketSnapshot.yes_bid).label("max_bid"),
+                    )
+                    .select_from(MarketSnapshot)
+                    .join(Bucket, Bucket.id == MarketSnapshot.bucket_id)
+                    .join(snap_times_sub, Bucket.event_id == snap_times_sub.c.event_id)
+                    .where(
+                        MarketSnapshot.fetched_at > snap_times_sub.c.computed_at,
+                        MarketSnapshot.yes_bid.isnot(None),
+                    )
+                    .group_by(MarketSnapshot.bucket_id)
+                )
+            ).all()
+            later_max_bid_by_bucket_id = {
+                int(bucket_id): float(max_bid)
+                for bucket_id, max_bid in later_rows
+                if max_bid is not None
+            }
 
         events_data = []
         for event, city in rows:
-            # Load buckets
-            bq = select(Bucket).where(Bucket.event_id == event.id).order_by(Bucket.bucket_idx)
-            buckets = (await sess.execute(bq)).scalars().all()
+            buckets = buckets_by_event_id.get(event.id, [])
             if not buckets:
                 continue
-
-            # Load latest model snapshot per event (the one that would drive trading)
-            msq = (
-                select(ModelSnapshot)
-                .where(ModelSnapshot.event_id == event.id)
-                .order_by(desc(ModelSnapshot.computed_at))
-                .limit(1)
+            winner_idx, resolved_high_f, settlement_status = await _derive_local_resolution(
+                sess,
+                event=event,
+                city=city,
+                buckets=list(buckets),
+                observed_highs=observed_highs,
+                allow_slow_fallback=False,
             )
-            snap = (await sess.execute(msq)).scalar_one_or_none()
+            if winner_idx is None:
+                continue
+
+            # Latest model snapshot per event (the one that would drive trading)
+            snap = latest_snap_by_event_id.get(event.id)
             if not snap:
                 continue
 
             # Load market snapshots for each bucket (latest before model snapshot)
             mkt_snaps = {}
             for b in buckets:
-                mkq = (
-                    select(MarketSnapshot)
-                    .where(MarketSnapshot.bucket_id == b.id)
-                    .where(MarketSnapshot.fetched_at <= snap.computed_at)
-                    .order_by(desc(MarketSnapshot.fetched_at))
-                    .limit(1)
-                )
-                ms = (await sess.execute(mkq)).scalar_one_or_none()
+                ms = entry_market_by_bucket_id.get(b.id)
                 if ms:
-                    mkt_snaps[b.bucket_idx] = {
-                        "yes_mid": ms.yes_mid,
-                        "yes_bid": ms.yes_bid,
-                        "yes_ask": ms.yes_ask,
-                        "spread": ms.spread,
-                        "bid_depth": ms.yes_bid_depth or 0.0,
-                        "ask_depth": ms.yes_ask_depth or 0.0,
-                    }
+                    mkt_snaps[b.bucket_idx] = ms
 
-            # Load ALL market snapshots for quick-flip detection
+            # Summarized later market path for quick-flip detection. Full
+            # snapshot replay is too expensive for live use once the table has
+            # millions of rows; max bid preserves "did the target trade?"
+            # without scanning every later orderbook row per bucket.
             all_mkt_snaps = {}
             for b in buckets:
-                amq = (
-                    select(MarketSnapshot)
-                    .where(MarketSnapshot.bucket_id == b.id)
-                    .where(MarketSnapshot.fetched_at > snap.computed_at)
-                    .order_by(MarketSnapshot.fetched_at)
+                max_bid = later_max_bid_by_bucket_id.get(b.id)
+                all_mkt_snaps[b.bucket_idx] = (
+                    [{
+                        "yes_bid": max_bid,
+                        "yes_ask": None,
+                        "yes_bid_depth": None,
+                        "yes_ask_depth": None,
+                        "spread": None,
+                        "fetched_at": None,
+                    }]
+                    if max_bid is not None else []
                 )
-                later_snaps = (await sess.execute(amq)).scalars().all()
-                all_mkt_snaps[b.bucket_idx] = [
-                    {
-                        "yes_bid": s.yes_bid,
-                        "yes_ask": s.yes_ask,
-                        "yes_bid_depth": s.yes_bid_depth,
-                        "yes_ask_depth": s.yes_ask_depth,
-                        "spread": s.spread,
-                        "fetched_at": s.fetched_at,
-                    }
-                    for s in later_snaps
-                    if s.yes_bid is not None
-                ]
 
             probs = json.loads(snap.probs_json) if snap.probs_json else []
 
@@ -860,10 +1433,13 @@ async def fetch_resolved_events() -> list[dict]:
                 "is_us": bool(city.is_us),
                 "metar_station": city.metar_station,
                 "date_et": event.date_et,
-                "winning_bucket_idx": event.winning_bucket_idx,
+                "winning_bucket_idx": winner_idx,
+                "settlement_status": settlement_status or "local_settlement",
+                "resolved_high_f": resolved_high_f,
                 "buckets": [
                     {
                         "idx": b.bucket_idx,
+                        "bucket_idx": b.bucket_idx,
                         "label": b.label or f"Bucket {b.bucket_idx}",
                         "low_f": b.low_f,
                         "high_f": b.high_f,
@@ -906,6 +1482,7 @@ def simulate_entry(
     bucket_idx: int,
     params: BacktestParams,
     portfolio: Portfolio,
+    diagnostics: Optional[dict] = None,
 ) -> Optional[SimTrade]:
     """Evaluate one bucket for a trade entry. Returns SimTrade if taken."""
     probs = event_data["model_probs"]
@@ -913,6 +1490,9 @@ def simulate_entry(
     bucket_info = next((b for b in event_data["buckets"] if b["idx"] == bucket_idx), None)
 
     if not mkt or not bucket_info or bucket_idx >= len(probs):
+        candidate = _candidate_snapshot(event_data, bucket_idx, reason="missing_market")
+        _record_gate_candidate(diagnostics, event_data, candidate)
+        _record_gate_rejection(diagnostics, event_data, candidate, "missing_market")
         return None
 
     model_prob = probs[bucket_idx]
@@ -921,23 +1501,67 @@ def simulate_entry(
     ask_depth = mkt.get("ask_depth", 0.0)
 
     if mkt_prob is None or mkt_prob <= 0:
+        candidate = _candidate_snapshot(
+            event_data,
+            bucket_idx,
+            model_prob=model_prob,
+            mkt_prob=mkt_prob,
+            spread=spread,
+            ask_depth=ask_depth,
+            reason="invalid_market_probability",
+        )
+        _record_gate_candidate(diagnostics, event_data, candidate)
+        _record_gate_rejection(diagnostics, event_data, candidate, "invalid_market_probability")
         return None
 
     exec_cost = _execution_cost(spread, ask_depth)
     true_edge = model_prob - mkt_prob - exec_cost
-
-    # Apply gates
-    if true_edge < params.min_true_edge:
-        return None
-    if mkt_prob < 0.02 or mkt_prob > 0.98:
-        return None
-    if ask_depth < params.min_liquidity_shares:
-        return None
-
     entry_price = mkt.get("yes_ask") or mkt_prob
+    actuals = {
+        "true_edge": true_edge,
+        "entry_price": entry_price,
+        "spread": spread,
+        "ask_depth": ask_depth,
+    }
+    candidate = _candidate_snapshot(
+        event_data,
+        bucket_idx,
+        model_prob=model_prob,
+        mkt_prob=mkt_prob,
+        true_edge=true_edge,
+        spread=spread,
+        ask_depth=ask_depth,
+        entry_price=entry_price,
+    )
+    _record_gate_candidate(diagnostics, event_data, candidate)
+
+    # Apply observable gates and keep all constraint hits for diagnostics. The
+    # primary rejection reason remains the first gate that would block execution.
+    violations: list[str] = []
+    if true_edge < params.min_true_edge:
+        violations.append("edge_below_min")
+    if mkt_prob < 0.02 or mkt_prob > 0.98:
+        violations.append("market_prob_out_of_range")
+    if ask_depth < params.min_liquidity_shares:
+        violations.append("insufficient_ask_depth")
     if entry_price > params.max_entry_price:
-        return None
+        violations.append("entry_price_above_max")
     if spread is not None and spread > params.max_spread:
+        violations.append("spread_above_max")
+    if violations:
+        reason = violations[0]
+        actual, required = _gate_actual_required(reason, actuals=actuals, params=params)
+        rejected = {
+            **candidate,
+            "reason": reason,
+            "reason_label": _GATE_REASON_LABELS.get(reason, reason),
+            "violations": violations,
+            "actual": round(actual, 4) if actual is not None else None,
+            "required": round(required, 4) if required is not None else None,
+        }
+        if actual is not None and required is not None:
+            rejected["gap"] = round(abs(actual - required), 4)
+        _record_gate_rejection(diagnostics, event_data, rejected, reason, violations)
         return None
 
     # Apply slippage model: linear market impact for thin Polymarket books
@@ -946,6 +1570,8 @@ def simulate_entry(
     # Check position limits
     event_key = event_data["event_id"]
     if portfolio.positions_per_event[event_key] >= params.max_positions_per_event:
+        rejected = {**candidate, "reason": "max_positions_per_event"}
+        _record_gate_rejection(diagnostics, event_data, rejected, "max_positions_per_event")
         return None
 
     # Kelly sizing
@@ -956,6 +1582,8 @@ def simulate_entry(
         max_position_size=params.max_position_pct,
     )
     if kelly_f <= 0:
+        rejected = {**candidate, "reason": "kelly_non_positive"}
+        _record_gate_rejection(diagnostics, event_data, rejected, "kelly_non_positive")
         return None
 
     effective_bankroll = portfolio.available()
@@ -971,11 +1599,33 @@ def simulate_entry(
 
     cost = round(shares * entry_price_slipped, 4)
     if cost < 0.50:  # minimum trade size
+        actuals["cost"] = cost
+        actual, required = _gate_actual_required("trade_too_small", actuals=actuals, params=params)
+        rejected = {
+            **candidate,
+            "reason": "trade_too_small",
+            "reason_label": _GATE_REASON_LABELS["trade_too_small"],
+            "actual": round(actual, 4) if actual is not None else None,
+            "required": round(required, 4) if required is not None else None,
+        }
+        if actual is not None and required is not None:
+            rejected["gap"] = round(abs(actual - required), 4)
+        _record_gate_rejection(diagnostics, event_data, rejected, "trade_too_small")
         return None
 
     # Execute
     portfolio.bankroll -= cost
     portfolio.positions_per_event[event_key] += 1
+    _record_gate_accept(
+        diagnostics,
+        event_data,
+        {
+            **candidate,
+            "entry_price": round(entry_price_slipped, 4),
+            "shares": shares,
+            "cost": cost,
+        },
+    )
 
     return SimTrade(
         city_slug=event_data["city_slug"],
@@ -1142,6 +1792,7 @@ def simulate_exits(
 def _run_single_pass(
     events: list[dict],
     params: BacktestParams,
+    diagnostics: Optional[dict] = None,
 ) -> tuple[list[SimTrade], dict[str, float]]:
     """Run a single backtest pass (no walk-forward). Returns trades + daily P&L."""
     portfolio = Portfolio(bankroll=params.bankroll, equity=params.bankroll)
@@ -1160,10 +1811,12 @@ def _run_single_pass(
             if mkt and mkt.get("yes_mid"):
                 edge = probs[i] - mkt["yes_mid"]
                 bucket_edges.append((edge, i))
+            elif diagnostics is not None:
+                simulate_entry(event_data, i, params, portfolio, diagnostics=diagnostics)
         bucket_edges.sort(reverse=True)
 
         for _, bucket_idx in bucket_edges:
-            trade = simulate_entry(event_data, bucket_idx, params, portfolio)
+            trade = simulate_entry(event_data, bucket_idx, params, portfolio, diagnostics=diagnostics)
             if trade:
                 trades.append(trade)
 
@@ -1220,6 +1873,286 @@ def optimize_params(
     return best_params
 
 
+def _mean_brier(pairs: list[tuple[float, int]]) -> float | None:
+    if not pairs:
+        return None
+    return float(sum((float(p) - int(outcome)) ** 2 for p, outcome in pairs) / len(pairs))
+
+
+def _source_score(label: str, pairs: list[tuple[float, int]], market_brier: float | None) -> dict:
+    brier = _mean_brier(pairs)
+    edge = None if brier is None or market_brier is None else market_brier - brier
+    return {
+        "label": label,
+        "brier": round(brier, 6) if brier is not None else None,
+        "edge_vs_market": round(edge, 6) if edge is not None else None,
+        "edge_bps": round(edge * 10000, 1) if edge is not None else None,
+        "n": len(pairs),
+    }
+
+
+def _build_bma_comparison(events: list[dict]) -> dict:
+    """Compare legacy live probabilities, BMA shadow, and market prices.
+
+    This is event/bucket scoring, independent of whether the simulated strategy
+    chose to trade that bucket. It answers: "which probability surface was
+    better calibrated against the resolved winner?"
+    """
+    overall_pairs = {"legacy": [], "bma": [], "market": []}
+    by_city_pairs: dict[str, dict[str, list[tuple[float, int]]]] = defaultdict(
+        lambda: {"legacy": [], "bma": [], "market": []}
+    )
+    by_status: dict[str, int] = defaultdict(int)
+    bma_event_count = 0
+
+    for event in events:
+        winner_idx = event.get("winning_bucket_idx")
+        if winner_idx is None:
+            continue
+        status = event.get("settlement_status") or "unknown"
+        by_status[status] += 1
+        legacy_probs = event.get("model_probs") or []
+        inputs = event.get("model_inputs") or {}
+        bma = inputs.get("bma_shadow") if isinstance(inputs, dict) else None
+        bma_probs = bma.get("probs") if isinstance(bma, dict) else None
+        if isinstance(bma_probs, list):
+            bma_event_count += 1
+        market_data = event.get("market_data") or {}
+        city_slug = event.get("city_slug") or "unknown"
+
+        for bucket in event.get("buckets") or []:
+            idx = int(bucket.get("idx", bucket.get("bucket_idx", -1)))
+            if idx < 0:
+                continue
+            outcome = 1 if idx == winner_idx else 0
+            if idx < len(legacy_probs):
+                try:
+                    p = float(legacy_probs[idx])
+                    overall_pairs["legacy"].append((p, outcome))
+                    by_city_pairs[city_slug]["legacy"].append((p, outcome))
+                except (TypeError, ValueError):
+                    pass
+            if isinstance(bma_probs, list) and idx < len(bma_probs):
+                try:
+                    p = float(bma_probs[idx])
+                    overall_pairs["bma"].append((p, outcome))
+                    by_city_pairs[city_slug]["bma"].append((p, outcome))
+                except (TypeError, ValueError):
+                    pass
+            mkt = market_data.get(idx) or {}
+            try:
+                mp = float(mkt.get("yes_mid"))
+                overall_pairs["market"].append((mp, outcome))
+                by_city_pairs[city_slug]["market"].append((mp, outcome))
+            except (TypeError, ValueError, AttributeError):
+                pass
+
+    market_brier = _mean_brier(overall_pairs["market"])
+    overall = {
+        src: _source_score(src, pairs, market_brier)
+        for src, pairs in overall_pairs.items()
+    }
+    if overall["market"]["brier"] is not None:
+        overall["market"]["edge_vs_market"] = 0.0
+        overall["market"]["edge_bps"] = 0.0
+
+    by_city: dict[str, dict] = {}
+    for slug, pairs_by_source in sorted(by_city_pairs.items()):
+        city_market = _mean_brier(pairs_by_source["market"])
+        city_scores = {
+            src: _source_score(src, pairs, city_market)
+            for src, pairs in pairs_by_source.items()
+        }
+        if city_scores["market"]["brier"] is not None:
+            city_scores["market"]["edge_vs_market"] = 0.0
+            city_scores["market"]["edge_bps"] = 0.0
+        by_city[slug] = city_scores
+
+    legacy_brier = overall["legacy"]["brier"]
+    bma_brier = overall["bma"]["brier"]
+    bma_delta = None
+    if legacy_brier is not None and bma_brier is not None:
+        bma_delta = round(float(legacy_brier) - float(bma_brier), 6)
+
+    if bma_delta is None:
+        recommendation = "BMA shadow has insufficient scored samples."
+    elif bma_delta > 0:
+        recommendation = "BMA shadow is beating the live legacy surface on Brier; promote only after this persists across independent days."
+    elif bma_delta < 0:
+        recommendation = "BMA shadow is worse than the live legacy surface; keep BMA shadow-only and inspect over-weighted sources."
+    else:
+        recommendation = "BMA shadow and live legacy are tied on current scored buckets."
+
+    return {
+        "overall": overall,
+        "by_city": by_city,
+        "bma_minus_legacy_brier": (
+            round(float(bma_brier) - float(legacy_brier), 6)
+            if legacy_brier is not None and bma_brier is not None else None
+        ),
+        "legacy_minus_bma_brier": bma_delta,
+        "bma_better_than_legacy": bool(bma_delta is not None and bma_delta > 0),
+        "events_scored": len({(e.get("city_slug"), e.get("date_et")) for e in events if e.get("winning_bucket_idx") is not None}),
+        "bma_events_scored": bma_event_count,
+        "settlement_status_counts": dict(sorted(by_status.items())),
+        "recommendation": recommendation,
+    }
+
+
+def _build_forecast_source_diagnostics(events: list[dict]) -> dict:
+    """Aggregate BMA component forecast errors by source."""
+    rows: dict[str, dict] = defaultdict(
+        lambda: {"n": 0, "abs_error": 0.0, "bias": 0.0, "weight": 0.0, "sigma": 0.0}
+    )
+    for event in events:
+        resolved_high = event.get("resolved_high_f")
+        if resolved_high is None:
+            continue
+        inputs = event.get("model_inputs") or {}
+        bma = inputs.get("bma_shadow") if isinstance(inputs, dict) else None
+        comps = bma.get("components") if isinstance(bma, dict) else None
+        if not isinstance(comps, list):
+            continue
+        for comp in comps:
+            try:
+                source = str(comp.get("source") or "unknown")
+                mu = float(comp.get("mu"))
+                weight = float(comp.get("weight") or 0.0)
+                sigma = float(comp.get("sigma") or 0.0)
+                err = mu - float(resolved_high)
+            except (TypeError, ValueError, AttributeError):
+                continue
+            row = rows[source]
+            row["n"] += 1
+            row["abs_error"] += abs(err)
+            row["bias"] += err
+            row["weight"] += weight
+            row["sigma"] += sigma
+
+    out = []
+    for source, row in rows.items():
+        n = int(row["n"])
+        if n <= 0:
+            continue
+        out.append({
+            "source": source,
+            "n": n,
+            "mae_f": round(row["abs_error"] / n, 3),
+            "bias_f": round(row["bias"] / n, 3),
+            "avg_bma_weight": round(row["weight"] / n, 4),
+            "avg_sigma_f": round(row["sigma"] / n, 3),
+        })
+    out.sort(key=lambda r: (r["mae_f"], -r["n"]))
+    return {
+        "components": out,
+        "best_source": out[0]["source"] if out else None,
+        "worst_source": out[-1]["source"] if out else None,
+        "description": "BMA component forecast error at the backtest model snapshot; lower MAE is better, positive bias means too hot.",
+    }
+
+
+def _build_actionable_recommendations(
+    *,
+    metrics: BacktestMetrics,
+    per_city: dict,
+    bma_comparison: dict,
+    source_diagnostics: dict,
+    gate_diagnostics: Optional[dict] = None,
+) -> list[dict]:
+    recommendations: list[dict] = []
+
+    if metrics.total_trades == 0:
+        gate_diagnostics = gate_diagnostics or {}
+        top_reason = (gate_diagnostics.get("top_reasons") or [{}])[0]
+        best_rejected = gate_diagnostics.get("best_rejected") or {}
+        detail = (
+            "No simulated trades passed the configured gates; calibration can still be scored from resolved events."
+        )
+        if top_reason:
+            detail = (
+                f"{top_reason.get('count', 0)} candidates stopped first at "
+                f"{top_reason.get('label', top_reason.get('reason', 'unknown gate'))}. "
+            )
+            if best_rejected:
+                edge = best_rejected.get("true_edge")
+                city = best_rejected.get("city_slug") or "unknown"
+                bucket = best_rejected.get("bucket_label") or f"bucket {best_rejected.get('bucket_idx')}"
+                if edge is not None:
+                    detail += (
+                        f"Best rejected candidate was {city} {bucket} at {edge * 100:.1f}% true edge. "
+                    )
+                actual = best_rejected.get("actual")
+                required = best_rejected.get("required")
+                reason_label = best_rejected.get("reason_label")
+                if actual is not None and required is not None and reason_label:
+                    detail += f"{reason_label}: actual {actual:.3f}, required {required:.3f}. "
+            detail += "Use the gate diagnostics table before loosening thresholds."
+        recommendations.append({
+            "severity": "high",
+            "area": "strategy",
+            "title": "No simulated trades passed the gates",
+            "detail": detail,
+        })
+    elif metrics.sharpe_ratio < 0:
+        recommendations.append({
+            "severity": "high",
+            "area": "strategy",
+            "title": "Strategy Sharpe is negative",
+            "detail": "Tighten entry gates or disable the worst city buckets before increasing size.",
+        })
+
+    city_rows = [
+        (slug, data)
+        for slug, data in per_city.items()
+        if (data.get("trades") or 0) > 0
+    ]
+    if city_rows:
+        worst = min(city_rows, key=lambda item: item[1].get("pnl", 0.0))
+        best = max(city_rows, key=lambda item: item[1].get("pnl", 0.0))
+        recommendations.append({
+            "severity": "medium",
+            "area": "city",
+            "title": f"Best city: {best[0]} / worst city: {worst[0]}",
+            "detail": (
+                f"{best[0]} P&L ${best[1].get('pnl', 0.0):.2f}; "
+                f"{worst[0]} P&L ${worst[1].get('pnl', 0.0):.2f}. "
+                "Use this to gate per-city risk until sample size is larger."
+            ),
+        })
+
+    if bma_comparison.get("bma_better_than_legacy"):
+        recommendations.append({
+            "severity": "medium",
+            "area": "model",
+            "title": "BMA shadow is outperforming live legacy probabilities",
+            "detail": "Keep collecting independent days; promotion should require persistent Brier and CRPS advantage, not one backtest run.",
+        })
+    elif bma_comparison.get("legacy_minus_bma_brier") is not None:
+        recommendations.append({
+            "severity": "medium",
+            "area": "model",
+            "title": "Keep BMA shadow-only for now",
+            "detail": bma_comparison.get("recommendation") or "BMA has not cleared the live-surface promotion bar.",
+        })
+
+    comps = source_diagnostics.get("components") or []
+    if comps:
+        best = comps[0]
+        worst = comps[-1]
+        recommendations.append({
+            "severity": "low",
+            "area": "forecast_sources",
+            "title": f"Source check: {best['source']} best, {worst['source']} worst",
+            "detail": (
+                f"{best['source']} MAE {best['mae_f']:.2f}°F; "
+                f"{worst['source']} MAE {worst['mae_f']:.2f}°F. "
+                "Downweight persistently high-MAE sources in BMA/legacy blending."
+            ),
+        })
+
+    return recommendations
+
+
 # ─── Main engine ─────────────────────────────────────────────────────────────
 
 class BacktestEngine:
@@ -1244,14 +2177,30 @@ class BacktestEngine:
             train_days = self.params.walk_forward_train_days
             test_days = self.params.walk_forward_test_days
             unique_dates = sorted(set(dates))
+            gate_diagnostics = _new_gate_diagnostics(self.params)
 
             if len(unique_dates) >= train_days + test_days:
-                all_trades, daily_pnl = self._walk_forward(sorted_events, unique_dates)
+                all_trades, daily_pnl = self._walk_forward(
+                    sorted_events,
+                    unique_dates,
+                    diagnostics=gate_diagnostics,
+                )
             else:
-                all_trades, daily_pnl = _run_single_pass(sorted_events, self.params)
+                all_trades, daily_pnl = _run_single_pass(
+                    sorted_events,
+                    self.params,
+                    diagnostics=gate_diagnostics,
+                )
 
             # Build results
-            result = self._build_results(all_trades, daily_pnl, start_date, end_date)
+            result = self._build_results(
+                all_trades,
+                daily_pnl,
+                start_date,
+                end_date,
+                sorted_events,
+                gate_diagnostics=gate_diagnostics,
+            )
 
             # Persist to DB
             if run_id is not None:
@@ -1267,6 +2216,7 @@ class BacktestEngine:
         self,
         sorted_events: list[dict],
         unique_dates: list[str],
+        diagnostics: Optional[dict] = None,
     ) -> tuple[list[SimTrade], dict[str, float]]:
         """Rolling window walk-forward: train on N days, test on next M days."""
         train_days = self.params.walk_forward_train_days
@@ -1291,7 +2241,7 @@ class BacktestEngine:
             best_params = optimize_params(train_events, self.params)
 
             # Evaluate on test window with optimized params (no lookahead)
-            trades, daily_pnl = _run_single_pass(test_events, best_params)
+            trades, daily_pnl = _run_single_pass(test_events, best_params, diagnostics=diagnostics)
             all_trades.extend(trades)
             for d, pnl in daily_pnl.items():
                 all_daily_pnl[d] += pnl
@@ -1306,6 +2256,8 @@ class BacktestEngine:
         daily_pnl: dict[str, float],
         start_date: str,
         end_date: str,
+        events: list[dict],
+        gate_diagnostics: Optional[dict] = None,
     ) -> dict:
         """Compute all metrics and build the full results payload."""
         total_pnl = sum(t.pnl for t in trades)
@@ -1423,6 +2375,17 @@ class BacktestEngine:
             for t in trades
         ]
 
+        bma_comparison = _build_bma_comparison(events)
+        source_diagnostics = _build_forecast_source_diagnostics(events)
+        finalized_gate_diagnostics = _finalize_gate_diagnostics(gate_diagnostics)
+        recommendations = _build_actionable_recommendations(
+            metrics=metrics,
+            per_city=per_city_final,
+            bma_comparison=bma_comparison,
+            source_diagnostics=source_diagnostics,
+            gate_diagnostics=finalized_gate_diagnostics,
+        )
+
         return {
             "status": "completed",
             "start_date": start_date,
@@ -1434,6 +2397,10 @@ class BacktestEngine:
             "reliability_bins": reliability,
             "per_city": per_city_final,
             "per_regime": per_regime_final,  # Q7
+            "bma_comparison": bma_comparison,
+            "forecast_sources": source_diagnostics,
+            "gate_diagnostics": finalized_gate_diagnostics,
+            "recommendations": recommendations,
             "trade_log": trade_log,
         }
 
