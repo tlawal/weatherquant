@@ -159,6 +159,9 @@ async def _run_ddl(ddl: str) -> None:
     try:
         from sqlalchemy import text
         async with _engine.begin() as conn:
+            if _engine.dialect.name != "sqlite":
+                await conn.execute(text("SET LOCAL lock_timeout = '3s'"))
+                await conn.execute(text("SET LOCAL statement_timeout = '60s'"))
             await conn.execute(text(ddl))
     except Exception as e:
         msg = str(e).lower()
