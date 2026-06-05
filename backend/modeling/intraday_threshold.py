@@ -149,6 +149,39 @@ def _finite_thresholds(buckets: list[BucketRange]) -> list[float]:
     return sorted(thresholds)
 
 
+def _upper_tail_future_sigma(
+    *,
+    base_sigma: float,
+    remaining_rise: float,
+    hours_to_peak: float,
+    hour_local: float,
+    spread: float,
+) -> float:
+    """Uncertainty for thresholds above the live projected high.
+
+    Full-day forecast residual σ is too wide once same-day observations have
+    accumulated. At that point the question is no longer "what is today's high
+    from scratch?"; it is "how much more can the already-observed high rise
+    before/near peak?"  Use a tighter future-max σ after late morning, with
+    remaining rise and time-to-peak as the main uncertainty drivers.
+    """
+    if hour_local < 11.5:
+        return base_sigma
+
+    sigma = (
+        0.55
+        + 0.18 * max(0.0, remaining_rise)
+        + 0.25 * max(0.0, hours_to_peak)
+        + min(0.35, max(0.0, spread) * 0.04)
+    )
+    if hour_local >= 13.0 or hours_to_peak <= 1.0:
+        sigma = min(sigma, 1.35)
+    elif hour_local >= 12.0 or hours_to_peak <= 2.0:
+        sigma = min(sigma, 1.65)
+
+    return max(0.65, min(base_sigma, sigma))
+
+
 def predict_intraday_threshold_probabilities(
     *,
     buckets: list[BucketRange],
@@ -196,14 +229,30 @@ def predict_intraday_threshold_probabilities(
     # avoids assigning excessive probability to buckets well below a tightly
     # clustered forecast panel on clear warming days.
     center = max(float(projected_high), float(consensus_high))
+    trend_boost = 0.0
     if hours_to_peak > 0.25 and trend > 0:
         trend_projection = current + min(float(remaining_rise), trend * hours_to_peak)
         center = max(center, trend_projection)
-        center += min(0.5, trend * 0.25)
+        # Trend boost is useful in the morning when sustained warming is still
+        # a large part of the day. Near peak, adding an unconditional boost
+        # fattens the impossible-looking upper tail.
+        if hour_local < 12.5 and hours_to_peak > 1.0:
+            trend_boost = min(0.5, trend * 0.25)
+        elif hour_local < 13.0 and hours_to_peak > 1.0:
+            trend_boost = min(0.25, trend * 0.10)
+        center += trend_boost
     center = max(center, float(observed_high))
 
+    upper_tail_sigma = _upper_tail_future_sigma(
+        base_sigma=base_sigma,
+        remaining_rise=float(remaining_rise),
+        hours_to_peak=hours_to_peak,
+        hour_local=float(hour_local),
+        spread=spread,
+    )
     survival: dict[float, float] = {}
     notes: list[str] = ["shadow_only", "threshold_survival_prior"]
+    upper_tail_compressed = False
     for threshold in thresholds:
         if threshold <= observed_high:
             survival[threshold] = 1.0
@@ -219,6 +268,9 @@ def predict_intraday_threshold_probabilities(
         threshold_sigma = max(0.65, min(base_sigma, threshold_sigma))
         if margin >= 0.0:
             threshold_sigma = min(threshold_sigma, max(0.65, 0.85 + spread * 0.02))
+        elif upper_tail_sigma < threshold_sigma:
+            threshold_sigma = upper_tail_sigma
+            upper_tail_compressed = True
         if lock_regime:
             threshold_sigma = min(threshold_sigma, 0.35)
 
@@ -226,6 +278,8 @@ def predict_intraday_threshold_probabilities(
 
     survival = enforce_monotone_survival(survival)
     probs = bucket_probs_from_survival(buckets, survival, observed_high=observed_high)
+    if upper_tail_compressed:
+        notes.append("upper_tail_future_sigma")
 
     # Alpha is the currently earned promotion weight for trading. Keep at zero
     # until offline validation proves improvement over market/legacy.
@@ -236,7 +290,9 @@ def predict_intraday_threshold_probabilities(
         "projected_high": round(float(projected_high), 3),
         "consensus_high": round(float(consensus_high), 3),
         "threshold_center": round(center, 3),
+        "trend_boost": round(trend_boost, 3),
         "sigma": round(base_sigma, 3),
+        "upper_tail_sigma": round(upper_tail_sigma, 3),
         "remaining_rise": round(float(remaining_rise), 3),
         "hour_local": round(float(hour_local), 3),
         "peak_hour_local": round(float(peak_h), 3),

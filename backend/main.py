@@ -94,6 +94,18 @@ async def _run_startup_backfills() -> None:
         log.exception("startup: NWS extended backfill failed: %s", e)
 
 
+async def _run_startup_step(name: str, coro, timeout_s: float) -> bool:
+    """Run an optional startup step without letting it block the worker."""
+    try:
+        await asyncio.wait_for(coro, timeout=timeout_s)
+        return True
+    except asyncio.TimeoutError:
+        log.warning("startup: %s timed out after %.0fs; continuing", name, timeout_s)
+    except Exception as e:
+        log.exception("startup: %s failed: %s", name, e)
+    return False
+
+
 async def _hydrate_residual_ml_artifact() -> None:
     """Hydrate promoted residual ML model from Postgres-backed storage."""
     try:
@@ -103,6 +115,20 @@ async def _hydrate_residual_ml_artifact() -> None:
         log.info("startup: residual ML artifact hydrated=%s", loaded)
     except Exception as e:
         log.exception("startup: residual ML artifact hydration failed: %s", e)
+
+
+async def _run_startup_maintenance() -> None:
+    """Run non-critical startup maintenance after the scheduler is alive."""
+    await _run_startup_step(
+        "residual ML artifact hydration",
+        _hydrate_residual_ml_artifact(),
+        timeout_s=30,
+    )
+    await _run_startup_step(
+        "recent NWS extended backfill",
+        _run_startup_backfills(),
+        timeout_s=60,
+    )
 
 
 async def run_api(start_worker: bool = False) -> None:
@@ -124,9 +150,11 @@ async def run_api(start_worker: bool = False) -> None:
         try:
             log.info("api: background init starting (db + CLOB)")
             await init_db()
-            await _load_runtime_config()
-            await _hydrate_residual_ml_artifact()
-            await _run_startup_backfills()
+            await _run_startup_step(
+                "runtime config load",
+                _load_runtime_config(),
+                timeout_s=15,
+            )
             _ready["db"] = True
             log.info("api: db init complete")
 
@@ -139,6 +167,8 @@ async def run_api(start_worker: bool = False) -> None:
                 from backend.worker.scheduler import start_scheduler
                 await start_scheduler()
                 log.info("api: scheduler started in background 'all' mode")
+
+            asyncio.create_task(_run_startup_maintenance())
 
         except Exception as e:
             log.exception("api: background startup failed: %s", e)
@@ -203,9 +233,11 @@ async def run_worker() -> None:
     log.info("worker: starting up")
     _log_config_warnings()
     await init_db()
-    await _load_runtime_config()
-    await _hydrate_residual_ml_artifact()
-    await _run_startup_backfills()
+    await _run_startup_step(
+        "runtime config load",
+        _load_runtime_config(),
+        timeout_s=15,
+    )
 
     clob = CLOBClient()
     await clob.start()
@@ -213,6 +245,7 @@ async def run_worker() -> None:
     log.info("worker: CLOB client ready (can_trade=%s)", clob.can_trade)
 
     scheduler = await start_scheduler()
+    asyncio.create_task(_run_startup_maintenance())
 
     # Run forever until interrupted
     try:

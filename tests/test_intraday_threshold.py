@@ -81,3 +81,42 @@ def test_intraday_threshold_atlanta_style_shadow_reduces_low_buckets():
     assert sum(result.probs) == pytest.approx(1.0)
     survival_values = [p for _, p in sorted(result.survival.items())]
     assert survival_values == sorted(survival_values, reverse=True)
+
+
+def test_intraday_threshold_compresses_near_peak_upper_tail():
+    buckets = canonical_bucket_ranges([
+        (None, 77.0),
+        (78.0, 79.0),
+        (80.0, 81.0),
+        (82.0, 83.0),
+        (84.0, 85.0),
+        (86.0, 87.0),
+        (88.0, 89.0),
+        (90.0, 91.0),
+        (92.0, 93.0),
+        (94.0, 95.0),
+        (96.0, None),
+    ])
+
+    result = predict_intraday_threshold_probabilities(
+        buckets=buckets,
+        observed_high=82.4,
+        current_temp_f=82.4,
+        projected_high=85.33,
+        consensus_high=85.17,
+        sigma=2.73,
+        remaining_rise=3.15,
+        hour_local=13.23,
+        peak_hour_local=13.87,
+        trend_per_hr=4.56,
+        trusted_spread=3.15,
+        forecast_quality="ok",
+    )
+
+    assert result is not None
+    assert result.features["upper_tail_sigma"] < result.features["sigma"]
+    assert "upper_tail_future_sigma" in result.notes
+    assert result.probs[6] < 0.05
+    assert result.probs[7] < 0.005
+    assert result.probs[8] < 0.001
+    assert sum(result.probs) == pytest.approx(1.0)
