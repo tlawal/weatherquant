@@ -53,6 +53,9 @@ from backend.storage.models import (
 log = logging.getLogger(__name__)
 
 GAMMA_API = "https://gamma-api.polymarket.com"
+# Gamma currently caps event pages at 100 rows. If we request 500, it still
+# returns 100; pagination must use the real cap or enrichment stops after page 1.
+GAMMA_PAGE_SIZE = 100
 
 # Month name → number for slug parsing
 _MONTH_MAP = {
@@ -112,13 +115,13 @@ _BUCKET_BELOW_RE = re.compile(
 @dataclass
 class BacktestParams:
     """All tunable parameters for a backtest run."""
-    bankroll: float = 10.0
+    bankroll: float = 100.0
     kelly_fraction: float = 0.10
-    max_position_pct: float = 0.10
-    min_true_edge: float = 0.10
-    max_entry_price: float = 0.36
-    max_spread: float = 0.04
-    min_liquidity_shares: float = 10.0
+    max_position_pct: float = 0.20
+    min_true_edge: float = 0.03
+    max_entry_price: float = 0.60
+    max_spread: float = 0.20
+    min_liquidity_shares: float = 0.0
     max_positions_per_event: int = 2
     night_owl_enabled: bool = True
     night_owl_start_hour: int = 23
@@ -359,7 +362,7 @@ def _finalize_gate_diagnostics(diagnostics: Optional[dict]) -> dict:
 @dataclass
 class EnrichmentResult:
     """Summary of one Gamma enrichment pass."""
-    fetched: int              # total closed markets pulled
+    fetched: int              # total closed Gamma event rows pulled
     weather_matched: int      # passed slug filter
     stored: int               # inserted/updated in backtest_resolved_events
     matched_events: int       # cross-referenced an existing events row
@@ -628,7 +631,8 @@ async def enrich_from_gamma() -> EnrichmentResult:
 
     async with aiohttp.ClientSession(headers=headers, timeout=timeout) as http:
         offset = 0
-        page_size = 500
+        page_size = GAMMA_PAGE_SIZE
+        seen_event_slugs: set[str] = set()
         while True:
             url = f"{GAMMA_API}/events"
             params = {
@@ -648,9 +652,14 @@ async def enrich_from_gamma() -> EnrichmentResult:
             if not data or not isinstance(data, list):
                 break
 
+            new_rows_on_page = 0
             for ev in data:
-                fetched += 1
                 slug = ev.get("slug") or ""
+                if slug in seen_event_slugs:
+                    continue
+                seen_event_slugs.add(slug)
+                new_rows_on_page += 1
+                fetched += 1
                 if not (
                     "highest-temperature-in-" in slug
                     or "lowest-temperature-in-" in slug
@@ -662,9 +671,9 @@ async def enrich_from_gamma() -> EnrichmentResult:
                     continue
                 events_to_process.append((slug, markets, ev))
 
-            if len(data) < page_size:
+            if len(data) < page_size or new_rows_on_page == 0:
                 break
-            offset += page_size
+            offset += len(data)
 
     # Persist + cross-reference
     async with get_session() as sess:
@@ -833,12 +842,23 @@ async def get_enrichment_status() -> dict:
             select(func.count(BacktestResolvedEvent.id))
             .where(BacktestResolvedEvent.match_status == "matched_event")
         )).scalar_one() or 0
+        matched_metar = (await sess.execute(
+            select(func.count(BacktestResolvedEvent.id))
+            .where(BacktestResolvedEvent.match_status == "matched_metar")
+        )).scalar_one() or 0
+        matched_forecast = (await sess.execute(
+            select(func.count(BacktestResolvedEvent.id))
+            .where(BacktestResolvedEvent.match_status == "matched_forecast")
+        )).scalar_one() or 0
 
     return {
         "last_enriched_at": latest.enriched_at.isoformat() if latest else None,
         "total_markets": int(total),
         "matched_markets": int(matched),
         "matched_events": int(matched_event),
+        "matched_metar": int(matched_metar),
+        "matched_forecast": int(matched_forecast),
+        "unmatched_markets": max(0, int(total) - int(matched)),
     }
 
 

@@ -20,6 +20,7 @@ from backend.market_context.types import (
     MarketContextInput,
     MarketContextOutput,
     MarketContextSelection,
+    SECTION_ORDER,
     SECTION_KEYS,
 )
 from backend.modeling.calibration_engine import get_reliability_metrics, remap_probability
@@ -182,6 +183,10 @@ def serialize_market_context_snapshot(
         "sections": json.loads(snapshot.sections_json) if snapshot.sections_json else None,
         "selection": json.loads(snapshot.selection_json) if snapshot.selection_json else None,
         "source_context": json.loads(snapshot.source_context_json) if snapshot.source_context_json else None,
+        "section_order": [
+            {"key": key, "label": label}
+            for key, label in SECTION_ORDER
+        ],
         "provider": snapshot.provider,
         "model_name": snapshot.model_name,
         "generated_at": snapshot.generated_at.isoformat() if snapshot.generated_at else None,
@@ -434,6 +439,13 @@ async def build_market_context_input(city: City, date_et: str) -> MarketContextI
         cloud_trend=cloud_trend,
     )
 
+    smart_money = await _build_smart_money_context(
+        city_slug=city.city_slug,
+        date_et=date_et,
+        bucket_rows=bucket_rows,
+        selected_bucket_idx=selection.bucket_idx,
+    )
+
     availability = {
         "latest_observations": bool(obs_rows),
         "nws_available": primary_fc is not None if city.is_us else False,
@@ -448,6 +460,7 @@ async def build_market_context_input(city: City, date_et: str) -> MarketContextI
         "ecmwf_available": False,
         "climatology_available": False,
         "microclimate_memory_available": False,
+        "wallet_tracker_available": smart_money.get("status") == "ok",
     }
 
     return MarketContextInput(
@@ -545,6 +558,7 @@ async def build_market_context_input(city: City, date_et: str) -> MarketContextI
             "market_history_status": "current bucket snapshot history only",
             "consensus_spread_pts": _consensus_spread_points(bucket_rows),
         },
+        smart_money=smart_money,
         diagnostics={
             "cloud_trend": cloud_trend,
             "wind_shift_deg_3h": wind_shift_deg,
@@ -563,6 +577,405 @@ async def build_market_context_input(city: City, date_et: str) -> MarketContextI
         },
         final_selection=selection,
     )
+
+
+async def _build_smart_money_context(
+    *,
+    city_slug: str,
+    date_et: str,
+    bucket_rows: list[dict[str, Any]],
+    selected_bucket_idx: int,
+) -> dict[str, Any]:
+    """Build compact wallet-positioning context for the LLM.
+
+    The wallet tracker is read-only analytics. This helper deliberately
+    summarizes already-stored public-wallet rows instead of asking the LLM to
+    infer wallet quality from raw trade lists.
+    """
+    wallet_buckets = [
+        {
+            "bucket_idx": row.get("bucket_idx"),
+            "label": row.get("label"),
+            "model_prob": row.get("calibrated_prob"),
+            "market_prob": row.get("market_prob"),
+        }
+        for row in bucket_rows
+    ]
+    try:
+        from backend.market_context.wallet_tracker import get_weather_smart_money_payload
+
+        payload = await get_weather_smart_money_payload(
+            city_slug,
+            date_et,
+            buckets=wallet_buckets,
+            limit=Config.WALLET_TRACKER_DISPLAY_LIMIT,
+        )
+    except Exception as exc:
+        log.warning("market_context: smart-money payload failed for %s %s: %s", city_slug, date_et, exc)
+        return {
+            "enabled": Config.WALLET_TRACKER_ENABLED,
+            "status": "error",
+            "reason": "wallet_tracker_load_error",
+            "message": "Wallet tracker context unavailable during Market Context build.",
+            "recommendation": {
+                "bucket_idx": None,
+                "bucket_label": None,
+                "stance": "NO_SMART_MONEY_SIGNAL",
+                "rationale": "Wallet tracker load failed; do not infer wallet flow.",
+            },
+            "data_quality_notes": [str(exc)],
+        }
+
+    return _summarize_smart_money_payload(
+        payload,
+        selected_bucket_idx=selected_bucket_idx,
+    )
+
+
+def _summarize_smart_money_payload(
+    payload: dict[str, Any],
+    *,
+    selected_bucket_idx: int,
+) -> dict[str, Any]:
+    current_rows = list(payload.get("current_market") or payload.get("rows") or [])
+    global_by_wallet = _leader_by_wallet(payload.get("global_leaders") or [])
+    city_by_wallet = _leader_by_wallet(payload.get("city_leaders") or [])
+    long_rows = [row for row in current_rows if _wallet_row_is_long(row)]
+
+    elite_rows: list[dict[str, Any]] = []
+    elite_tags_by_wallet: dict[str, list[str]] = {}
+    for row in long_rows:
+        address = str(row.get("wallet_address") or "").lower()
+        tags = _elite_wallet_tags(row, global_by_wallet.get(address), city_by_wallet.get(address))
+        if not tags:
+            continue
+        elite_tags_by_wallet[address] = tags
+        elite_rows.append(
+            _compact_wallet_row(
+                row,
+                global_skill=global_by_wallet.get(address),
+                city_skill=city_by_wallet.get(address),
+                tags=tags,
+            )
+        )
+    elite_rows.sort(
+        key=lambda row: (
+            "credible_perfect_city_record" in row.get("tags", []),
+            "credible_perfect_weather_record" in row.get("tags", []),
+            row.get("alpha_score") or 0.0,
+            abs(float(row.get("net_notional_usd") or 0.0)),
+        ),
+        reverse=True,
+    )
+
+    rows_by_bucket: dict[int, list[dict[str, Any]]] = {}
+    for row in long_rows:
+        idx = row.get("bucket_idx")
+        if idx is None:
+            continue
+        try:
+            rows_by_bucket.setdefault(int(idx), []).append(row)
+        except (TypeError, ValueError):
+            continue
+
+    clusters: list[dict[str, Any]] = []
+    for bucket in payload.get("bucket_consensus") or []:
+        idx = bucket.get("bucket_idx")
+        if idx is None:
+            continue
+        try:
+            idx_int = int(idx)
+        except (TypeError, ValueError):
+            continue
+        bucket_rows = rows_by_bucket.get(idx_int, [])
+        wallet_tags_for_bucket = [
+            (
+                str(row.get("wallet_address") or "").lower(),
+                elite_tags_by_wallet.get(str(row.get("wallet_address") or "").lower(), []),
+            )
+            for row in bucket_rows
+        ]
+        sample_wallets = [
+            _compact_wallet_row(
+                row,
+                global_skill=global_by_wallet.get(str(row.get("wallet_address") or "").lower()),
+                city_skill=city_by_wallet.get(str(row.get("wallet_address") or "").lower()),
+                tags=elite_tags_by_wallet.get(str(row.get("wallet_address") or "").lower(), []),
+            )
+            for row in sorted(
+                bucket_rows,
+                key=lambda r: (r.get("alpha_score") or 0.0, abs(float(r.get("net_notional_usd") or 0.0))),
+                reverse=True,
+            )[:5]
+        ]
+        clusters.append(
+            {
+                "bucket_idx": idx_int,
+                "bucket_label": bucket.get("bucket_label"),
+                "wallets_long": bucket.get("wallets_long", 0) or 0,
+                "ranked_wallets_long": bucket.get("ranked_wallets_long", 0) or 0,
+                "elite_wallets_long": sum(1 for _, tags in wallet_tags_for_bucket if tags),
+                "perfect_wallets_long": sum(
+                    1 for _, tags in wallet_tags_for_bucket
+                    if any(tag.startswith("perfect_") for tag in tags)
+                ),
+                "credible_perfect_wallets_long": sum(
+                    1 for _, tags in wallet_tags_for_bucket
+                    if any(tag.startswith("credible_perfect_") for tag in tags)
+                ),
+                "extremely_profitable_wallets_long": sum(
+                    1 for _, tags in wallet_tags_for_bucket
+                    if "extremely_profitable_weather_record" in tags
+                ),
+                "net_notional_usd": bucket.get("net_notional_usd"),
+                "net_position_qty": bucket.get("net_position_qty"),
+                "weighted_flow": bucket.get("weighted_flow"),
+                "avg_entry_price": bucket.get("avg_entry_price"),
+                "sample_wallets": sample_wallets,
+            }
+        )
+
+    strongest = _strongest_wallet_cluster(clusters)
+    selected_cluster = next(
+        (cluster for cluster in clusters if cluster.get("bucket_idx") == selected_bucket_idx),
+        None,
+    )
+    recommendation = _smart_money_recommendation(
+        payload=payload,
+        strongest=strongest,
+        selected_bucket_idx=selected_bucket_idx,
+    )
+
+    data_quality_notes: list[str] = []
+    reason = payload.get("reason")
+    if reason:
+        data_quality_notes.append(str(reason))
+    coverage = payload.get("coverage") or {}
+    if (coverage.get("current_market_wallets") or 0) == 0:
+        data_quality_notes.append("No current wallet exposure rows for this city/date.")
+    tiny_perfect = [
+        row for row in elite_rows
+        if any(tag.startswith("perfect_") for tag in row.get("tags", []))
+        and not any(tag.startswith("credible_perfect_") for tag in row.get("tags", []))
+    ]
+    if tiny_perfect:
+        data_quality_notes.append(
+            "Some perfect records have tiny samples; cite resolved_markets and Wilson rate before trusting them."
+        )
+
+    return {
+        "enabled": payload.get("enabled"),
+        "status": payload.get("status"),
+        "reason": payload.get("reason"),
+        "message": payload.get("message"),
+        "current_source": payload.get("current_source"),
+        "coverage": {
+            "current_market_wallets": coverage.get("current_market_wallets", 0),
+            "wallet_trade_rows": coverage.get("wallet_trade_rows", 0),
+            "wallets_scanned": coverage.get("wallets_scanned", 0),
+            "condition_ids_scanned": coverage.get("condition_ids_scanned", 0),
+            "exposure_rows": coverage.get("exposure_rows", 0),
+            "global_skill_rows": coverage.get("global_skill_rows", 0),
+            "city_skill_rows": coverage.get("city_skill_rows", 0),
+            "window_days": coverage.get("window_days"),
+            "last_refresh": coverage.get("last_refresh"),
+        },
+        "confluence": payload.get("confluence") or {},
+        "bucket_clusters": clusters,
+        "strongest_wallet_bucket": strongest,
+        "selected_bucket_wallet_support": selected_cluster,
+        "elite_wallets_current": elite_rows[:10],
+        "elite_wallet_count_current": len(elite_rows),
+        "recommendation": recommendation,
+        "data_quality_notes": data_quality_notes,
+        "disclaimer": payload.get("disclaimer"),
+    }
+
+
+def _leader_by_wallet(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {
+        str(row.get("wallet_address") or "").lower(): row
+        for row in rows
+        if row.get("wallet_address")
+    }
+
+
+def _wallet_row_is_long(row: dict[str, Any]) -> bool:
+    direction = str(row.get("direction") or "").upper()
+    net_qty = _float_or_none(row.get("net_position_qty")) or 0.0
+    net_notional = _float_or_none(row.get("net_notional_usd") or row.get("net_flow_usd")) or 0.0
+    return direction == "LONG" or net_qty > 0 or net_notional > 0
+
+
+def _elite_wallet_tags(
+    current_row: dict[str, Any],
+    global_skill: dict[str, Any] | None,
+    city_skill: dict[str, Any] | None,
+) -> list[str]:
+    tags: list[str] = []
+    min_resolved = max(1, Config.WALLET_TRACKER_MIN_RESOLVED_MARKETS)
+
+    global_win = _float_or_none((global_skill or current_row).get("win_rate"))
+    global_resolved = _int_or_zero((global_skill or current_row).get("resolved_markets"))
+    if global_win is not None and global_win >= 0.999 and global_resolved > 0:
+        tags.append("perfect_weather_record")
+        if global_resolved >= min_resolved:
+            tags.append("credible_perfect_weather_record")
+
+    city_win = _float_or_none((city_skill or {}).get("win_rate"))
+    city_resolved = _int_or_zero((city_skill or {}).get("resolved_markets"))
+    if city_win is not None and city_win >= 0.999 and city_resolved > 0:
+        tags.append("perfect_city_record")
+        if city_resolved >= min_resolved:
+            tags.append("credible_perfect_city_record")
+
+    realized = _float_or_none((global_skill or {}).get("realized_pnl"))
+    roi = _float_or_none((global_skill or current_row).get("roi"))
+    profit_factor = _float_or_none((global_skill or current_row).get("profit_factor"))
+    adjusted_score = _float_or_none(current_row.get("global_score") or current_row.get("city_score"))
+    if (
+        (realized is not None and realized >= 100.0)
+        or (roi is not None and roi >= 0.50)
+        or (profit_factor is not None and profit_factor >= 3.0)
+        or (adjusted_score is not None and adjusted_score >= 0.75)
+    ):
+        tags.append("extremely_profitable_weather_record")
+
+    if current_row.get("is_ranked"):
+        tags.append("ranked_current_position")
+
+    return list(dict.fromkeys(tags))
+
+
+def _compact_wallet_row(
+    row: dict[str, Any],
+    *,
+    global_skill: dict[str, Any] | None,
+    city_skill: dict[str, Any] | None,
+    tags: list[str],
+) -> dict[str, Any]:
+    global_source = global_skill or row
+    return {
+        "wallet_address": row.get("wallet_address"),
+        "display_address": row.get("display_address"),
+        "profile_url": row.get("profile_url"),
+        "bucket_idx": row.get("bucket_idx"),
+        "bucket_label": row.get("bucket_label"),
+        "net_notional_usd": row.get("net_notional_usd") or row.get("net_flow_usd"),
+        "net_position_qty": row.get("net_position_qty"),
+        "avg_entry_price": row.get("avg_entry_price"),
+        "last_trade_age_min": row.get("last_trade_age_min"),
+        "alpha_score": row.get("alpha_score"),
+        "skill_source": row.get("skill_source") or row.get("source"),
+        "global_rank": row.get("global_rank") or (global_skill or {}).get("rank"),
+        "city_rank": row.get("city_rank") or (city_skill or {}).get("rank"),
+        "global_win_rate": _round_float(global_source.get("win_rate"), 4),
+        "global_wilson_win_rate": _round_float(global_source.get("wilson_win_rate"), 4),
+        "global_resolved_markets": _int_or_zero(global_source.get("resolved_markets")),
+        "global_roi": _round_float(global_source.get("roi"), 4),
+        "global_profit_factor": _round_float(global_source.get("profit_factor"), 4),
+        "city_win_rate": _round_float((city_skill or {}).get("win_rate"), 4),
+        "city_wilson_win_rate": _round_float((city_skill or {}).get("wilson_win_rate"), 4),
+        "city_resolved_markets": _int_or_zero((city_skill or {}).get("resolved_markets")),
+        "city_roi": _round_float((city_skill or {}).get("roi"), 4),
+        "tags": tags,
+    }
+
+
+def _strongest_wallet_cluster(clusters: list[dict[str, Any]]) -> dict[str, Any] | None:
+    candidates = [
+        cluster for cluster in clusters
+        if (cluster.get("ranked_wallets_long") or 0) > 0
+        and (cluster.get("weighted_flow") or 0.0) > 0
+    ]
+    if not candidates:
+        return None
+    return max(
+        candidates,
+        key=lambda cluster: (
+            cluster.get("credible_perfect_wallets_long") or 0,
+            cluster.get("elite_wallets_long") or 0,
+            cluster.get("ranked_wallets_long") or 0,
+            cluster.get("weighted_flow") or 0.0,
+            cluster.get("net_notional_usd") or 0.0,
+        ),
+    )
+
+
+def _smart_money_recommendation(
+    *,
+    payload: dict[str, Any],
+    strongest: dict[str, Any] | None,
+    selected_bucket_idx: int,
+) -> dict[str, Any]:
+    if not payload.get("enabled"):
+        return {
+            "bucket_idx": None,
+            "bucket_label": None,
+            "stance": "NO_SMART_MONEY_SIGNAL",
+            "strength": "none",
+            "rationale": "Wallet tracker is disabled.",
+        }
+    if strongest is None:
+        return {
+            "bucket_idx": None,
+            "bucket_label": None,
+            "stance": "NO_SMART_MONEY_SIGNAL",
+            "strength": "none",
+            "rationale": "No positive ranked wallet flow is available for this market.",
+        }
+
+    smart_idx = strongest.get("bucket_idx")
+    distance = abs(int(smart_idx) - int(selected_bucket_idx)) if smart_idx is not None else None
+    if distance == 0:
+        stance = "CONFIRMS_SELECTED_BUCKET"
+    elif distance == 1:
+        stance = "ADJACENT_SMART_MONEY_CAUTION"
+    else:
+        stance = "DIVERGES_FROM_SELECTED_BUCKET"
+
+    credible_perfect = strongest.get("credible_perfect_wallets_long") or 0
+    elite = strongest.get("elite_wallets_long") or 0
+    ranked = strongest.get("ranked_wallets_long") or 0
+    net_notional = abs(float(strongest.get("net_notional_usd") or 0.0))
+    if credible_perfect >= 1 or elite >= 3 or (ranked >= 3 and net_notional >= 250.0):
+        strength = "high"
+    elif elite >= 1 or ranked >= 2 or net_notional >= 100.0:
+        strength = "medium"
+    else:
+        strength = "low"
+
+    return {
+        "bucket_idx": smart_idx,
+        "bucket_label": strongest.get("bucket_label"),
+        "stance": stance,
+        "strength": strength,
+        "ranked_wallets_long": ranked,
+        "elite_wallets_long": elite,
+        "credible_perfect_wallets_long": credible_perfect,
+        "net_notional_usd": strongest.get("net_notional_usd"),
+        "weighted_flow": strongest.get("weighted_flow"),
+        "rationale": (
+            "Use this as corroborating/tie-breaker evidence; do not override the weather model "
+            "unless the wallet cluster is high strength and the meteorological evidence is ambiguous."
+        ),
+    }
+
+
+def _float_or_none(value: Any) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _int_or_zero(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 async def _generate_market_context_output(
@@ -643,8 +1056,8 @@ def _build_prompts(context: MarketContextInput) -> tuple[str, str]:
         "adversarial_reasoning, and independent_assessment, state whether you AGREE or DISAGREE "
         "and why. If your tool-informed analysis points to a different bucket, explicitly flag "
         "the discrepancy with reasoning.\n"
-        "7. Be terse. Each section: 3-5 sentences max. Total output must fit 2400 tokens.\n"
-        "8. Return ONLY valid JSON with keys `sections` (9 string values) and `final_selection` "
+        "7. Be terse. Each section: 2-4 evidence-dense sentences. Total output must fit 2800 tokens.\n"
+        f"8. Return ONLY valid JSON with keys `sections` ({len(SECTION_KEYS)} string values) and `final_selection` "
         "(echo pre-computed values exactly).\n\n"
         "════════════════════════════════════════════════════════════════════════════\n"
         "ENSEMBLE SOURCE ENCYCLOPEDIA — reason about these models from first principles\n"
@@ -722,32 +1135,45 @@ def _build_prompts(context: MarketContextInput) -> tuple[str, str]:
         "diverge, explain true_edge on the selected bucket. Report consensus_spread_pts. Top "
         "overpriced_buckets and underpriced_buckets by true_edge magnitude. State selected bucket "
         "calibrated_prob vs market_prob.\n\n"
-        "6. diagnostic_reasoning -- Build a causal chain using BOTH DB context AND tool results: "
+        "6. smart_money_analysis -- NEW required section. Analyze `smart_money` as read-only "
+        "public-wallet context, not as an automated copy-trading signal. State the wallet-only "
+        "recommended bucket from smart_money.recommendation, its strength, whether it confirms / "
+        "is adjacent to / diverges from the precomputed bucket, and the ranked_wallets_long + "
+        "net_notional_usd behind it. If elite_wallets_current includes wallets tagged "
+        "credible_perfect_weather_record, credible_perfect_city_record, perfect_weather_record, "
+        "perfect_city_record, or extremely_profitable_weather_record, name the display addresses, "
+        "bucket labels, and counts by bucket. If a wallet is perfect but has a tiny sample, say "
+        "the sample count and Wilson rate instead of treating it as certain. End with one "
+        "succinct recommendation: overweight / neutral / underweight the precomputed bucket "
+        "based on wallet evidence alone.\n\n"
+        "7. diagnostic_reasoning -- Build a causal chain using BOTH DB context AND tool results: "
         "(a) peak_already_passed? If yes, anchor on remaining_rise_f and projected_high_f. "
         "(b) kalman_trend_per_hr + regression_r2: is the intraday trend reliable? "
         "(c) pressure_tendency_inhg_3h + wind_shift_deg_3h: synoptic shift? Reference NWS AFD. "
         "(d) cloud_trend + resolution_mismatch_f: observational red flags? "
         "(e) What does the NWS forecaster say about confidence and pitfalls? "
         "Synthesize a single verdict: projected high robust or vulnerable, and why.\n\n"
-        "7. final_high_stakes_selection -- Restate the pre-computed bucket label + confidence_pct. "
+        "8. final_high_stakes_selection -- Restate the pre-computed bucket label + confidence_pct. "
         "Decompose confidence via confidence_components (top 2 boosters, top 2 penalties by "
-        "magnitude). State flip_signals verbatim. Declare peak_time and life_or_death_call.\n\n"
-        "8. adversarial_reasoning -- This is a NEW required section. WHY MIGHT THIS TRADE LOSE? "
+        "magnitude). State flip_signals verbatim. Declare peak_time and life_or_death_call. Fold "
+        "in the smart_money.recommendation as one named corroborating or cautionary input, but do "
+        "not change the echoed final_selection fields.\n\n"
+        "9. adversarial_reasoning -- This is a NEW required section. WHY MIGHT THIS TRADE LOSE? "
         "Generate the strongest counter-case: which 2-3 things, if they happen, would make the "
         "precomputed bucket wrong? Be specific (e.g. 'cumulus build by 14:00 caps heating 2°F "
         "below NBM peak'). What's the historical analog where a setup like today went the OTHER "
         "way? Don't be polite — your job here is to find the case against the trade.\n\n"
-        "9. trigger_conditions -- This is a NEW required section. List 2-4 SPECIFIC OBSERVABLE "
+        "10. trigger_conditions -- This is a NEW required section. List 2-4 SPECIFIC OBSERVABLE "
         "events between now and resolution that would invalidate or confirm the call. Format: "
         "'IF <observation> BY <time>, THEN <action>'. Examples: 'IF 14:00 EDT METAR < 73°F, "
         "the warm-bucket call is wrong — exit'. 'IF wind shifts north > 15° before peak, "
         "discount HRRR'. Make the LLM commit to falsifiable predictions.\n\n"
-        "10. independent_assessment -- YOUR OWN expert opinion based on tool results + the "
+        "11. independent_assessment -- YOUR OWN expert opinion based on tool results + the "
         "encyclopedia + calibration MAEs. State your independent projected high and which bucket "
         "you believe is most likely. If this AGREES with the precomputed selection, say so and "
         "explain converging evidence. If it DISAGREES, explicitly flag: your preferred bucket, "
         "your projected high, and the key evidence (NWS AFD phrase, specific source values, "
-        "calibration drift, academic heuristic) that justifies divergence. THIS SECTION DRIVES "
+        "calibration drift, smart-money cluster, academic heuristic) that justifies divergence. THIS SECTION DRIVES "
         "TRADING DECISIONS — its value comes from disagreement when warranted, not from "
         "rubber-stamping the precomputed call.\n\n"
         "CONSISTENCY RULES:\n"
@@ -761,7 +1187,8 @@ def _build_prompts(context: MarketContextInput) -> tuple[str, str]:
         "Pre-computed baseline selection (echo exactly in final_selection):\n"
         f"{json.dumps(context.final_selection.model_dump(), indent=2)}\n\n"
         "Structured backend context (includes ensemble_sources with per-model run times, MAE, "
-        "bias, weights; calibration_mae_30d_f; bma_shadow; panel_disagreement):\n"
+        "bias, weights; calibration_mae_30d_f; bma_shadow; panel_disagreement; smart_money "
+        "wallet clusters, elite wallet tags, and wallet-only recommendation):\n"
         f"{json.dumps(context.model_dump(), indent=2)}"
     )
     return system_prompt, user_prompt

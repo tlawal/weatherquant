@@ -1261,30 +1261,15 @@
 
   {% if market_context_snapshot and market_context_snapshot.sections %}
   <div class="space-y-4">
-    <div>
-      <h3 class="text-xs font-bold uppercase tracking-widest mb-1" style="color:var(--text-muted)">1. Current Observations:</h3>
-      <p class="text-sm leading-relaxed" style="color:var(--text-main)">{{ market_context_snapshot.sections.current_observations }}</p>
-    </div>
-    <div>
-      <h3 class="text-xs font-bold uppercase tracking-widest mb-1" style="color:var(--text-muted)">2. Short-Range Model Landscape:</h3>
-      <p class="text-sm leading-relaxed" style="color:var(--text-main)">{{ market_context_snapshot.sections.short_range_model_landscape }}</p>
-    </div>
-    <div>
-      <h3 class="text-xs font-bold uppercase tracking-widest mb-1" style="color:var(--text-muted)">3. Historical &amp; Climatology Perspective:</h3>
-      <p class="text-sm leading-relaxed" style="color:var(--text-main)">{{ market_context_snapshot.sections.historical_climatology_perspective }}</p>
-    </div>
-    <div>
-      <h3 class="text-xs font-bold uppercase tracking-widest mb-1" style="color:var(--text-muted)">4. Market Pricing Analysis:</h3>
-      <p class="text-sm leading-relaxed" style="color:var(--text-main)">{{ market_context_snapshot.sections.market_pricing_analysis }}</p>
-    </div>
-    <div>
-      <h3 class="text-xs font-bold uppercase tracking-widest mb-1" style="color:var(--text-muted)">5. Diagnostic Reasoning:</h3>
-      <p class="text-sm leading-relaxed" style="color:var(--text-main)">{{ market_context_snapshot.sections.diagnostic_reasoning }}</p>
-    </div>
-    <div>
-      <h3 class="text-xs font-bold uppercase tracking-widest mb-1" style="color:var(--text-muted)">6. Final, High-Stakes Selection:</h3>
-      <p class="text-sm leading-relaxed" style="color:var(--text-main)">{{ market_context_snapshot.sections.final_high_stakes_selection }}</p>
-    </div>
+    {% for section in market_context_snapshot.section_order %}
+      {% set section_text = market_context_snapshot.sections.get(section.key) %}
+      {% if section_text %}
+      <div>
+        <h3 class="text-xs font-bold uppercase tracking-widest mb-1" style="color:var(--text-muted)">{{ section.label }}</h3>
+        <p class="text-sm leading-relaxed" style="color:var(--text-main)">{{ section_text }}</p>
+      </div>
+      {% endif %}
+    {% endfor %}
   </div>
   {% else %}
   <div class="text-sm leading-relaxed" style="color:var(--text-muted)">

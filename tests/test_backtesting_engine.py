@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 from backend.backtesting.engine import (
     BacktestParams,
+    GAMMA_PAGE_SIZE,
     Portfolio,
     _build_bma_comparison,
     _build_forecast_source_diagnostics,
@@ -92,6 +93,21 @@ def test_backtest_params_default_walkforward_threshold_stays_28_days():
     params = BacktestParams()
 
     assert params.walk_forward_train_days + params.walk_forward_test_days == 28
+
+
+def test_backtest_params_defaults_are_exploratory_for_warmed_live_data():
+    params = BacktestParams()
+
+    assert params.bankroll == 100.0
+    assert params.max_position_pct == 0.20
+    assert params.min_true_edge == 0.03
+    assert params.max_entry_price == 0.60
+    assert params.max_spread == 0.20
+    assert params.min_liquidity_shares == 0.0
+
+
+def test_gamma_page_size_matches_gamma_api_cap_for_pagination():
+    assert GAMMA_PAGE_SIZE == 100
 
 
 def test_entry_market_row_derives_mid_and_spread_from_bid_ask():

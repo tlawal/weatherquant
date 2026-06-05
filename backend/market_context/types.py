@@ -17,15 +17,16 @@ SECTION_ORDER: list[tuple[str, str]] = [
     ("calibration_landscape", "3. Calibration Landscape:"),
     ("historical_climatology_perspective", "4. Historical & Climatology Perspective:"),
     ("market_pricing_analysis", "5. Market Pricing Analysis:"),
-    ("diagnostic_reasoning", "6. Diagnostic Reasoning:"),
-    ("final_high_stakes_selection", "7. Final, High-Stakes Selection:"),
+    ("smart_money_analysis", "6. Smart Money Analysis:"),
+    ("diagnostic_reasoning", "7. Diagnostic Reasoning:"),
+    ("final_high_stakes_selection", "8. Final, High-Stakes Selection:"),
     # NEW: forces explicit counter-case / what-could-make-this-wrong
     # reasoning. Without this, the LLM defaults to rubber-stamping.
-    ("adversarial_reasoning", "8. Adversarial Reasoning:"),
+    ("adversarial_reasoning", "9. Adversarial Reasoning:"),
     # NEW: falsifiable observable triggers between now and resolution
     # ('IF X BY Y, THEN Z'). Operationalizes the LLM's analysis.
-    ("trigger_conditions", "9. Trigger Conditions:"),
-    ("independent_assessment", "10. Independent Assessment:"),
+    ("trigger_conditions", "10. Trigger Conditions:"),
+    ("independent_assessment", "11. Independent Assessment:"),
 ]
 SECTION_KEYS = [key for key, _ in SECTION_ORDER]
 SECTION_LABELS = {key: label for key, label in SECTION_ORDER}
@@ -80,6 +81,7 @@ class MarketContextInput(BaseModel):
     short_range_models: dict[str, Any] = Field(default_factory=dict)
     historical_context: dict[str, Any] = Field(default_factory=dict)
     market_pricing: dict[str, Any] = Field(default_factory=dict)
+    smart_money: dict[str, Any] = Field(default_factory=dict)
     diagnostics: dict[str, Any] = Field(default_factory=dict)
     final_selection: MarketContextSelection
 

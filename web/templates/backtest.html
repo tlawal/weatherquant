@@ -105,12 +105,17 @@
           Last enriched:
           <span class="mono" style="color:var(--text-primary)" x-text="formatEnrichedAt(status.last_enriched_at)"></span>
           —
+          Gamma local matches:
           <span class="mono" style="color:var(--cyan)" x-text="status.matched_markets"></span>
           /
           <span class="mono" x-text="status.total_markets"></span>
-          markets matched
+          resolved events
           <span x-show="status.matched_events > 0" style="color:var(--text-muted)">
             (<span x-text="status.matched_events"></span> with local event data)
+          </span>
+          <span x-show="coverage && coverage.replayable > 0" style="color:var(--text-muted)">
+            — replayable local events:
+            <span class="mono" style="color:var(--cyan)" x-text="coverage.replayable"></span>
           </span>
         </div>
       </template>
@@ -663,7 +668,7 @@ function backtestPage() {
     prevResult: null,
     runId: null,
     pollTimer: null,
-    status: null,          // { last_enriched_at, total_markets, matched_markets, matched_events }
+    status: null,          // Gamma enrichment status + local cross-match counts
     enrichResult: null,    // last successful enrichment payload
     coverage: {{ coverage | tojson }},  // initial server-rendered, refreshable via /api/backtest/coverage
 
@@ -716,8 +721,8 @@ function backtestPage() {
         const metar = data.matched_metar ?? 0;
         alert(
           'Gamma enrichment complete.\n\n' +
-          'Fetched: ' + (data.fetched ?? 0) + ' closed markets\n' +
-          'Weather markets: ' + (data.weather_matched ?? 0) + '\n' +
+          'Fetched: ' + (data.fetched ?? 0) + ' closed Gamma events\n' +
+          'Weather events: ' + (data.weather_matched ?? 0) + '\n' +
           'Stored: ' + stored + '\n' +
           'Matched to local events: ' + matched + '\n' +
           'Matched to METAR actuals: ' + metar

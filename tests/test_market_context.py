@@ -12,6 +12,7 @@ from backend.config import Config
 from backend.market_context.adapter import MarketContextLLMAdapter, MarketContextLLMError
 from backend.market_context.service import (
     _generate_market_context_output,
+    _summarize_smart_money_payload,
     build_market_context_input,
     refresh_market_context_snapshot,
 )
@@ -342,6 +343,110 @@ def _valid_output_for_context(context):
             "missing_external_models": ["HRRR", "NBM", "NAM", "RAP", "ECMWF"]
         }
     }
+
+
+def test_smart_money_summary_highlights_perfect_elite_wallets(monkeypatch):
+    monkeypatch.setattr(Config, "WALLET_TRACKER_MIN_RESOLVED_MARKETS", 3, raising=False)
+
+    payload = {
+        "enabled": True,
+        "status": "ok",
+        "reason": None,
+        "message": "",
+        "current_source": "wallet_market_exposures",
+        "coverage": {
+            "current_market_wallets": 1,
+            "wallet_trade_rows": 8,
+            "wallets_scanned": 1,
+            "condition_ids_scanned": 3,
+            "exposure_rows": 1,
+            "global_skill_rows": 1,
+            "city_skill_rows": 1,
+            "window_days": 90,
+            "last_refresh": "2026-06-05T16:00:00+00:00",
+        },
+        "confluence": {
+            "status": "available",
+            "badge": "CONFIRMS MODEL",
+            "smart_money_bucket_idx": 1,
+            "smart_money_bucket_label": "74-76F",
+            "ranked_wallets_long": 1,
+        },
+        "bucket_consensus": [
+            {
+                "bucket_idx": 1,
+                "bucket_label": "74-76F",
+                "wallets_long": 1,
+                "ranked_wallets_long": 1,
+                "net_notional_usd": 450.0,
+                "net_position_qty": 900.0,
+                "weighted_flow": 405.0,
+                "avg_entry_price": 0.50,
+            }
+        ],
+        "current_market": [
+            {
+                "wallet_address": "0x1234567890abcdef1234567890abcdef12345678",
+                "display_address": "0x1234...5678",
+                "bucket_idx": 1,
+                "bucket_label": "74-76F",
+                "direction": "LONG",
+                "net_notional_usd": 450.0,
+                "net_position_qty": 900.0,
+                "avg_entry_price": 0.50,
+                "alpha_score": 0.90,
+                "is_ranked": True,
+                "skill_source": "wallet_skill_scores",
+                "global_rank": 1,
+                "city_rank": 1,
+                "win_rate": 1.0,
+                "wilson_win_rate": 0.62,
+                "resolved_markets": 4,
+                "roi": 0.80,
+                "profit_factor": 5.0,
+            }
+        ],
+        "global_leaders": [
+            {
+                "wallet_address": "0x1234567890abcdef1234567890abcdef12345678",
+                "rank": 1,
+                "win_rate": 1.0,
+                "wilson_win_rate": 0.62,
+                "resolved_markets": 4,
+                "roi": 0.80,
+                "profit_factor": 5.0,
+                "realized_pnl": 250.0,
+            }
+        ],
+        "city_leaders": [
+            {
+                "wallet_address": "0x1234567890abcdef1234567890abcdef12345678",
+                "rank": 1,
+                "win_rate": 1.0,
+                "wilson_win_rate": 0.62,
+                "resolved_markets": 3,
+                "roi": 0.70,
+            }
+        ],
+        "disclaimer": "read only",
+    }
+
+    summary = _summarize_smart_money_payload(payload, selected_bucket_idx=1)
+
+    assert summary["recommendation"]["stance"] == "CONFIRMS_SELECTED_BUCKET"
+    assert summary["recommendation"]["strength"] == "high"
+    assert summary["elite_wallet_count_current"] == 1
+    cluster = summary["bucket_clusters"][0]
+    assert cluster["credible_perfect_wallets_long"] == 1
+    assert cluster["extremely_profitable_wallets_long"] == 1
+    assert summary["elite_wallets_current"][0]["tags"] == [
+        "perfect_weather_record",
+        "credible_perfect_weather_record",
+        "perfect_city_record",
+        "credible_perfect_city_record",
+        "extremely_profitable_weather_record",
+        "ranked_current_position",
+    ]
 
 
 def test_build_market_context_input_selects_bucket_and_flip_signals(tmp_path, monkeypatch):
