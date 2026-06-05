@@ -1837,7 +1837,7 @@
       <div id="prob-chart" class="w-full" style="height:300px"></div>
       {% if model and model.inputs and model.inputs.intraday_threshold_shadow %}
       <div class="mt-2 text-[10px] leading-relaxed" style="color:var(--text-muted)">
-        Intraday Threshold is a shadow threshold-crossing model for same-day markets. It estimates P(final high reaches each bucket boundary) from observed high, current temperature, remaining heating, trend, and consensus; alpha is {{ "%.1f"|format((model.inputs.intraday_threshold_shadow.alpha|default(0)) * 100) }}%, so live trading probabilities still come from the legacy daily-high PDF until validation promotes it.
+        Intraday Threshold is a same-day threshold-crossing model. It estimates P(final high reaches each bucket boundary) from the observed high floor, current temperature, remaining heating, trend, and consensus; live alpha is {{ "%.1f"|format((model.inputs.intraday_threshold_shadow.alpha|default(0)) * 100) }}%. Higher alpha means the displayed model probability has moved away from the legacy daily-high PDF toward the intraday threshold curve.
       </div>
       {% endif %}
 

@@ -216,6 +216,35 @@ def compute_twe(signals: list[BucketSignal]) -> float:
     ), 4)
 
 
+def _effective_probability_floor(
+    *,
+    settlement_high: Optional[float],
+    raw_daily_high: Optional[float],
+    current_temp: Optional[float],
+) -> tuple[Optional[float], Optional[str]]:
+    """Observed high floor used for live probability support.
+
+    `settlement_high` remains the audit value for final resolution, but live
+    same-day trading must respect the highest trusted observation currently in
+    hand. Otherwise a resolution-minute lag can leave impossible lower buckets
+    with model mass while the market correctly reprices them toward zero.
+    """
+    candidates: list[tuple[float, str]] = []
+    for value, source in (
+        (settlement_high, "settlement_high"),
+        (raw_daily_high, "raw_daily_high"),
+        (current_temp, "current_temp"),
+    ):
+        try:
+            if value is not None and math.isfinite(float(value)):
+                candidates.append((float(value), source))
+        except (TypeError, ValueError):
+            continue
+    if not candidates:
+        return None, None
+    return max(candidates, key=lambda item: item[0])
+
+
 def _execution_cost(spread: Optional[float], ask_depth: float) -> float:
     """
     Estimate total execution cost = half_spread + slippage.
@@ -418,12 +447,17 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
             ground_truth_source = "raw_metar"
 
     # Observed high floor for conditional probabilities:
-    # Use ground_truth_high if available, otherwise fall back to current METAR temp
-    # (current temp is always a lower bound for the daily high)
-    observed_high_floor = ground_truth_high
-    if observed_high_floor is None and metar and metar.temp_f is not None:
-        observed_high_floor = metar.temp_f
-        ground_truth_source = "current_metar"
+    # ground_truth_high is the settlement-audit floor. The live probability floor
+    # also includes raw/current observations because daily-high support is
+    # monotone and the market reprices buckets as soon as the current high makes
+    # them commercially impossible.
+    observed_high_floor, probability_floor_source = _effective_probability_floor(
+        settlement_high=ground_truth_high,
+        raw_daily_high=daily_high,
+        current_temp=metar.temp_f if metar else None,
+    )
+    if ground_truth_high is None and observed_high_floor is not None:
+        ground_truth_source = probability_floor_source
 
     # Resolution mismatch: raw_high exceeds resolution_high
     resolution_mismatch = None
@@ -747,6 +781,9 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
     model.inputs["ground_truth_high"] = ground_truth_high
     model.inputs["ground_truth_source"] = ground_truth_source
     model.inputs["raw_daily_high"] = daily_high
+    model.inputs["probability_floor_high"] = observed_high_floor
+    model.inputs["probability_floor_source"] = probability_floor_source
+    model.inputs["settlement_floor_high"] = ground_truth_high
     model.inputs["observation_minutes"] = valid_minutes
     # Q7 — stamp regime telemetry on the snapshot so the backtest harness can
     # split per-regime metrics (Brier/win-rate on CALM vs VOLATILE days).

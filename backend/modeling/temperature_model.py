@@ -38,6 +38,7 @@ from zoneinfo import ZoneInfo
 
 from scipy.stats import norm as _norm
 
+from backend.config import Config
 from backend.modeling.bma import (
     bma_conditional_bucket_probabilities,
     bma_bucket_probabilities,
@@ -742,6 +743,63 @@ def _compute_lock_probs(
     fallback_sigma = 0.15 * unit_mult if deficit_from_high >= 1.5 * unit_mult and trend_per_hr <= 0.0 else 0.25 * unit_mult
     lock_probs = _reallocate_hotter_tail(existing_probs, observed_bucket_idx, cap)
     return lock_probs, cap, observed_high, fallback_sigma, observed_high
+
+
+def _intraday_threshold_live_alpha(
+    *,
+    observed_high: Optional[float],
+    current_temp_f: Optional[float],
+    hour_local: float,
+    trusted_spread: float,
+    forecast_quality: str,
+    lock_regime: bool,
+    regime_label: Optional[str],
+    unit_mult: float,
+) -> float:
+    """Earned live blend weight for same-day threshold probabilities."""
+    if not Config.INTRADAY_THRESHOLD_LIVE_BLEND_ENABLED:
+        return 0.0
+    if observed_high is None or forecast_quality != "ok":
+        return 0.0
+    if lock_regime:
+        return 0.0
+
+    alpha = 0.0
+    if hour_local >= 10.0:
+        alpha = 0.55
+    if hour_local >= 11.5:
+        alpha = 0.95
+    if hour_local >= 13.0:
+        alpha = 1.0
+    try:
+        if current_temp_f is not None and current_temp_f >= observed_high - (0.1 * unit_mult):
+            alpha = max(alpha, 0.75)
+    except TypeError:
+        pass
+
+    if str(regime_label or "").lower() == "volatile":
+        alpha *= 0.70
+    if trusted_spread > 4.0 * unit_mult:
+        alpha *= 0.75
+
+    cap = max(0.0, min(1.0, Config.INTRADAY_THRESHOLD_ALPHA_MAX))
+    return round(max(0.0, min(cap, alpha)), 4)
+
+
+def _blend_probability_vectors(
+    base_probs: list[float],
+    overlay_probs: list[float],
+    alpha: float,
+) -> list[float]:
+    if not base_probs or not overlay_probs or len(base_probs) != len(overlay_probs) or alpha <= 0:
+        return base_probs
+    a = max(0.0, min(1.0, float(alpha)))
+    blended = [
+        max(0.0, (1.0 - a) * float(base) + a * float(overlay))
+        for base, overlay in zip(base_probs, overlay_probs)
+    ]
+    total = sum(blended)
+    return [p / total for p in blended] if total > 0 else blended
 
 
 def compute_model(
@@ -1511,6 +1569,8 @@ def compute_model(
         projected_high_raw = projected_high
 
     intraday_threshold_out = None
+    intraday_threshold_live_alpha = 0.0
+    legacy_probs_before_intraday_blend: Optional[list[float]] = None
     if canonical_buckets and observed_high is not None:
         try:
             trend_per_hr = None
@@ -1531,9 +1591,35 @@ def compute_model(
                 forecast_quality=forecast_quality,
                 lock_regime=lock_regime,
             )
+            if intraday_threshold_out is not None:
+                intraday_threshold_live_alpha = _intraday_threshold_live_alpha(
+                    observed_high=observed_high,
+                    current_temp_f=current_temp_f,
+                    hour_local=float(hour_local_fractional),
+                    trusted_spread=float(trusted_spread),
+                    forecast_quality=forecast_quality,
+                    lock_regime=lock_regime,
+                    regime_label=regime_label,
+                    unit_mult=unit_mult,
+                )
+                if intraday_threshold_live_alpha > 0:
+                    legacy_probs_before_intraday_blend = list(probs)
+                    probs = _blend_probability_vectors(
+                        probs,
+                        intraday_threshold_out.probs,
+                        intraday_threshold_live_alpha,
+                    )
+                    intraday_threshold_out.alpha = intraday_threshold_live_alpha
+                    intraday_threshold_out.notes.append("live_blend_active")
+                    if observed_bucket_idx is not None:
+                        prob_hotter_bucket = _sum_hotter_bucket_probabilities(
+                            probs,
+                            observed_bucket_idx,
+                        )
         except Exception:
             log.exception("model: intraday threshold shadow failed; legacy path unaffected")
             intraday_threshold_out = None
+            intraday_threshold_live_alpha = 0.0
 
     inputs = {
         "nws_high": nws_high,
@@ -1600,6 +1686,12 @@ def compute_model(
 
     if intraday_threshold_out is not None:
         inputs["intraday_threshold_shadow"] = intraday_threshold_out.to_dict()
+        inputs["intraday_threshold_live_alpha"] = round(intraday_threshold_live_alpha, 4)
+        inputs["intraday_threshold_live_blend_enabled"] = bool(intraday_threshold_live_alpha > 0)
+    if legacy_probs_before_intraday_blend is not None:
+        inputs["legacy_probs_before_intraday_blend"] = [
+            round(float(p), 6) for p in legacy_probs_before_intraday_blend
+        ]
 
     # Adaptive engine audit data
     if adaptive is not None:

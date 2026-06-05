@@ -4,7 +4,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 import backend.modeling.temperature_model as temperature_model
-from backend.engine.signal_engine import classify_city_state
+from backend.engine.signal_engine import classify_city_state, _effective_probability_floor
 from backend.modeling.adaptive import AdaptiveResult, KalmanState, StationTimePrediction
 from backend.modeling.temperature_model import compute_model
 
@@ -41,6 +41,71 @@ class _NoonDateTime(datetime):
     def now(cls, tz=None):
         fixed = cls(2026, 5, 13, 12, 27, tzinfo=ZoneInfo("America/New_York"))
         return fixed.astimezone(tz) if tz else fixed
+
+
+class _AtlantaMiddayDateTime(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        fixed = cls(2026, 6, 5, 12, 44, tzinfo=ZoneInfo("America/New_York"))
+        return fixed.astimezone(tz) if tz else fixed
+
+
+def test_effective_probability_floor_uses_current_raw_high_over_lagged_resolution():
+    floor, source = _effective_probability_floor(
+        settlement_high=79.0,
+        raw_daily_high=80.6,
+        current_temp=80.6,
+    )
+
+    assert floor == pytest.approx(80.6)
+    assert source in {"raw_daily_high", "current_temp"}
+
+
+def test_midday_intraday_blend_removes_stale_low_tail(monkeypatch):
+    """Atlanta regression: resolution high can lag while current/raw high has
+    already killed the 78-79 bucket and the threshold model is closer to market
+    than the legacy daily-high Gaussian."""
+    monkeypatch.setattr(temperature_model, "datetime", _AtlantaMiddayDateTime)
+
+    model = compute_model(
+        nws_high=86.0,
+        wu_hourly_peak=85.0,
+        daily_high_metar=80.6,
+        current_temp_f=80.6,
+        calibration=None,
+        buckets=[
+            (None, 77.0),
+            (78.0, 79.0),
+            (80.0, 81.0),
+            (82.0, 83.0),
+            (84.0, 85.0),
+            (86.0, 87.0),
+            (88.0, 89.0),
+            (90.0, 91.0),
+        ],
+        forecast_quality="ok",
+        unit="F",
+        city_tz="America/New_York",
+        observed_high=80.6,
+        ml_features={
+            "temp_slope_3h": 2.0,
+            "avg_peak_timing_mins": 930.0,
+            "day_of_year": 156,
+        },
+        adaptive=None,
+        latest_weather=None,
+        hrrr_high=84.0,
+        hrrr_15min_high=84.0,
+        nbm_high=85.0,
+        ecmwf_ifs_high=86.0,
+    )
+
+    assert model is not None
+    assert model.inputs["observed_high"] == pytest.approx(80.6)
+    assert model.inputs["intraday_threshold_live_alpha"] >= 0.9
+    assert model.probs[1] == 0.0
+    assert model.probs[2] < 0.02
+    assert model.probs[3] < 0.13
 
 
 def test_compute_model_locks_current_bucket_after_peak(monkeypatch):

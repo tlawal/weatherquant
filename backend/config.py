@@ -140,6 +140,15 @@ class Config:
     # to the old WU history API. Flip via env var for safe rollback.
     SETTLEMENT_HIGH_PRIMARY: str = os.environ.get("SETTLEMENT_HIGH_PRIMARY", "tgftp").strip().lower()
 
+    # ── Same-day probability model ────────────────────────────────────────────
+    # Daily highs are monotone. Once intraday observations exist, live bucket
+    # probabilities should use a threshold-crossing model instead of only a
+    # symmetric daily-high Gaussian. This is especially important after noon,
+    # when low buckets can be physically dead while the daily PDF still has tail
+    # mass. Disable via env for rollback.
+    INTRADAY_THRESHOLD_LIVE_BLEND_ENABLED: bool = _bool("INTRADAY_THRESHOLD_LIVE_BLEND_ENABLED", default=True)
+    INTRADAY_THRESHOLD_ALPHA_MAX: float = _float("INTRADAY_THRESHOLD_ALPHA_MAX", 1.0)
+
     # ── API Rate Limiting ─────────────────────────────────────────────────────
     WU_MIN_SCRAPE_INTERVAL_SECONDS: int = _int("WU_MIN_SCRAPE_INTERVAL_SECONDS", 1800)
     WU_FAILED_RETRY_INTERVAL_SECONDS: int = _int("WU_FAILED_RETRY_INTERVAL_SECONDS", 300)
