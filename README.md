@@ -176,6 +176,8 @@ Components fused into μ:
 
 The adaptive engine ingests every 5-minute METAR observation since local midnight and produces station-time-specific predictions for each remaining ASOS observation minute through the day. This matches Polymarket's settlement granularity (e.g. KATL resolves on the :52 reading).
 
+Integer temperature markets are mapped with explicit half-up settlement semantics. If the official source reports a decimal high, WeatherQuant rounds `x.5` up before assigning the winning integer bucket (`84.4°F -> 84°F`, `84.5°F -> 85°F`, `84.6°F -> 85°F`). Raw bucket intervals are therefore shifted by 0.5°F: a displayed `84-85°F` bucket covers `[83.5, 85.5)`. When a city has station-pattern minutes configured, only observations at those official-pattern times are eligible for the resolution high; between-pattern spikes remain diagnostics.
+
 ```
 Full-day METAR (5-min) ─▶ Kalman filter ─▶ 60-min OLS regression ─▶
    │                       (adaptive Q)      (wind/RH/clouds/precip)

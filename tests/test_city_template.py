@@ -32,6 +32,14 @@ def test_station_calibration_card_separates_overall_and_current_lead_skill():
     assert "latest forecast available by ~6 AM local" in template
 
 
+def test_city_page_surfaces_half_up_settlement_rounding():
+    template = Path("web/templates/city.html").read_text()
+
+    assert "Integer Settlement" in template
+    assert "round half-up for integer bucket settlement" in template
+    assert "settles as" in template
+
+
 def test_buckets_table_surfaces_execution_microstructure():
     template = Path("web/templates/city.html").read_text()
 

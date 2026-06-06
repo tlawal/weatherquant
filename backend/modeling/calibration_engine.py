@@ -20,7 +20,11 @@ from backend.storage.db import get_session
 from backend.storage.models import (
     ModelSnapshot, Event, ForecastObs, Bucket, MetarObs, City, StationProfile,
 )
-from backend.modeling.settlement import canonical_bucket_ranges, find_bucket_idx_for_value
+from backend.modeling.settlement import (
+    canonical_bucket_ranges,
+    find_bucket_idx_for_value,
+    round_temperature_half_up,
+)
 
 log = logging.getLogger(__name__)
 
@@ -558,6 +562,7 @@ async def resolve_canonical_settlement_high(
 
     out = {
         "high_f": high_f,
+        "rounded_settlement_f": round_temperature_half_up(high_f),
         "source_used": source_used,
         "station_id": station_id,
         "valid_minutes": valid_minutes,

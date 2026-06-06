@@ -351,6 +351,10 @@
         {% if settlement_high.obs_time_local %}
         <div class="flex justify-between"><span style="color:var(--text-muted)">Obs Time</span><span class="mono">{{ settlement_high.obs_time_local }}</span></div>
         {% endif %}
+        {% if settlement_high.rounded_settlement_f is not none %}
+        <div class="flex justify-between"><span style="color:var(--text-muted)">Integer Settlement</span><span class="mono">{{ settlement_high.rounded_settlement_f }}°{{ city.unit|default('F') }}</span></div>
+        <div class="opacity-60 text-[9px]">Decimal official readings round half-up for integer bucket settlement; 84.5°F becomes 85°F.</div>
+        {% endif %}
         {% if settlement_high.source_url %}
         <div class="mt-2 pt-2 border-t" style="border-color:var(--border)">
           <a href="{{ settlement_high.source_url }}" target="_blank" rel="noopener"
@@ -375,6 +379,10 @@
     </div>
     <div class="flex items-center gap-2 text-xs mt-2" style="color:var(--text-muted)">
       <span>Settlement Source</span>
+      {% if settlement_high.rounded_settlement_f is not none %}
+      <span class="opacity-50">·</span>
+      <span class="mono opacity-70">settles as {{ settlement_high.rounded_settlement_f }}°</span>
+      {% endif %}
       {% if settlement_high.obs_time_local %}
       <span class="opacity-50">·</span>
       <span class="mono opacity-70">{{ settlement_high.obs_time_local }}</span>

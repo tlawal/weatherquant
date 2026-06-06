@@ -24,7 +24,12 @@ from backend.market_context.types import (
     SECTION_KEYS,
 )
 from backend.modeling.calibration_engine import get_reliability_metrics, remap_probability
-from backend.modeling.settlement import bucket_upper_bound, canonical_bucket_ranges, hotter_bucket_floor
+from backend.modeling.settlement import (
+    bucket_upper_bound,
+    canonical_bucket_ranges,
+    hotter_bucket_floor,
+    round_temperature_half_up,
+)
 from backend.storage.db import get_session
 from backend.storage.models import City, MarketContextSnapshot
 from backend.storage.repos import (
@@ -1555,7 +1560,13 @@ async def _resolve_realized_high_with_source(
             and tgftp_row.temp_f is not None
             and _local_date_of(tgftp_row.observed_at) == date_et
         ):
-            return {"high_f": float(tgftp_row.temp_f), "source_used": "tgftp", "obs_time": tgftp_row.observed_at}
+            high_f = float(tgftp_row.temp_f)
+            return {
+                "high_f": high_f,
+                "rounded_settlement_f": round_temperature_half_up(high_f),
+                "source_used": "tgftp",
+                "obs_time": tgftp_row.observed_at,
+            }
 
     # ── WU history (always available as fallback or primary) ──────────────
     wu_history = await get_latest_successful_forecast(sess, city.id, "wu_history", date_et)
@@ -1573,7 +1584,13 @@ async def _resolve_realized_high_with_source(
         # has not yet updated. Reject if obs_time resolves to a different
         # local date.
         if obs_time is None or _local_date_of(obs_time) == date_et:
-            return {"high_f": float(wu_history.high_f), "source_used": "wu_history", "obs_time": obs_time}
+            high_f = float(wu_history.high_f)
+            return {
+                "high_f": high_f,
+                "rounded_settlement_f": round_temperature_half_up(high_f),
+                "source_used": "wu_history",
+                "obs_time": obs_time,
+            }
 
     # ── Resolution METAR (valid observation minutes only) ─────────────────
     if observation_minutes:
@@ -1585,7 +1602,13 @@ async def _resolve_realized_high_with_source(
             city_tz=city_tz,
         )
         if resolution_high is not None:
-            return {"high_f": float(resolution_high), "source_used": "resolution_metar", "obs_time": None}
+            high_f = float(resolution_high)
+            return {
+                "high_f": high_f,
+                "rounded_settlement_f": round_temperature_half_up(high_f),
+                "source_used": "resolution_metar",
+                "obs_time": None,
+            }
 
     # ── Raw METAR (aggregate all sources) ─────────────────────────────────
     daily_high = await get_daily_high_metar(
@@ -1595,9 +1618,20 @@ async def _resolve_realized_high_with_source(
         city_tz=city_tz,
     )
     if daily_high is not None:
-        return {"high_f": float(daily_high), "source_used": "raw_metar", "obs_time": None}
+        high_f = float(daily_high)
+        return {
+            "high_f": high_f,
+            "rounded_settlement_f": round_temperature_half_up(high_f),
+            "source_used": "raw_metar",
+            "obs_time": None,
+        }
 
-    return {"high_f": None, "source_used": None, "obs_time": None}
+    return {
+        "high_f": None,
+        "rounded_settlement_f": None,
+        "source_used": None,
+        "obs_time": None,
+    }
 
 
 async def _resolve_realized_high(

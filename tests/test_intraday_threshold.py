@@ -30,7 +30,7 @@ def test_bucket_probs_from_survival_preserves_floor_and_total_mass():
     ])
     probs = bucket_probs_from_survival(
         buckets,
-        {68.0: 1.0, 70.0: 0.98, 72.0: 0.90, 74.0: 0.35},
+        {67.5: 1.0, 69.5: 0.98, 71.5: 0.90, 73.5: 0.35},
         observed_high=69.1,
     )
 
@@ -73,8 +73,8 @@ def test_intraday_threshold_atlanta_style_shadow_reduces_low_buckets():
     assert result.alpha == 0.0
     assert result.probs[0] == pytest.approx(0.0)
     assert result.probs[1] == pytest.approx(0.0)
-    # Display bucket 68-69 is canonical [68, 70). With observed_high=69.1, only
-    # [69.1, 70) can still win, and the threshold model should make crossing 70
+    # Display bucket 68-69 is canonical [67.5, 69.5). With observed_high=69.1,
+    # only [69.1, 69.5) can still win, and the threshold model should make crossing 69.5
     # very likely on this warming profile.
     assert result.probs[2] < 0.02
     assert result.probs[3] < 0.08
@@ -116,7 +116,7 @@ def test_intraday_threshold_compresses_near_peak_upper_tail():
     assert result is not None
     assert result.features["upper_tail_sigma"] < result.features["sigma"]
     assert "upper_tail_future_sigma" in result.notes
-    assert result.probs[6] < 0.05
+    assert result.probs[6] < 0.06
     assert result.probs[7] < 0.005
     assert result.probs[8] < 0.001
     assert sum(result.probs) == pytest.approx(1.0)

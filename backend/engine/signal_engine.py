@@ -29,6 +29,7 @@ from backend.modeling.settlement import (
     bucket_upper_bound,
     canonical_bucket_ranges,
     find_bucket_idx_for_value,
+    round_temperature_half_up,
 )
 from backend.modeling.temperature_model import (
     apply_forecast_source_quality_gates,
@@ -824,6 +825,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
     model.inputs["active_station_id"] = active_station_id
     model.inputs["active_station_source"] = active_station_source
     model.inputs["ground_truth_high"] = ground_truth_high
+    model.inputs["rounded_settlement_f"] = round_temperature_half_up(ground_truth_high)
     model.inputs["ground_truth_source"] = ground_truth_source
     model.inputs["raw_daily_high"] = daily_high
     model.inputs["probability_floor_high"] = observed_high_floor
@@ -1026,6 +1028,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
                 "resolution_high": resolution_high,
                 "raw_high": daily_high,
                 "ground_truth_high": ground_truth_high,
+                "rounded_settlement_f": round_temperature_half_up(ground_truth_high),
                 "ground_truth_source": ground_truth_source,
                 "active_station_id": active_station_id,
                 "active_station_source": active_station_source,

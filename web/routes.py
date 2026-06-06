@@ -1542,6 +1542,7 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
             "settlement_source_verified": event.settlement_source_verified if event else None,
             "settlement_high": {
                 "high_f": settlement_result.get("high_f"),
+                "rounded_settlement_f": settlement_result.get("rounded_settlement_f"),
                 "source_used": settlement_result.get("source_used"),
                 "obs_time_local": _sh_obs_time_local,
                 "source_url": {

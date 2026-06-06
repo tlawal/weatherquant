@@ -167,7 +167,7 @@ def test_compute_model_locks_current_bucket_after_peak(monkeypatch):
     assert model is not None
     assert model.lock_regime is True
     assert model.observed_bucket_idx == 0
-    assert model.observed_bucket_upper_f == 70.0
+    assert model.observed_bucket_upper_f == 69.5
     assert model.probs[0] > 0.99
     assert model.probs[1] < 0.01
     assert model.prob_hotter_bucket < 0.01
