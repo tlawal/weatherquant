@@ -115,10 +115,13 @@ _BUCKET_BELOW_RE = re.compile(
 @dataclass
 class BacktestParams:
     """All tunable parameters for a backtest run."""
+    strategy_profile: str = "ev_baseline"
     bankroll: float = 100.0
     kelly_fraction: float = 0.10
     max_position_pct: float = 0.20
     min_true_edge: float = 0.03
+    min_model_prob: float = 0.0
+    min_entry_price: float = 0.0
     max_entry_price: float = 0.60
     max_spread: float = 0.20
     min_liquidity_shares: float = 0.0
@@ -156,6 +159,9 @@ class SimTrade:
     won: Optional[bool] = None
     pnl: float = 0.0
     exit_reason: Optional[str] = None
+    hold_time_hours: Optional[float] = None
+    hold_to_resolution_pnl: Optional[float] = None
+    hold_to_resolution_won: Optional[bool] = None
     # Q7 — regime label snapshot at trade open (calm | normal | volatile | None)
     # Read from the originating ModelSnapshot.inputs_json["regime_label"]; lets
     # _build_results stratify Brier / win-rate by regime so the operator can
@@ -179,6 +185,8 @@ _GATE_REASON_LABELS = {
     "invalid_market_probability": "Invalid market probability",
     "edge_below_min": "Edge below threshold",
     "market_prob_out_of_range": "Market probability out of range",
+    "model_prob_below_min": "Model probability below floor",
+    "entry_price_below_min": "Entry price below floor",
     "insufficient_ask_depth": "Not enough ask depth",
     "entry_price_above_max": "Entry price above cap",
     "spread_above_max": "Spread too wide",
@@ -202,6 +210,8 @@ def _new_gate_diagnostics(params: BacktestParams) -> dict:
         "near_misses": [],
         "thresholds": {
             "min_true_edge": params.min_true_edge,
+            "min_model_prob": params.min_model_prob,
+            "min_entry_price": params.min_entry_price,
             "max_entry_price": params.max_entry_price,
             "max_spread": params.max_spread,
             "min_liquidity_shares": params.min_liquidity_shares,
@@ -303,6 +313,10 @@ def _record_gate_accept(diagnostics: Optional[dict], event_data: dict, candidate
 def _gate_actual_required(reason: str, *, actuals: dict, params: BacktestParams) -> tuple[Optional[float], Optional[float]]:
     if reason == "edge_below_min":
         return actuals.get("true_edge"), params.min_true_edge
+    if reason == "model_prob_below_min":
+        return actuals.get("model_prob"), params.min_model_prob
+    if reason == "entry_price_below_min":
+        return actuals.get("entry_price"), params.min_entry_price
     if reason == "entry_price_above_max":
         return actuals.get("entry_price"), params.max_entry_price
     if reason == "spread_above_max":
@@ -1322,7 +1336,7 @@ async def fetch_resolved_events() -> list[dict]:
                     latest_snap_by_event_id[event_id] = selected
 
         entry_market_by_bucket_id: dict[int, dict] = {}
-        later_max_bid_by_bucket_id: dict[int, float] = {}
+        later_max_bid_by_bucket_id: dict[int, dict] = {}
         snap_ids = [snap.id for snap in latest_snap_by_event_id.values()]
         if snap_ids:
             snap_times_sub = (
@@ -1361,26 +1375,37 @@ async def fetch_resolved_events() -> list[dict]:
             for row in entry_rows:
                 entry_market_by_bucket_id[int(row["bucket_id"])] = _normalise_entry_market_row(row)
 
+            later_market_sub = (
+                select(
+                    MarketSnapshot.bucket_id.label("bucket_id"),
+                    MarketSnapshot.yes_bid.label("max_bid"),
+                    MarketSnapshot.fetched_at.label("fetched_at"),
+                    func.row_number().over(
+                        partition_by=MarketSnapshot.bucket_id,
+                        order_by=(MarketSnapshot.yes_bid.desc(), MarketSnapshot.fetched_at.asc(), MarketSnapshot.id.asc()),
+                    ).label("rn"),
+                )
+                .select_from(MarketSnapshot)
+                .join(Bucket, Bucket.id == MarketSnapshot.bucket_id)
+                .join(snap_times_sub, Bucket.event_id == snap_times_sub.c.event_id)
+                .where(
+                    MarketSnapshot.fetched_at > snap_times_sub.c.computed_at,
+                    MarketSnapshot.yes_bid.isnot(None),
+                )
+                .subquery()
+            )
             later_rows = (
                 await sess.execute(
-                    select(
-                        MarketSnapshot.bucket_id,
-                        func.max(MarketSnapshot.yes_bid).label("max_bid"),
-                    )
-                    .select_from(MarketSnapshot)
-                    .join(Bucket, Bucket.id == MarketSnapshot.bucket_id)
-                    .join(snap_times_sub, Bucket.event_id == snap_times_sub.c.event_id)
-                    .where(
-                        MarketSnapshot.fetched_at > snap_times_sub.c.computed_at,
-                        MarketSnapshot.yes_bid.isnot(None),
-                    )
-                    .group_by(MarketSnapshot.bucket_id)
+                    select(later_market_sub).where(later_market_sub.c.rn == 1)
                 )
-            ).all()
+            ).mappings().all()
             later_max_bid_by_bucket_id = {
-                int(bucket_id): float(max_bid)
-                for bucket_id, max_bid in later_rows
-                if max_bid is not None
+                int(row["bucket_id"]): {
+                    "yes_bid": float(row["max_bid"]),
+                    "fetched_at": row["fetched_at"],
+                }
+                for row in later_rows
+                if row["max_bid"] is not None
             }
 
         events_data = []
@@ -1417,17 +1442,18 @@ async def fetch_resolved_events() -> list[dict]:
             # without scanning every later orderbook row per bucket.
             all_mkt_snaps = {}
             for b in buckets:
-                max_bid = later_max_bid_by_bucket_id.get(b.id)
+                max_row = later_max_bid_by_bucket_id.get(b.id)
                 all_mkt_snaps[b.bucket_idx] = (
                     [{
-                        "yes_bid": max_bid,
+                        "yes_bid": max_row["yes_bid"],
                         "yes_ask": None,
                         "yes_bid_depth": None,
                         "yes_ask_depth": None,
                         "spread": None,
-                        "fetched_at": None,
+                        "fetched_at": max_row.get("fetched_at"),
+                        "path_summary": "max_bid",
                     }]
-                    if max_bid is not None else []
+                    if max_row is not None else []
                 )
 
             probs = json.loads(snap.probs_json) if snap.probs_json else []
@@ -1539,6 +1565,7 @@ def simulate_entry(
     entry_price = mkt.get("yes_ask") or mkt_prob
     actuals = {
         "true_edge": true_edge,
+        "model_prob": model_prob,
         "entry_price": entry_price,
         "spread": spread,
         "ask_depth": ask_depth,
@@ -1560,10 +1587,14 @@ def simulate_entry(
     violations: list[str] = []
     if true_edge < params.min_true_edge:
         violations.append("edge_below_min")
+    if model_prob < params.min_model_prob:
+        violations.append("model_prob_below_min")
     if mkt_prob < 0.02 or mkt_prob > 0.98:
         violations.append("market_prob_out_of_range")
     if ask_depth < params.min_liquidity_shares:
         violations.append("insufficient_ask_depth")
+    if entry_price < params.min_entry_price:
+        violations.append("entry_price_below_min")
     if entry_price > params.max_entry_price:
         violations.append("entry_price_above_max")
     if spread is not None and spread > params.max_spread:
@@ -1696,6 +1727,14 @@ def _snapshot_local_time(snap: dict, city_tz: str) -> Optional[datetime]:
     return fetched_at.astimezone(tz)
 
 
+def _hours_between(start: datetime | None, end: datetime | None) -> Optional[float]:
+    start_utc = _aware_utc(start)
+    end_utc = _aware_utc(end)
+    if start_utc is None or end_utc is None:
+        return None
+    return max(0.0, round((end_utc - start_utc).total_seconds() / 3600.0, 2))
+
+
 def simulate_exits(
     trades: list[SimTrade],
     events_map: dict[tuple[str, str], dict],
@@ -1717,6 +1756,13 @@ def simulate_exits(
 
         winning_idx = event_data["winning_bucket_idx"]
         later_mkt = event_data.get("later_market_data", {}).get(trade.bucket_idx, [])
+        trade.hold_to_resolution_won = trade.bucket_idx == winning_idx
+        if trade.hold_to_resolution_won:
+            hold_payout = trade.shares * 1.0
+            hold_fee = hold_payout * 0.02
+            trade.hold_to_resolution_pnl = round(hold_payout - hold_fee - trade.cost, 4)
+        else:
+            trade.hold_to_resolution_pnl = round(-trade.cost, 4)
 
         # 1. Optional observation-proximity replay. This is a lightweight
         # approximation using the stored model inputs and later orderbook
@@ -1775,6 +1821,10 @@ def simulate_exits(
                     fee = payout * 0.02
                     trade.pnl = round(payout - fee - trade.cost, 4)
                     trade.exit_reason = "obs_proximity"
+                    trade.hold_time_hours = _hours_between(
+                        event_data.get("snapshot_time"),
+                        snap.get("fetched_at"),
+                    )
                     break
 
         if trade.won is not None:
@@ -1789,6 +1839,10 @@ def simulate_exits(
                 fee = payout * 0.02
                 trade.pnl = round(payout - fee - trade.cost, 4)
                 trade.exit_reason = "quick_flip"
+                trade.hold_time_hours = _hours_between(
+                    event_data.get("snapshot_time"),
+                    snap.get("fetched_at"),
+                )
                 break
 
         if trade.won is not None:
@@ -1801,10 +1855,12 @@ def simulate_exits(
             fee = payout * 0.02
             trade.pnl = round(payout - fee - trade.cost, 4)
             trade.exit_reason = "resolved_win"
+            trade.hold_time_hours = None
         else:
             trade.won = False
             trade.pnl = round(-trade.cost, 4)  # YES resolves at $0
             trade.exit_reason = "resolved_loss"
+            trade.hold_time_hours = None
 
 
 # ─── Walk-forward optimization ───────────────────────────────────────────────
@@ -1869,9 +1925,14 @@ def optimize_params(
     best_sharpe = -float("inf")
     best_params = base_params
 
-    kelly_grid = [0.05, 0.10, 0.15, 0.20]
-    entry_price_grid = [0.30, 0.36, 0.45]
-    flip_target_grid = [0.03, 0.05, 0.08]
+    if base_params.strategy_profile == "high_win_rate":
+        kelly_grid = [0.03, 0.05, 0.08]
+        entry_price_grid = [0.85, 0.90, 0.92]
+        flip_target_grid = [0.01, 0.02, 0.03]
+    else:
+        kelly_grid = [0.05, 0.10, 0.15, 0.20]
+        entry_price_grid = [0.30, 0.36, 0.45]
+        flip_target_grid = [0.03, 0.05, 0.08]
 
     for kf, mep, qft in product(kelly_grid, entry_price_grid, flip_target_grid):
         trial = BacktestParams(
@@ -1897,6 +1958,151 @@ def _mean_brier(pairs: list[tuple[float, int]]) -> float | None:
     if not pairs:
         return None
     return float(sum((float(p) - int(outcome)) ** 2 for p, outcome in pairs) / len(pairs))
+
+
+def _break_even_win_rate(entry_price: float, net_win_payout: float = 0.98) -> Optional[float]:
+    """Approximate settlement win rate needed to break even at a YES entry."""
+    try:
+        price = float(entry_price)
+        payout = float(net_win_payout)
+    except (TypeError, ValueError):
+        return None
+    if price <= 0 or payout <= 0:
+        return None
+    return round(min(1.0, price / payout), 4)
+
+
+def _avg(values: list[float]) -> Optional[float]:
+    return (sum(values) / len(values)) if values else None
+
+
+def _trade_summary(trades: list[SimTrade], *, label: str) -> dict:
+    wins = [t for t in trades if t.won]
+    hold_times = [float(t.hold_time_hours) for t in trades if t.hold_time_hours is not None]
+    hold_delta = [
+        float(t.pnl) - float(t.hold_to_resolution_pnl)
+        for t in trades
+        if t.hold_to_resolution_pnl is not None
+    ]
+    hold_wins = [t for t in trades if t.hold_to_resolution_won]
+    avg_entry = _avg([float(t.entry_price) for t in trades])
+    avg_model = _avg([float(t.model_prob) for t in trades])
+    avg_edge = _avg([float(t.true_edge) for t in trades])
+    return {
+        "label": label,
+        "trades": len(trades),
+        "wins": len(wins),
+        "win_rate": round(len(wins) / len(trades), 4) if trades else 0.0,
+        "pnl": round(sum(float(t.pnl) for t in trades), 4),
+        "avg_pnl": round(sum(float(t.pnl) for t in trades) / len(trades), 4) if trades else 0.0,
+        "avg_entry_price": round(avg_entry, 4) if avg_entry is not None else None,
+        "avg_model_prob": round(avg_model, 4) if avg_model is not None else None,
+        "avg_true_edge": round(avg_edge, 4) if avg_edge is not None else None,
+        "avg_break_even_win_rate": (
+            _break_even_win_rate(avg_entry) if avg_entry is not None else None
+        ),
+        "avg_hold_time_hours": round(_avg(hold_times), 2) if hold_times else None,
+        "hold_to_resolution_pnl": round(sum(
+            float(t.hold_to_resolution_pnl)
+            for t in trades
+            if t.hold_to_resolution_pnl is not None
+        ), 4) if trades else 0.0,
+        "hold_to_resolution_wins": len(hold_wins),
+        "hold_to_resolution_win_rate": round(len(hold_wins) / len(trades), 4) if trades else 0.0,
+        "quick_flip_vs_hold_pnl_delta": round(sum(hold_delta), 4) if hold_delta else 0.0,
+    }
+
+
+def _build_exit_breakdown(trades: list[SimTrade]) -> dict:
+    by_exit: dict[str, list[SimTrade]] = defaultdict(list)
+    by_city_exit: dict[str, dict[str, list[SimTrade]]] = defaultdict(lambda: defaultdict(list))
+    for trade in trades:
+        exit_reason = trade.exit_reason or "unknown"
+        by_exit[exit_reason].append(trade)
+        by_city_exit[trade.city_slug][exit_reason].append(trade)
+
+    exit_rows = [
+        _trade_summary(group, label=exit_reason)
+        for exit_reason, group in sorted(by_exit.items())
+    ]
+    exit_rows.sort(key=lambda row: row["pnl"], reverse=True)
+
+    city_rows = []
+    for city_slug, exits in sorted(by_city_exit.items()):
+        all_city_trades = [t for group in exits.values() for t in group]
+        city_rows.append({
+            **_trade_summary(all_city_trades, label=city_slug),
+            "city_slug": city_slug,
+            "exits": [
+                _trade_summary(group, label=exit_reason)
+                for exit_reason, group in sorted(exits.items())
+            ],
+        })
+    city_rows.sort(key=lambda row: row["pnl"], reverse=True)
+
+    return {
+        "overall": _trade_summary(trades, label="all"),
+        "by_exit": exit_rows,
+        "by_city": city_rows,
+        "hold_time_note": (
+            "Quick-flip hold time uses the timestamp of the later max-bid orderbook summary, "
+            "so it is an approximate time-to-target, not a full tick-by-tick replay."
+        ),
+    }
+
+
+def _build_backtest_readout(metrics: BacktestMetrics, trades: list[SimTrade], exit_breakdown: dict) -> dict:
+    total = max(1, metrics.total_trades)
+    quick_flip = next(
+        (row for row in exit_breakdown.get("by_exit", []) if row.get("label") == "quick_flip"),
+        None,
+    )
+    resolved_loss = next(
+        (row for row in exit_breakdown.get("by_exit", []) if row.get("label") == "resolved_loss"),
+        None,
+    )
+    avg_entry = _avg([float(t.entry_price) for t in trades])
+    avg_win = _avg([float(t.pnl) for t in trades if t.pnl > 0])
+    avg_loss = _avg([float(t.pnl) for t in trades if t.pnl < 0])
+    return {
+        "headline": (
+            f"{metrics.winning_trades}/{metrics.total_trades} trades won "
+            f"({metrics.win_rate * 100:.1f}%) with ${metrics.total_pnl:.2f} P&L."
+        ),
+        "takeaways": [
+            (
+                "The run made money despite a low win rate because wins paid more than losses on average."
+                if metrics.total_pnl > 0 and metrics.win_rate < 0.5
+                else "Win rate alone is not enough; compare it with P&L, drawdown, and entry price."
+            ),
+            (
+                f"Quick flips produced {quick_flip['trades']} wins and ${quick_flip['pnl']:.2f} P&L."
+                if quick_flip else "No quick flips were recorded in this run."
+            ),
+            (
+                f"Resolved losses cost ${abs(resolved_loss['pnl']):.2f} across {resolved_loss['trades']} trades."
+                if resolved_loss else "No resolved-loss exits were recorded."
+            ),
+        ],
+        "back_of_envelope": {
+            "win_rate_formula": f"{metrics.winning_trades} / {metrics.total_trades} = {metrics.win_rate * 100:.1f}%",
+            "avg_entry_price": round(avg_entry, 4) if avg_entry is not None else None,
+            "avg_entry_break_even_win_rate": (
+                _break_even_win_rate(avg_entry) if avg_entry is not None else None
+            ),
+            "avg_win_pnl": round(avg_win, 4) if avg_win is not None else None,
+            "avg_loss_pnl": round(avg_loss, 4) if avg_loss is not None else None,
+            "expectancy_per_trade": round(metrics.total_pnl / total, 4),
+            "break_even_examples": [
+                {"entry_price": p, "break_even_win_rate": _break_even_win_rate(p)}
+                for p in (0.15, 0.65, 0.85, 0.90)
+            ],
+        },
+        "high_win_rate_note": (
+            "An 80-90% win-rate profile should require high model probability and high entry prices, "
+            "then use smaller sizing because one loss can erase many small favorite wins."
+        ),
+    }
 
 
 def _source_score(label: str, pairs: list[tuple[float, int]], market_brier: float | None) -> dict:
@@ -2302,6 +2508,8 @@ class BacktestEngine:
 
         # Profit factor
         pf = compute_profit_factor([t.pnl for t in trades])
+        hold_times = [float(t.hold_time_hours) for t in trades if t.hold_time_hours is not None]
+        avg_hold_time = round(sum(hold_times) / len(hold_times), 2) if hold_times else 0.0
 
         # Per-city breakdown
         per_city: dict[str, dict] = defaultdict(lambda: {"trades": 0, "wins": 0, "pnl": 0.0, "edges": []})
@@ -2372,7 +2580,10 @@ class BacktestEngine:
             brier_skill_score=bss,
             avg_true_edge=round(avg_edge, 4),
             profit_factor=pf,
+            avg_hold_time_hours=avg_hold_time,
         )
+        exit_breakdown = _build_exit_breakdown(trades)
+        backtest_readout = _build_backtest_readout(metrics, trades, exit_breakdown)
 
         # Trade log for UI
         trade_log = [
@@ -2391,6 +2602,9 @@ class BacktestEngine:
                 "won": t.won,
                 "pnl": t.pnl,
                 "exit_reason": t.exit_reason,
+                "hold_time_hours": t.hold_time_hours,
+                "hold_to_resolution_pnl": t.hold_to_resolution_pnl,
+                "hold_to_resolution_won": t.hold_to_resolution_won,
             }
             for t in trades
         ]
@@ -2417,6 +2631,8 @@ class BacktestEngine:
             "reliability_bins": reliability,
             "per_city": per_city_final,
             "per_regime": per_regime_final,  # Q7
+            "exit_breakdown": exit_breakdown,
+            "backtest_readout": backtest_readout,
             "bma_comparison": bma_comparison,
             "forecast_sources": source_diagnostics,
             "gate_diagnostics": finalized_gate_diagnostics,

@@ -5,14 +5,18 @@ from backend.backtesting.engine import (
     BacktestParams,
     GAMMA_PAGE_SIZE,
     Portfolio,
+    SimTrade,
     _build_bma_comparison,
+    _build_exit_breakdown,
     _build_forecast_source_diagnostics,
+    _break_even_win_rate,
     _finalize_gate_diagnostics,
     _new_gate_diagnostics,
     _normalise_entry_market_row,
     _select_actionable_model_snapshot,
     _winner_idx_from_high,
     simulate_entry,
+    simulate_exits,
 )
 
 
@@ -98,9 +102,12 @@ def test_backtest_params_default_walkforward_threshold_stays_28_days():
 def test_backtest_params_defaults_are_exploratory_for_warmed_live_data():
     params = BacktestParams()
 
+    assert params.strategy_profile == "ev_baseline"
     assert params.bankroll == 100.0
     assert params.max_position_pct == 0.20
     assert params.min_true_edge == 0.03
+    assert params.min_model_prob == 0.0
+    assert params.min_entry_price == 0.0
     assert params.max_entry_price == 0.60
     assert params.max_spread == 0.20
     assert params.min_liquidity_shares == 0.0
@@ -108,6 +115,81 @@ def test_backtest_params_defaults_are_exploratory_for_warmed_live_data():
 
 def test_gamma_page_size_matches_gamma_api_cap_for_pagination():
     assert GAMMA_PAGE_SIZE == 100
+
+
+def test_break_even_win_rate_uses_net_settlement_payout():
+    assert _break_even_win_rate(0.15) == 0.1531
+    assert _break_even_win_rate(0.85) == 0.8673
+    assert _break_even_win_rate(1.10) == 1.0
+
+
+def test_high_win_rate_filters_reject_low_model_probability_first_when_edge_passes():
+    params = BacktestParams(
+        strategy_profile="high_win_rate",
+        min_true_edge=0.02,
+        min_model_prob=0.80,
+        min_entry_price=0.65,
+        max_entry_price=0.92,
+        max_spread=0.10,
+        min_liquidity_shares=0,
+    )
+    diagnostics = _new_gate_diagnostics(params)
+    event_data = {
+        "event_id": 1,
+        "city_slug": "atlanta",
+        "date_et": "2026-06-01",
+        "buckets": [{"idx": 0, "label": "82-83F"}],
+        "model_probs": [0.78],
+        "market_data": {
+            0: {
+                "yes_mid": 0.60,
+                "yes_ask": 0.65,
+                "spread": 0.02,
+                "ask_depth": 100.0,
+            }
+        },
+    }
+
+    trade = simulate_entry(event_data, 0, params, Portfolio(bankroll=100, equity=100), diagnostics)
+    out = _finalize_gate_diagnostics(diagnostics)
+
+    assert trade is None
+    assert out["top_reasons"][0]["reason"] == "model_prob_below_min"
+    assert out["best_rejected"]["required"] == 0.8
+
+
+def test_high_win_rate_filters_reject_entry_price_below_floor():
+    params = BacktestParams(
+        strategy_profile="high_win_rate",
+        min_true_edge=0.02,
+        min_model_prob=0.80,
+        min_entry_price=0.65,
+        max_entry_price=0.92,
+        max_spread=0.10,
+        min_liquidity_shares=0,
+    )
+    diagnostics = _new_gate_diagnostics(params)
+    event_data = {
+        "event_id": 1,
+        "city_slug": "atlanta",
+        "date_et": "2026-06-01",
+        "buckets": [{"idx": 0, "label": "82-83F"}],
+        "model_probs": [0.82],
+        "market_data": {
+            0: {
+                "yes_mid": 0.40,
+                "yes_ask": 0.40,
+                "spread": 0.02,
+                "ask_depth": 100.0,
+            }
+        },
+    }
+
+    trade = simulate_entry(event_data, 0, params, Portfolio(bankroll=100, equity=100), diagnostics)
+    out = _finalize_gate_diagnostics(diagnostics)
+
+    assert trade is None
+    assert out["top_reasons"][0]["reason"] == "entry_price_below_min"
 
 
 def test_entry_market_row_derives_mid_and_spread_from_bid_ask():
@@ -194,3 +276,42 @@ def test_simulate_entry_records_gate_acceptance():
     assert out["candidates_evaluated"] == 1
     assert out["trades_taken"] == 1
     assert out["rejected_total"] == 0
+
+
+def test_simulate_exits_records_quick_flip_hold_time_and_hold_comparison():
+    params = BacktestParams(quick_flip_target=0.05)
+    trade = SimTrade(
+        city_slug="atlanta",
+        date_et="2026-06-01",
+        bucket_idx=0,
+        bucket_label="82-83F",
+        model_prob=0.70,
+        mkt_prob=0.20,
+        true_edge=0.45,
+        side="buy_yes",
+        entry_price=0.20,
+        shares=10.0,
+        cost=2.0,
+    )
+    events_map = {
+        ("atlanta", "2026-06-01"): {
+            "winning_bucket_idx": 1,
+            "snapshot_time": datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc),
+            "later_market_data": {
+                0: [{
+                    "yes_bid": 0.26,
+                    "fetched_at": datetime(2026, 6, 1, 14, 0, tzinfo=timezone.utc),
+                }]
+            },
+        }
+    }
+
+    simulate_exits([trade], events_map, params)
+    breakdown = _build_exit_breakdown([trade])
+
+    assert trade.exit_reason == "quick_flip"
+    assert trade.hold_time_hours == 2.0
+    assert trade.hold_to_resolution_won is False
+    assert trade.hold_to_resolution_pnl == -2.0
+    assert breakdown["by_exit"][0]["label"] == "quick_flip"
+    assert breakdown["by_exit"][0]["quick_flip_vs_hold_pnl_delta"] > 0

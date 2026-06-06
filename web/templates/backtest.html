@@ -1,6 +1,53 @@
 {% extends "base.html" %}
 {% block title %}Backtest — WeatherQuant{% endblock %}
 
+{% block extra_head %}
+<style>
+  .bt-help {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    color: var(--cyan);
+    font-size: 10px;
+    line-height: 1;
+    cursor: help;
+  }
+  .bt-help-content {
+    visibility: hidden;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+    position: absolute;
+    left: 50%;
+    bottom: 135%;
+    transform: translateX(-50%);
+    width: min(280px, 80vw);
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    color: var(--text-main);
+    font-size: 11px;
+    line-height: 1.45;
+    font-weight: 400;
+    text-transform: none;
+    letter-spacing: 0;
+    text-align: left;
+    z-index: 100;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+  }
+  .bt-help:hover .bt-help-content,
+  .bt-help:focus .bt-help-content {
+    visibility: visible;
+    opacity: 1;
+  }
+</style>
+{% endblock %}
+
 {% block content %}
 <div x-data="backtestPage()" x-init="init()" class="space-y-6">
 
@@ -149,7 +196,19 @@
 
   <!-- ── PARAMETER CONTROLS ──────────────────────────────────────────────────── -->
   <div class="card p-4 space-y-4">
-    <h2 class="text-sm font-bold uppercase tracking-widest" style="color:var(--text-muted)">Parameters</h2>
+    <div class="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+      <h2 class="text-sm font-bold uppercase tracking-widest" style="color:var(--text-muted)">Parameters</h2>
+      <div class="flex flex-wrap gap-2">
+        <template x-for="preset in strategyPresets" :key="preset.id">
+          <button @click="applyPreset(preset.id)"
+                  class="px-3 py-1.5 rounded text-xs font-bold cursor-pointer transition-colors"
+                  :style="params.strategy_profile === preset.id ? 'background:rgba(34,211,238,0.16);color:var(--cyan);border:1px solid var(--cyan)' : 'background:var(--bg-panel);color:var(--text-muted);border:1px solid var(--border)'">
+            <span x-text="preset.label"></span>
+          </button>
+        </template>
+      </div>
+    </div>
+    <div class="text-xs leading-relaxed" style="color:var(--text-muted)" x-text="activePreset().description"></div>
 
     <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
       <!-- Kelly Fraction -->
@@ -162,7 +221,7 @@
       <!-- Max Entry Price -->
       <div>
         <label class="text-[10px] uppercase tracking-widest font-bold block mb-1" style="color:var(--text-muted)">Max Entry Price</label>
-        <input type="range" min="0.15" max="0.60" step="0.01" x-model.number="params.max_entry_price"
+        <input type="range" min="0.15" max="0.95" step="0.01" x-model.number="params.max_entry_price"
                class="w-full accent-cyan-400">
         <span class="mono text-xs" style="color:var(--cyan)" x-text="(params.max_entry_price * 100).toFixed(0) + '&#162;'"></span>
       </div>
@@ -179,6 +238,20 @@
         <input type="range" min="0.03" max="0.25" step="0.01" x-model.number="params.min_true_edge"
                class="w-full accent-cyan-400">
         <span class="mono text-xs" style="color:var(--cyan)" x-text="(params.min_true_edge * 100).toFixed(0) + '%'"></span>
+      </div>
+      <!-- Min Model Probability -->
+      <div>
+        <label class="text-[10px] uppercase tracking-widest font-bold block mb-1" style="color:var(--text-muted)">Min Model Prob</label>
+        <input type="range" min="0" max="0.95" step="0.01" x-model.number="params.min_model_prob"
+               class="w-full accent-cyan-400">
+        <span class="mono text-xs" style="color:var(--cyan)" x-text="(params.min_model_prob * 100).toFixed(0) + '%'"></span>
+      </div>
+      <!-- Min Entry Price -->
+      <div>
+        <label class="text-[10px] uppercase tracking-widest font-bold block mb-1" style="color:var(--text-muted)">Min Entry Price</label>
+        <input type="range" min="0" max="0.95" step="0.01" x-model.number="params.min_entry_price"
+               class="w-full accent-cyan-400">
+        <span class="mono text-xs" style="color:var(--cyan)" x-text="(params.min_entry_price * 100).toFixed(0) + '&#162;'"></span>
       </div>
       <!-- Bankroll -->
       <div>
@@ -260,40 +333,214 @@
       <!-- Summary Metrics Cards -->
       <div class="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
         <div class="card p-3 text-center">
-          <div class="text-[10px] uppercase tracking-widest font-bold" style="color:var(--text-muted)">Total P&L</div>
+          <div class="text-[10px] uppercase tracking-widest font-bold flex items-center justify-center gap-1" style="color:var(--text-muted)">
+            Total P&L
+            <span class="bt-help" tabindex="0">?<span class="bt-help-content">Total simulated profit and loss after entry cost, exit/settlement payout, and the same simple 2% payout fee approximation used by the backtester.</span></span>
+          </div>
           <div class="mono text-lg font-bold mt-1"
                :style="result.metrics.total_pnl >= 0 ? 'color:var(--green)' : 'color:var(--red)'"
                x-text="'$' + result.metrics.total_pnl.toFixed(2)"></div>
         </div>
         <div class="card p-3 text-center">
-          <div class="text-[10px] uppercase tracking-widest font-bold" style="color:var(--text-muted)">Sharpe</div>
+          <div class="text-[10px] uppercase tracking-widest font-bold flex items-center justify-center gap-1" style="color:var(--text-muted)">
+            Sharpe
+            <span class="bt-help" tabindex="0">?<span class="bt-help-content">Daily P&L divided by daily P&L volatility, annualized. Higher is smoother return per unit of volatility.</span></span>
+          </div>
           <div class="mono text-lg font-bold mt-1" style="color:var(--cyan)" x-text="result.metrics.sharpe_ratio.toFixed(2)"></div>
         </div>
         <div class="card p-3 text-center">
-          <div class="text-[10px] uppercase tracking-widest font-bold" style="color:var(--text-muted)">Win Rate</div>
+          <div class="text-[10px] uppercase tracking-widest font-bold flex items-center justify-center gap-1" style="color:var(--text-muted)">
+            Win Rate
+            <span class="bt-help" tabindex="0">?<span class="bt-help-content">Winning trades divided by total trades. Quick flips count as wins when the bid reached the profit target, even if the bucket later settled at zero.</span></span>
+          </div>
           <div class="mono text-lg font-bold mt-1" style="color:var(--cyan)" x-text="(result.metrics.win_rate * 100).toFixed(1) + '%'"></div>
         </div>
         <div class="card p-3 text-center">
-          <div class="text-[10px] uppercase tracking-widest font-bold" style="color:var(--text-muted)">Max DD</div>
+          <div class="text-[10px] uppercase tracking-widest font-bold flex items-center justify-center gap-1" style="color:var(--text-muted)">
+            Max DD
+            <span class="bt-help" tabindex="0">?<span class="bt-help-content">Maximum drawdown: the worst peak-to-trough loss in the simulated equity curve.</span></span>
+          </div>
           <div class="mono text-lg font-bold mt-1" style="color:var(--red)" x-text="'$' + result.metrics.max_drawdown.toFixed(2)"></div>
         </div>
         <div class="card p-3 text-center">
-          <div class="text-[10px] uppercase tracking-widest font-bold" style="color:var(--text-muted)">Brier Score</div>
+          <div class="text-[10px] uppercase tracking-widest font-bold flex items-center justify-center gap-1" style="color:var(--text-muted)">
+            Brier Score
+            <span class="bt-help" tabindex="0">?<span class="bt-help-content">Probability forecast error. Lower is better. A confident wrong forecast is penalized more than a cautious wrong forecast.</span></span>
+          </div>
           <div class="mono text-lg font-bold mt-1" style="color:var(--cyan)" x-text="result.metrics.brier_score.toFixed(4)"></div>
         </div>
         <div class="card p-3 text-center">
-          <div class="text-[10px] uppercase tracking-widest font-bold" style="color:var(--text-muted)">BSS</div>
+          <div class="text-[10px] uppercase tracking-widest font-bold flex items-center justify-center gap-1" style="color:var(--text-muted)">
+            BSS
+            <span class="bt-help" tabindex="0">?<span class="bt-help-content">Brier Skill Score: improvement versus a base-rate forecast. Positive is better than climatology; negative is worse.</span></span>
+          </div>
           <div class="mono text-lg font-bold mt-1" style="color:var(--cyan)" x-text="result.metrics.brier_skill_score.toFixed(3)"></div>
         </div>
         <div class="card p-3 text-center">
-          <div class="text-[10px] uppercase tracking-widest font-bold" style="color:var(--text-muted)">Profit Factor</div>
+          <div class="text-[10px] uppercase tracking-widest font-bold flex items-center justify-center gap-1" style="color:var(--text-muted)">
+            Profit Factor
+            <span class="bt-help" tabindex="0">?<span class="bt-help-content">Gross winning P&L divided by gross losing P&L. Above 1.0 means winners outweighed losers.</span></span>
+          </div>
           <div class="mono text-lg font-bold mt-1" style="color:var(--cyan)" x-text="result.metrics.profit_factor === Infinity ? '&#8734;' : result.metrics.profit_factor.toFixed(2)"></div>
         </div>
         <div class="card p-3 text-center">
-          <div class="text-[10px] uppercase tracking-widest font-bold" style="color:var(--text-muted)">Trades</div>
+          <div class="text-[10px] uppercase tracking-widest font-bold flex items-center justify-center gap-1" style="color:var(--text-muted)">
+            Trades
+            <span class="bt-help" tabindex="0">?<span class="bt-help-content">Number of simulated positions that passed all gates and were entered during the backtest.</span></span>
+          </div>
           <div class="mono text-lg font-bold mt-1" style="color:var(--cyan)" x-text="result.metrics.total_trades"></div>
         </div>
       </div>
+
+      <!-- Backtest Readout -->
+      <template x-if="result.backtest_readout">
+        <div class="card p-4 space-y-4">
+          <div class="flex flex-col lg:flex-row lg:items-start justify-between gap-3">
+            <div>
+              <h3 class="text-sm font-bold" style="color:var(--cyan)">Backtest Readout</h3>
+              <div class="text-sm mt-1" style="color:var(--text-primary)" x-text="result.backtest_readout.headline"></div>
+            </div>
+            <div class="text-[10px] mono px-2 py-1 rounded w-fit" style="background:var(--bg-panel);color:var(--text-muted)">
+              profile <span x-text="(result.params && result.params.strategy_profile) || 'ev_baseline'"></span>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 lg:grid-cols-3 gap-3">
+            <div class="panel rounded p-3" style="border:1px solid var(--border)">
+              <div class="text-[10px] uppercase tracking-widest font-bold mb-2" style="color:var(--text-muted)">Takeaways</div>
+              <template x-for="item in result.backtest_readout.takeaways" :key="item">
+                <div class="text-xs leading-relaxed mb-2" style="color:var(--text-primary)" x-text="item"></div>
+              </template>
+            </div>
+            <div class="panel rounded p-3" style="border:1px solid var(--border)">
+              <div class="text-[10px] uppercase tracking-widest font-bold mb-2 flex items-center gap-1" style="color:var(--text-muted)">
+                Back-of-envelope
+                <span class="bt-help" tabindex="0">?<span class="bt-help-content">For a YES held to $1 settlement, the rough break-even win rate is entry price divided by 98c net payout. Quick flips use a different exit price, but this is a useful sanity check.</span></span>
+              </div>
+              <div class="grid grid-cols-2 gap-2 text-xs">
+                <div>
+                  <div style="color:var(--text-muted)">Win formula</div>
+                  <div class="mono" x-text="result.backtest_readout.back_of_envelope.win_rate_formula"></div>
+                </div>
+                <div>
+                  <div style="color:var(--text-muted)">Expectancy</div>
+                  <div class="mono" style="color:var(--cyan)" x-text="fmtMoney(result.backtest_readout.back_of_envelope.expectancy_per_trade) + ' / trade'"></div>
+                </div>
+                <div>
+                  <div style="color:var(--text-muted)">Avg win</div>
+                  <div class="mono" style="color:var(--green)" x-text="fmtNullableMoney(result.backtest_readout.back_of_envelope.avg_win_pnl)"></div>
+                </div>
+                <div>
+                  <div style="color:var(--text-muted)">Avg loss</div>
+                  <div class="mono" style="color:var(--red)" x-text="fmtNullableMoney(result.backtest_readout.back_of_envelope.avg_loss_pnl)"></div>
+                </div>
+              </div>
+            </div>
+            <div class="panel rounded p-3" style="border:1px solid var(--border)">
+              <div class="text-[10px] uppercase tracking-widest font-bold mb-2" style="color:var(--text-muted)">Break-even examples</div>
+              <div class="grid grid-cols-2 gap-2 text-xs">
+                <template x-for="row in result.backtest_readout.back_of_envelope.break_even_examples" :key="row.entry_price">
+                  <div class="flex justify-between gap-2">
+                    <span class="mono" style="color:var(--text-muted)" x-text="fmtPct(row.entry_price) + ' entry'"></span>
+                    <span class="mono" style="color:var(--cyan)" x-text="fmtPct(row.break_even_win_rate)"></span>
+                  </div>
+                </template>
+              </div>
+              <div class="text-xs mt-3 leading-relaxed" style="color:var(--text-muted)" x-text="result.backtest_readout.high_win_rate_note"></div>
+            </div>
+          </div>
+
+          <details class="panel rounded p-3" style="border:1px solid var(--border)">
+            <summary class="text-[10px] uppercase tracking-widest font-bold cursor-pointer" style="color:var(--text-muted)">Research Anchors</summary>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-2 mt-3 text-xs leading-relaxed">
+              <a class="hover:underline" style="color:var(--cyan)" href="https://journals.ametsoc.org/doi/10.1175/1520-0493%281950%29078%3C0001%3AVOFEIT%3E2.0.CO%3B2" target="_blank" rel="noopener">Brier 1950 — probability forecast scoring</a>
+              <a class="hover:underline" style="color:var(--cyan)" href="https://sites.stat.washington.edu/people/raftery/Research/PDF/Gneiting2007jasa.pdf" target="_blank" rel="noopener">Gneiting & Raftery 2007 — proper scoring rules</a>
+              <a class="hover:underline" style="color:var(--cyan)" href="https://journals.ametsoc.org/view/journals/mwre/133/5/mwr2906.1.xml" target="_blank" rel="noopener">Raftery et al. 2005 — BMA weather ensembles</a>
+              <a class="hover:underline" style="color:var(--cyan)" href="https://journals.ametsoc.org/view/journals/mwre/133/5/mwr2904.1.xml" target="_blank" rel="noopener">Gneiting et al. 2005 — EMOS / CRPS</a>
+              <a class="hover:underline" style="color:var(--cyan)" href="https://www.aeaweb.org/articles?id=10.1257%2F0895330041371321" target="_blank" rel="noopener">Wolfers & Zitzewitz 2004 — prediction markets</a>
+              <a class="hover:underline" style="color:var(--cyan)" href="https://github.com/emintham/Papers/blob/master/Kelly-%20A%20New%20Interpretation%20of%20Information%20Rate.pdf" target="_blank" rel="noopener">Kelly 1956 — bankroll growth sizing</a>
+              <a class="hover:underline" style="color:var(--cyan)" href="https://www.kiphub.com/paper/61e50d4d50b0d380f2f63dd8" target="_blank" rel="noopener">Bailey / Lopez de Prado — backtest overfitting</a>
+            </div>
+          </details>
+        </div>
+      </template>
+
+      <!-- Exit Breakdown -->
+      <template x-if="result.exit_breakdown && result.exit_breakdown.by_exit && result.exit_breakdown.by_exit.length">
+        <div class="card p-4">
+          <div class="flex items-center justify-between gap-3 mb-3">
+            <h3 class="text-sm font-bold" style="color:var(--text-muted)">Exit Breakdown</h3>
+            <span class="text-[10px] mono px-2 py-1 rounded" style="background:var(--bg-panel);color:var(--text-muted)">
+              quick flip vs hold
+            </span>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-xs">
+              <thead>
+                <tr style="color:var(--text-muted)">
+                  <th class="text-left py-2 pr-2">Exit</th>
+                  <th class="text-right py-2 px-2">Trades</th>
+                  <th class="text-right py-2 px-2">Win Rate</th>
+                  <th class="text-right py-2 px-2">P&L</th>
+                  <th class="text-right py-2 px-2">Avg Entry</th>
+                  <th class="text-right py-2 px-2">Break-even</th>
+                  <th class="text-right py-2 px-2">Flip vs Hold</th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="row in result.exit_breakdown.by_exit" :key="row.label">
+                  <tr class="border-t" style="border-color:var(--border)">
+                    <td class="py-2 pr-2 mono" x-text="row.label"></td>
+                    <td class="py-2 px-2 text-right mono" x-text="row.trades"></td>
+                    <td class="py-2 px-2 text-right mono" x-text="fmtPct(row.win_rate)"></td>
+                    <td class="py-2 px-2 text-right mono font-bold"
+                        :style="row.pnl >= 0 ? 'color:var(--green)' : 'color:var(--red)'"
+                        x-text="fmtMoney(row.pnl)"></td>
+                    <td class="py-2 px-2 text-right mono" x-text="fmtNullablePct(row.avg_entry_price)"></td>
+                    <td class="py-2 px-2 text-right mono" x-text="fmtNullablePct(row.avg_break_even_win_rate)"></td>
+                    <td class="py-2 px-2 text-right mono"
+                        :style="row.quick_flip_vs_hold_pnl_delta >= 0 ? 'color:var(--green)' : 'color:var(--red)'"
+                        x-text="fmtMoney(row.quick_flip_vs_hold_pnl_delta)"></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+          <div class="text-xs mt-3 leading-relaxed" style="color:var(--text-muted)" x-text="result.exit_breakdown.hold_time_note"></div>
+
+          <template x-if="result.exit_breakdown.by_city && result.exit_breakdown.by_city.length">
+            <div class="mt-4">
+              <h4 class="text-[10px] uppercase tracking-widest font-bold mb-2" style="color:var(--text-muted)">City Contribution</h4>
+              <div class="overflow-x-auto">
+                <table class="w-full text-xs">
+                  <thead>
+                    <tr style="color:var(--text-muted)">
+                      <th class="text-left py-2 pr-2">City</th>
+                      <th class="text-right py-2 px-2">Trades</th>
+                      <th class="text-right py-2 px-2">Win Rate</th>
+                      <th class="text-right py-2 px-2">P&L</th>
+                      <th class="text-right py-2 px-2">Avg Entry</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <template x-for="row in result.exit_breakdown.by_city" :key="row.city_slug || row.label">
+                      <tr class="border-t" style="border-color:var(--border)">
+                        <td class="py-2 pr-2 mono" x-text="row.city_slug || row.label"></td>
+                        <td class="py-2 px-2 text-right mono" x-text="row.trades"></td>
+                        <td class="py-2 px-2 text-right mono" x-text="fmtPct(row.win_rate)"></td>
+                        <td class="py-2 px-2 text-right mono font-bold"
+                            :style="row.pnl >= 0 ? 'color:var(--green)' : 'color:var(--red)'"
+                            x-text="fmtMoney(row.pnl)"></td>
+                        <td class="py-2 px-2 text-right mono" x-text="fmtNullablePct(row.avg_entry_price)"></td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </template>
+        </div>
+      </template>
 
       <!-- Recommendations -->
       <template x-if="result.recommendations && result.recommendations.length">
@@ -661,6 +908,46 @@
 function backtestPage() {
   return {
     params: {{ default_params | tojson }},
+    strategyPresets: [
+      {
+        id: 'ev_baseline',
+        label: 'EV Baseline',
+        description: 'Exploratory profile: accepts lower-priced mispricings and judges success by P&L, Sharpe, drawdown, and calibration.',
+        params: {
+          strategy_profile: 'ev_baseline',
+          bankroll: 100,
+          kelly_fraction: 0.10,
+          max_position_pct: 0.20,
+          min_true_edge: 0.03,
+          min_model_prob: 0.0,
+          min_entry_price: 0.0,
+          max_entry_price: 0.60,
+          max_spread: 0.20,
+          min_liquidity_shares: 0,
+          max_positions_per_event: 2,
+          quick_flip_target: 0.05,
+        },
+      },
+      {
+        id: 'high_win_rate',
+        label: 'High Win Rate',
+        description: 'Favorite-trading profile: targets 80-90% wins by requiring high model probability and high entry prices, with smaller sizing.',
+        params: {
+          strategy_profile: 'high_win_rate',
+          bankroll: 100,
+          kelly_fraction: 0.05,
+          max_position_pct: 0.05,
+          min_true_edge: 0.02,
+          min_model_prob: 0.80,
+          min_entry_price: 0.65,
+          max_entry_price: 0.92,
+          max_spread: 0.08,
+          min_liquidity_shares: 10,
+          max_positions_per_event: 1,
+          quick_flip_target: 0.02,
+        },
+      },
+    ],
     running: false,
     enriching: false,
     error: null,
@@ -673,7 +960,39 @@ function backtestPage() {
     coverage: {{ coverage | tojson }},  // initial server-rendered, refreshable via /api/backtest/coverage
 
     init() {
+      this.normalizeParams();
       this.loadEnrichmentStatus();
+    },
+
+    normalizeParams() {
+      this.params.strategy_profile = this.params.strategy_profile || 'ev_baseline';
+      this.params.min_model_prob = Number(this.params.min_model_prob || 0);
+      this.params.min_entry_price = Number(this.params.min_entry_price || 0);
+    },
+
+    activePreset() {
+      return this.strategyPresets.find(p => p.id === this.params.strategy_profile) || this.strategyPresets[0];
+    },
+
+    applyPreset(id) {
+      const preset = this.strategyPresets.find(p => p.id === id);
+      if (!preset) return;
+      this.params = {
+        ...this.params,
+        ...preset.params,
+        walk_forward_train_days: this.params.walk_forward_train_days,
+        walk_forward_test_days: this.params.walk_forward_test_days,
+        night_owl_enabled: this.params.night_owl_enabled,
+        night_owl_start_hour: this.params.night_owl_start_hour,
+        night_owl_end_hour: this.params.night_owl_end_hour,
+        obs_exit_enabled: this.params.obs_exit_enabled,
+        obs_exit_window_minutes: this.params.obs_exit_window_minutes,
+        temp_sensitivity_threshold_f: this.params.temp_sensitivity_threshold_f,
+        obs_min_profit_cents: this.params.obs_min_profit_cents,
+        obs_min_depth_usd: this.params.obs_min_depth_usd,
+        obs_max_orderbook_imbalance: this.params.obs_max_orderbook_imbalance,
+      };
+      this.normalizeParams();
     },
 
     async loadEnrichmentStatus() {
@@ -705,6 +1024,110 @@ function backtestPage() {
       } catch (e) {
         return iso;
       }
+    },
+
+    fmtMoney(v) {
+      const n = Number(v || 0);
+      return (n < 0 ? '-$' : '$') + Math.abs(n).toFixed(2);
+    },
+
+    fmtNullableMoney(v) {
+      return v === null || v === undefined ? '-' : this.fmtMoney(v);
+    },
+
+    fmtPct(v) {
+      return ((Number(v || 0)) * 100).toFixed(1) + '%';
+    },
+
+    fmtNullablePct(v) {
+      return v === null || v === undefined ? '-' : this.fmtPct(v);
+    },
+
+    breakEven(entryPrice) {
+      const p = Number(entryPrice || 0);
+      if (p <= 0) return null;
+      return Math.min(1, p / 0.98);
+    },
+
+    summarizeTrades(trades, label) {
+      const rows = trades || [];
+      const wins = rows.filter(t => t.won).length;
+      const pnl = rows.reduce((acc, t) => acc + Number(t.pnl || 0), 0);
+      const avg = (vals) => vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+      const avgEntry = avg(rows.map(t => Number(t.entry_price || 0)).filter(v => v > 0));
+      const holdDelta = rows.reduce((acc, t) => {
+        if (t.hold_to_resolution_pnl === null || t.hold_to_resolution_pnl === undefined) return acc;
+        return acc + Number(t.pnl || 0) - Number(t.hold_to_resolution_pnl || 0);
+      }, 0);
+      return {
+        label,
+        trades: rows.length,
+        wins,
+        win_rate: rows.length ? wins / rows.length : 0,
+        pnl,
+        avg_pnl: rows.length ? pnl / rows.length : 0,
+        avg_entry_price: avgEntry,
+        avg_break_even_win_rate: avgEntry === null ? null : this.breakEven(avgEntry),
+        quick_flip_vs_hold_pnl_delta: holdDelta,
+      };
+    },
+
+    hydrateResult(data) {
+      const out = data || {};
+      const trades = out.trade_log || [];
+      if (!out.exit_breakdown && trades.length) {
+        const byExit = {};
+        const byCity = {};
+        trades.forEach(t => {
+          const key = t.exit_reason || 'unknown';
+          if (!byExit[key]) byExit[key] = [];
+          byExit[key].push(t);
+          const city = t.city_slug || 'unknown';
+          if (!byCity[city]) byCity[city] = [];
+          byCity[city].push(t);
+        });
+        out.exit_breakdown = {
+          overall: this.summarizeTrades(trades, 'all'),
+          by_exit: Object.entries(byExit)
+            .map(([label, rows]) => this.summarizeTrades(rows, label))
+            .sort((a, b) => b.pnl - a.pnl),
+          by_city: Object.entries(byCity)
+            .map(([label, rows]) => ({ ...this.summarizeTrades(rows, label), city_slug: label, exits: [] }))
+            .sort((a, b) => b.pnl - a.pnl),
+          hold_time_note: 'Older saved run: quick-flip hold-time details were not stored.',
+        };
+      }
+      if (!out.backtest_readout && out.metrics) {
+        const wins = Number(out.metrics.winning_trades || 0);
+        const total = Number(out.metrics.total_trades || 0);
+        const quick = (out.exit_breakdown?.by_exit || []).find(r => r.label === 'quick_flip');
+        const losses = (out.exit_breakdown?.by_exit || []).find(r => r.label === 'resolved_loss');
+        const winPnls = trades.map(t => Number(t.pnl || 0)).filter(v => v > 0);
+        const lossPnls = trades.map(t => Number(t.pnl || 0)).filter(v => v < 0);
+        const avg = vals => vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+        const avgEntry = avg(trades.map(t => Number(t.entry_price || 0)).filter(v => v > 0));
+        out.backtest_readout = {
+          headline: `${wins}/${total} trades won (${this.fmtPct(out.metrics.win_rate || 0)}) with ${this.fmtMoney(out.metrics.total_pnl || 0)} P&L.`,
+          takeaways: [
+            (Number(out.metrics.total_pnl || 0) > 0 && Number(out.metrics.win_rate || 0) < 0.5)
+              ? 'The run made money despite a low win rate because wins paid more than losses on average.'
+              : 'Win rate alone is not enough; compare it with P&L, drawdown, and entry price.',
+            quick ? `Quick flips produced ${quick.trades} wins and ${this.fmtMoney(quick.pnl)} P&L.` : 'No quick flips were recorded in this run.',
+            losses ? `Resolved losses cost ${this.fmtMoney(Math.abs(losses.pnl))} across ${losses.trades} trades.` : 'No resolved-loss exits were recorded.',
+          ],
+          back_of_envelope: {
+            win_rate_formula: `${wins} / ${total} = ${this.fmtPct(out.metrics.win_rate || 0)}`,
+            avg_entry_price: avgEntry,
+            avg_entry_break_even_win_rate: avgEntry === null ? null : this.breakEven(avgEntry),
+            avg_win_pnl: avg(winPnls),
+            avg_loss_pnl: avg(lossPnls),
+            expectancy_per_trade: total ? Number(out.metrics.total_pnl || 0) / total : 0,
+            break_even_examples: [0.15, 0.65, 0.85, 0.90].map(p => ({ entry_price: p, break_even_win_rate: this.breakEven(p) })),
+          },
+          high_win_rate_note: 'An 80-90% win-rate profile should require high model probability and high entry prices, then use smaller sizing because one loss can erase many small favorite wins.',
+        };
+      }
+      return out;
     },
 
     async enrichGamma() {
@@ -763,7 +1186,7 @@ function backtestPage() {
 
           if (data.status === 'completed') {
             clearInterval(this.pollTimer);
-            this.result = data;
+            this.result = this.hydrateResult(data);
             this.running = false;
             this.$nextTick(() => this.renderCharts());
           } else if (data.status === 'failed') {
@@ -784,7 +1207,7 @@ function backtestPage() {
         const res = await fetch('/api/backtest/' + id);
         const data = await res.json();
         if (data.status === 'completed') {
-          this.result = data;
+          this.result = this.hydrateResult(data);
           this.$nextTick(() => this.renderCharts());
         } else if (data.status === 'failed') {
           this.error = data.error || 'Run failed';
