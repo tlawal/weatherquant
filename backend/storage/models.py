@@ -887,6 +887,9 @@ class ClosedTrade(Base):
     station_mae_f: Mapped[Optional[float]] = mapped_column(Float)
     time_window: Mapped[Optional[str]] = mapped_column(String(32))
     source_json: Mapped[Optional[str]] = mapped_column(Text)
+    excluded_from_stats: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    excluded_reason: Mapped[Optional[str]] = mapped_column(Text)
+    excluded_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
 

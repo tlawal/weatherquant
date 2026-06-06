@@ -1342,6 +1342,9 @@ def serialize_current_exposure_row(
         last_trade_age_min = None
         last_trade = last_trade_ts
     direction = "LONG" if net_qty > 0 else ("EXITING" if net_notional < 0 else "FLAT")
+    notional_weight = _notional_weight(net_notional)
+    wallet_cohort_score = alpha_score
+    toxicity_score = _clamp((1.0 - recency) * notional_weight, 0.0, 1.0)
     fallback_volume = float(getattr(legacy_city_stat, "volume_usd", 0.0) or 0.0) if legacy_city_stat else 0.0
     fallback_pnl = (
         float(getattr(legacy_city_stat, "realized_pnl", 0.0) or 0.0)
@@ -1370,6 +1373,13 @@ def serialize_current_exposure_row(
         "condition_id": getattr(exposure, "condition_id", None),
         "market_slug": getattr(exposure, "market_slug", None),
         "direction": direction,
+        "flow_direction_source": "wallet_market_exposure_net_notional",
+        "onchain_fill_direction": "unavailable_shadow",
+        "wallet_cohort_score": round(wallet_cohort_score, 4),
+        "toxicity_score": round(toxicity_score, 4),
+        "lead_lag_minutes": last_trade_age_min,
+        "shadow_delta_prob": None,
+        "shadow_signal_only": True,
         "net_position_qty": round(net_qty, 4),
         "net_notional_usd": round(net_notional, 2),
         "trade_count": getattr(exposure, "trade_count", 0) or 0,
@@ -1566,13 +1576,14 @@ def _serialize_wallet_stat_as_current_row(
     net_flow = float(getattr(row, "net_flow_usd", 0.0) or 0.0)
     net_qty = float(getattr(row, "net_position_qty", 0.0) or 0.0)
     volume = float(getattr(row, "volume_usd", 0.0) or 0.0)
+    alpha_score = round(consistency * _notional_weight(net_flow or volume), 4)
     return {
         **base,
         "global_rank": rank,
         "city_rank": rank,
         "global_score": consistency,
         "city_score": consistency,
-        "alpha_score": round(consistency * _notional_weight(net_flow or volume), 4),
+        "alpha_score": alpha_score,
         "wilson_win_rate": None,
         "resolved_markets": getattr(row, "trade_count", 0) or 0,
         "roi": (
@@ -1581,6 +1592,13 @@ def _serialize_wallet_stat_as_current_row(
         ),
         "profit_factor": None,
         "direction": "LONG" if net_qty > 0 or net_flow > 0 else ("EXITING" if net_flow < 0 else "FLAT"),
+        "flow_direction_source": "wallet_stats_net_flow",
+        "onchain_fill_direction": "unavailable_shadow",
+        "wallet_cohort_score": alpha_score,
+        "toxicity_score": 0.0,
+        "lead_lag_minutes": last_trade_age_min,
+        "shadow_delta_prob": None,
+        "shadow_signal_only": True,
         "net_notional_usd": round(net_flow, 2),
         "last_trade_age_min": last_trade_age_min,
         "source": "wallet_stats_fallback",

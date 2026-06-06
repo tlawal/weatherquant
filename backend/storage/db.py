@@ -309,14 +309,21 @@ async def init_db() -> None:
             station_mae_f FLOAT,
             time_window VARCHAR(32),
             source_json TEXT,
+            excluded_from_stats BOOLEAN NOT NULL DEFAULT false,
+            excluded_reason TEXT,
+            excluded_at TIMESTAMPTZ,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
     """)
+    await _run_ddl("ALTER TABLE closed_trades ADD COLUMN excluded_from_stats BOOLEAN NOT NULL DEFAULT false")
+    await _run_ddl("ALTER TABLE closed_trades ADD COLUMN excluded_reason TEXT")
+    await _run_ddl("ALTER TABLE closed_trades ADD COLUMN excluded_at TIMESTAMP WITH TIME ZONE")
     await _run_ddl("CREATE INDEX IF NOT EXISTS ix_closed_trade_city_date ON closed_trades (city_slug, date_et)")
     await _run_ddl("CREATE INDEX IF NOT EXISTS ix_closed_trade_strategy ON closed_trades (entry_strategy)")
     await _run_ddl("CREATE INDEX IF NOT EXISTS ix_closed_trade_exit_reason ON closed_trades (exit_reason)")
     await _run_ddl("CREATE INDEX IF NOT EXISTS ix_closed_trade_exit_time ON closed_trades (exit_time)")
+    await _run_ddl("CREATE INDEX IF NOT EXISTS ix_closed_trade_excluded ON closed_trades (excluded_from_stats, exit_time)")
 
     # signals — generation tag to filter to "latest snapshot only"
     await _run_ddl("ALTER TABLE signals ADD COLUMN model_snapshot_id INTEGER")

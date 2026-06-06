@@ -1319,11 +1319,14 @@ async def get_wallet_market_exposures_for_event(
 
 # ─── Model Snapshots ──────────────────────────────────────────────────────────
 
-async def insert_model_snapshot(session: AsyncSession, **kwargs) -> ModelSnapshot:
+async def insert_model_snapshot(session: AsyncSession, commit: bool = True, **kwargs) -> ModelSnapshot:
     snap = ModelSnapshot(**kwargs)
     session.add(snap)
-    await session.commit()
-    await session.refresh(snap)
+    if commit:
+        await session.commit()
+        await session.refresh(snap)
+    else:
+        await session.flush()
     return snap
 
 
@@ -1430,10 +1433,11 @@ async def upsert_market_context_snapshot(
 
 # ─── Signals ──────────────────────────────────────────────────────────────────
 
-async def insert_signal(session: AsyncSession, **kwargs) -> Signal:
+async def insert_signal(session: AsyncSession, commit: bool = True, **kwargs) -> Signal:
     sig = Signal(**kwargs)
     session.add(sig)
-    await session.commit()
+    if commit:
+        await session.commit()
     return sig
 
 

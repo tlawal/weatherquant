@@ -120,11 +120,6 @@ async def _hydrate_residual_ml_artifact() -> None:
 async def _run_startup_maintenance() -> None:
     """Run non-critical startup maintenance after the scheduler is alive."""
     await _run_startup_step(
-        "residual ML artifact hydration",
-        _hydrate_residual_ml_artifact(),
-        timeout_s=30,
-    )
-    await _run_startup_step(
         "recent NWS extended backfill",
         _run_startup_backfills(),
         timeout_s=60,
@@ -154,6 +149,11 @@ async def run_api(start_worker: bool = False) -> None:
                 "runtime config load",
                 _load_runtime_config(),
                 timeout_s=15,
+            )
+            await _run_startup_step(
+                "residual ML artifact hydration",
+                _hydrate_residual_ml_artifact(),
+                timeout_s=30,
             )
             _ready["db"] = True
             log.info("api: db init complete")
@@ -237,6 +237,11 @@ async def run_worker() -> None:
         "runtime config load",
         _load_runtime_config(),
         timeout_s=15,
+    )
+    await _run_startup_step(
+        "residual ML artifact hydration",
+        _hydrate_residual_ml_artifact(),
+        timeout_s=30,
     )
 
     clob = CLOBClient()

@@ -998,7 +998,7 @@ async def _run_exit_cascade_for_position(
     return None
 
 
-async def run_exit_engine() -> None:
+async def run_exit_engine(signals: list | None = None) -> None:
     """Run the 4-level exit engine cascade on all open positions."""
     log.info("exit_engine: evaluating open positions")
     
@@ -1014,8 +1014,10 @@ async def run_exit_engine() -> None:
     # Find buckets with pending SELL orders so we don't double-exit
     pending_sell_buckets = {o.bucket_id for o in open_orders if o.side == "sell_yes"}
     
-    # Get latest signals to inform exits
-    signals = await run_signal_engine()
+    # Get latest signals to inform exits. The scheduler can pass a fresh
+    # generation so the exit sweep does not write a duplicate model snapshot.
+    if signals is None:
+        signals = await run_signal_engine()
     sig_map = {s.bucket_id: s for s in signals}
     
     # Warm consensus + EV caches from DB on first run (survives deploys)

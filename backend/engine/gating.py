@@ -57,6 +57,29 @@ async def run_all_gates(
     failures: list[str] = []
     today_et = et_today()
     now_et = datetime.now(ET)
+    is_sell = side.upper() == "SELL"
+
+    # Risk-reducing exits are governed by the exit engine's own cascade
+    # diagnostics. Entry gates such as arming, daily loss, max entry price,
+    # model edge, and METAR freshness must never trap an exit.
+    if is_sell:
+        if not event:
+            failures.append("GATE_EVENT_EXISTS: no event found for sell exit")
+        result = GateResult(passed=len(failures) == 0, failures=failures)
+        if emit_log and failures:
+            log.warning(
+                "gates: SELL FAILED on %s bucket=%s: %s",
+                signal.city_slug,
+                signal.bucket_idx,
+                "; ".join(failures),
+            )
+        elif emit_log:
+            log.info(
+                "gates: SELL BYPASS entry gates for %s bucket=%s",
+                signal.city_slug,
+                signal.bucket_idx,
+            )
+        return result
 
     # ── Gate: Armed ──────────────────────────────────────────────────────────
     async with get_session() as sess:
@@ -127,22 +150,22 @@ async def run_all_gates(
     # ── Gate: Market-implied posterior sanity ───────────────────────────────
     # Signal generation computes this from fresh bid/ask/depth metadata.  Keep
     # the execution gate aligned so stale signal objects cannot bypass it.
-    if side != "SELL":
-        market_sanity = (signal.reason or {}).get("market_sanity") or {}
-        if market_sanity.get("blocked"):
-            failures.append(
-                market_sanity.get("failure")
-                or "GATE_MARKET_SANITY: blocked by market sanity diagnostics"
-            )
+    market_sanity = (signal.reason or {}).get("market_sanity") or {}
+    if market_sanity.get("blocked"):
+        failures.append(
+            market_sanity.get("failure")
+            or "GATE_MARKET_SANITY: blocked by market sanity diagnostics"
+        )
 
     # ── Gate: Market price thresholds ─────────────────────────────────────────
-    if signal.mkt_prob >= Config.MAX_ENTRY_PRICE:
+    entry_price = signal.yes_ask if signal.yes_ask is not None else signal.mkt_prob
+    if entry_price >= Config.MAX_ENTRY_PRICE:
         failures.append(
-            f"GATE_MAX_PRICE: mkt_prob={signal.mkt_prob:.4f} >= max "
+            f"GATE_MAX_PRICE: entry_price={entry_price:.4f} >= max "
             f"entry threshold of {Config.MAX_ENTRY_PRICE}"
         )
-    elif signal.mkt_prob < 0.02:
-        failures.append(f"GATE_MIN_PRICE: mkt_prob={signal.mkt_prob:.4f} < 0.02")
+    elif entry_price < 0.02:
+        failures.append(f"GATE_MIN_PRICE: entry_price={entry_price:.4f} < 0.02")
 
     # ── Gate: Maximum Spread ──────────────────────────────────────────────────
     if signal.spread is None or signal.spread > Config.MAX_SPREAD:
@@ -163,14 +186,13 @@ async def run_all_gates(
     # ── Gate: Portfolio-level risk (drawdown, cluster, strategy) ──────────────
     # Skipped for SELL orders: selling reduces exposure, drawdown, and strategy
     # risk rather than increasing it.
-    if side != "SELL":
-        from backend.execution.portfolio_risk import check_portfolio_risk
-        portfolio_failures = await check_portfolio_risk(
-            city_slug=signal.city_slug,
-            bankroll=Config.BANKROLL_CAP,
-            strategy=strategy,
-        )
-        failures.extend(portfolio_failures)
+    from backend.execution.portfolio_risk import check_portfolio_risk
+    portfolio_failures = await check_portfolio_risk(
+        city_slug=signal.city_slug,
+        bankroll=Config.BANKROLL_CAP,
+        strategy=strategy,
+    )
+    failures.extend(portfolio_failures)
 
     # ── Gate: Max open positions per event ───────────────────────────────────
     from backend.storage.models import Bucket as BucketModel

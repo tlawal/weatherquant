@@ -690,9 +690,10 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
 
             _buckets_sorted = sorted(lead_bucket_by_source.values())
             _operative_bucket = _buckets_sorted[len(_buckets_sorted) // 2]
-            fitted_bma_weights = await get_bma_weights_for_city(
-                sess, city.id, _operative_bucket,
-            )
+            async with get_session() as bma_sess:
+                fitted_bma_weights = await get_bma_weights_for_city(
+                    bma_sess, city.id, _operative_bucket,
+                )
         except Exception:
             log.exception(
                 "signal: %s — BMA fitted weights fetch failed; legacy weights used",
@@ -710,7 +711,8 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
             station_source_meta=station_source_meta,
             unit_mult=5.0 / 9.0 if getattr(city, "unit", "F") == "C" else 1.0,
         )
-        _recent_snaps_pre = await get_recent_model_snapshots(sess, event.id, limit=4)
+        async with get_session() as snap_sess:
+            _recent_snaps_pre = await get_recent_model_snapshots(snap_sess, event.id, limit=4)
         _pre_hist_spreads: list[float] = []
         for _s in _recent_snaps_pre:
             try:
@@ -859,6 +861,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         # what lets the dashboard filter to "latest snapshot only".
         snapshot = await insert_model_snapshot(
             sess,
+            commit=False,
             event_id=event.id,
             mu=model.mu,
             sigma=model.sigma,
@@ -962,6 +965,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
             # Edge calculation based on calibrated probability
             raw_edge_buy = calibrated_prob - mkt_prob
             true_edge = raw_edge_buy - exec_cost
+            entry_price = mkt_snap.yes_ask if mkt_snap.yes_ask is not None else mkt_prob
 
             # Per-share EV (used by EDGE_DECAY exit gate).
             # ev_per_share uses the mid (entry-side reference); ev_at_bid uses
@@ -1009,6 +1013,9 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
                 "bucket_live_calibration": bucket_live_calibration,
                 "model_prob_cal": float(round(calibrated_prob, 4)),
                 "mkt_prob": float(round(mkt_prob, 4)),
+                "entry_price": float(round(entry_price, 4)),
+                "yes_ask": mkt_snap.yes_ask,
+                "yes_bid": mkt_snap.yes_bid,
                 "raw_edge": float(round(raw_edge_buy, 4)),
                 "exec_cost": float(round(exec_cost, 4)),
                 "true_edge": float(round(true_edge, 4)),
@@ -1067,10 +1074,17 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
             reason["market_sanity"] = market_sanity
             if market_sanity.get("blocked"):
                 gate_failures.append(market_sanity["failure"])
+            if entry_price >= Config.MAX_ENTRY_PRICE:
+                gate_failures.append(
+                    f"GATE_MAX_PRICE: entry_price={entry_price:.4f} >= max "
+                    f"entry threshold of {Config.MAX_ENTRY_PRICE}"
+                )
+            elif entry_price < 0.02:
+                gate_failures.append(f"GATE_MIN_PRICE: entry_price={entry_price:.4f} < 0.02")
 
             actionable = (
                 true_edge >= Config.MIN_TRUE_EDGE
-                and 0.02 <= mkt_prob <= 0.98  # avoid extreme markets
+                and 0.02 <= entry_price <= 0.98  # avoid extreme executable prices
                 and ask_depth >= Config.MIN_LIQUIDITY_SHARES
                 and event.forecast_quality == "ok"
                 and city_state != "resolved"
@@ -1120,6 +1134,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
             # the dashboard can filter to "rows from the latest generation".
             await insert_signal(
                 sess,
+                commit=False,
                 bucket_id=bucket.id,
                 model_snapshot_id=snapshot_id,
                 model_prob=sig.model_prob,
@@ -1130,5 +1145,6 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
                 reason_json=json.dumps(reason, default=str),
                 gate_failures_json=json.dumps(sig.gate_failures),
             )
+        await sess.commit()
 
     return signals

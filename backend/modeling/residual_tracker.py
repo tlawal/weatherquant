@@ -102,6 +102,7 @@ def predict_remaining_rise(
 
     if _model is not None:
         import numpy as np
+        import pandas as pd
         features = {
             "hour_local": hour_local,
             "temp_f": current_temp_f,
@@ -119,8 +120,19 @@ def predict_remaining_rise(
             "regime_score_proxy": regime_score_proxy,
         }
         # Construct feature vector in the order the model expects
-        ordered_features = _features if _features else list(features.keys())
-        X = np.array([[features.get(f, 0.0) for f in ordered_features]])
+        raw_model_feature_names = getattr(_model, "feature_names_in_", None)
+        model_feature_names = (
+            list(raw_model_feature_names)
+            if raw_model_feature_names is not None
+            else []
+        )
+        ordered_features = model_feature_names or _features or list(features.keys())
+        values = [[features.get(f, 0.0) for f in ordered_features]]
+        X = (
+            pd.DataFrame(values, columns=ordered_features)
+            if model_feature_names
+            else np.array(values)
+        )
 
         try:
             pred = float(_model.predict(X)[0])

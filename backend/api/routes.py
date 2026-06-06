@@ -1834,20 +1834,82 @@ async def redemptions_onchain():
 
 
 @router.get("/api/performance/trades")
-async def performance_trades(limit: int = 200):
+async def performance_trades(limit: int = 200, include_excluded: bool = False):
     from backend.execution.performance import get_closed_trade_rows
 
     limit = max(1, min(limit, 1000))
     async with get_session() as sess:
-        return {"trades": await get_closed_trade_rows(sess, limit=limit)}
+        return {
+            "include_excluded": include_excluded,
+            "trades": await get_closed_trade_rows(
+                sess,
+                limit=limit,
+                include_excluded=include_excluded,
+            ),
+        }
 
 
 @router.get("/api/performance/summary")
-async def performance_summary():
+async def performance_summary(include_excluded: bool = False):
     from backend.execution.performance import get_performance_summary
 
     async with get_session() as sess:
-        return await get_performance_summary(sess)
+        return await get_performance_summary(sess, include_excluded=include_excluded)
+
+
+@router.get("/api/risk/monte-carlo/latest")
+async def performance_monte_carlo(
+    include_excluded: bool = False,
+    paths: int = 10000,
+    horizon_trades: int = 30,
+    bankroll: float | None = None,
+    seed: int = 7,
+):
+    from backend.execution.performance import run_closed_trade_monte_carlo
+
+    async with get_session() as sess:
+        return await run_closed_trade_monte_carlo(
+            sess,
+            include_excluded=include_excluded,
+            paths=paths,
+            horizon_trades=horizon_trades,
+            bankroll=Config.BANKROLL_CAP if bankroll is None else bankroll,
+            seed=seed,
+        )
+
+
+@router.get("/api/audit/daily/latest")
+async def daily_audit_latest():
+    from backend.execution.audit_report import build_daily_audit_report
+
+    async with get_session() as sess:
+        return await build_daily_audit_report(sess)
+
+
+@router.post("/api/admin/performance/exclude-oldest")
+async def admin_exclude_oldest_performance_trades(
+    count: int = 10,
+    reason: str = "post_upgrade_baseline_reset",
+    actor: str = Depends(require_admin),
+):
+    from backend.execution.performance import exclude_oldest_closed_trades
+
+    reason = (reason or "post_upgrade_baseline_reset").strip()[:512]
+    count = max(1, min(int(count), 1000))
+    async with get_session() as sess:
+        result = await exclude_oldest_closed_trades(
+            sess,
+            count=count,
+            reason=reason,
+        )
+        await append_audit(
+            sess,
+            actor=actor,
+            action="performance_trades_excluded",
+            payload=result,
+            ok=True,
+        )
+    return result
 
 
 @router.post("/api/positions/{position_id}/mark-closed")

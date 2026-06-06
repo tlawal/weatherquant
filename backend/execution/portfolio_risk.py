@@ -43,7 +43,7 @@ async def check_drawdown(bankroll: float) -> Optional[str]:
     total_realized = sum(p.realized_pnl for p in positions)
     total_unrealized = sum(p.unrealized_pnl for p in positions if p.unrealized_pnl)
 
-    current_equity = bankroll + total_unrealized
+    current_equity = bankroll + total_realized + total_unrealized
 
     # Peak equity: bankroll + total realized gains (high-water mark)
     # In a proper system this would be persisted; approximate with
@@ -121,7 +121,7 @@ async def check_cluster_exposure(
             if city and city.city_slug in cluster_slugs:
                 cluster_exposure += pos.net_qty * pos.avg_cost
 
-    effective_bankroll = max(bankroll, Config.BANKROLL_CAP)
+    effective_bankroll = min(bankroll, Config.BANKROLL_CAP)
     max_cluster = effective_bankroll * Config.MAX_CLUSTER_EXPOSURE_PCT
 
     if cluster_exposure >= max_cluster:

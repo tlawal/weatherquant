@@ -18,6 +18,8 @@ from backend.config import Config
 log = logging.getLogger(__name__)
 
 _scheduler: AsyncIOScheduler | None = None
+_latest_signals: list | None = None
+_latest_signals_at: datetime | None = None
 
 
 async def _run_with_heartbeat(job_name: str, coro_fn) -> None:
@@ -152,13 +154,32 @@ async def job_fetch_clob():
 async def job_run_model():
     """Run signal engine and store results."""
     from backend.engine.signal_engine import run_signal_engine
+    global _latest_signals, _latest_signals_at
+
     signals = await run_signal_engine()
+    _latest_signals = signals
+    _latest_signals_at = datetime.now(timezone.utc)
     log.info(
         "scheduler: signal_engine produced %d signals (%d actionable)",
         len(signals),
         sum(1 for s in signals if s.actionable),
     )
     return signals
+
+
+async def _get_recent_or_run_signals(max_age_s: float = 90.0) -> list:
+    """Reuse the latest signal generation when another job just computed it."""
+    global _latest_signals, _latest_signals_at
+    if _latest_signals is not None and _latest_signals_at is not None:
+        age_s = (datetime.now(timezone.utc) - _latest_signals_at).total_seconds()
+        if age_s <= max_age_s:
+            log.info(
+                "scheduler: reusing cached signal generation age=%.1fs n=%d",
+                age_s,
+                len(_latest_signals),
+            )
+            return _latest_signals
+    return await job_run_model()
 
 
 async def job_run_night_owl():
@@ -175,7 +196,6 @@ async def job_run_night_owl():
 
 async def job_run_auto_trader():
     """Execute top signals if armed."""
-    from backend.engine.signal_engine import run_signal_engine
     from backend.execution.trader import execute_top_signals
     from backend.ingestion.polymarket_clob import get_clob
     from backend.execution.arming import is_armed
@@ -190,7 +210,7 @@ async def job_run_auto_trader():
         if balance:
             bankroll = min(balance, Config.BANKROLL_CAP)
 
-    signals = await run_signal_engine()
+    signals = await _get_recent_or_run_signals(max_age_s=90.0)
     results = await execute_top_signals(
         signals, bankroll=bankroll, max_trades=Config.MAX_POSITIONS_PER_EVENT
     )
@@ -230,7 +250,8 @@ async def job_auto_check_disarm():
 async def job_run_exit_engine():
     """Evaluate open positions for Quick Flip or Emergency Exits."""
     from backend.execution.exit_engine import run_exit_engine
-    await run_exit_engine()
+    signals = await _get_recent_or_run_signals(max_age_s=90.0)
+    await run_exit_engine(signals=signals)
 
 
 async def job_discover_cities():
