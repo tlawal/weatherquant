@@ -332,6 +332,47 @@ async def init_db() -> None:
             updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
         )
     """)
+    await _run_ddl("""
+        CREATE TABLE IF NOT EXISTS threshold_calibrations (
+            id SERIAL PRIMARY KEY,
+            city_id INTEGER NOT NULL REFERENCES cities(id),
+            station_id VARCHAR(16) NOT NULL DEFAULT '',
+            hour_bucket INTEGER NOT NULL DEFAULT -1,
+            observed_floor_bucket_idx INTEGER NOT NULL DEFAULT -1,
+            threshold_f FLOAT NOT NULL,
+            n_samples INTEGER NOT NULL DEFAULT 0,
+            brier_raw FLOAT,
+            brier_cal FLOAT,
+            rps_raw FLOAT,
+            rps_cal FLOAT,
+            bins_json TEXT,
+            updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+            CONSTRAINT uq_threshold_cal_context
+                UNIQUE (city_id, station_id, hour_bucket, observed_floor_bucket_idx, threshold_f)
+        )
+    """)
+    await _run_ddl("""
+        CREATE TABLE IF NOT EXISTS live_bucket_calibrations (
+            id SERIAL PRIMARY KEY,
+            city_id INTEGER NOT NULL REFERENCES cities(id),
+            station_id VARCHAR(16) NOT NULL DEFAULT '',
+            hour_bucket INTEGER NOT NULL DEFAULT -1,
+            observed_floor_bucket_idx INTEGER NOT NULL DEFAULT -1,
+            bucket_idx INTEGER NOT NULL,
+            prob_bin INTEGER NOT NULL,
+            n_samples INTEGER NOT NULL DEFAULT 0,
+            hits INTEGER NOT NULL DEFAULT 0,
+            predicted_mean FLOAT,
+            observed_rate FLOAT,
+            brier FLOAT,
+            updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+            CONSTRAINT uq_live_bucket_cal_context
+                UNIQUE (city_id, station_id, hour_bucket, observed_floor_bucket_idx, bucket_idx, prob_bin)
+        )
+    """)
+    await _run_ddl("CREATE INDEX IF NOT EXISTS ix_threshold_cal_lookup ON threshold_calibrations (city_id, station_id, hour_bucket, observed_floor_bucket_idx)")
+    await _run_ddl("CREATE INDEX IF NOT EXISTS ix_threshold_cal_city_hour ON threshold_calibrations (city_id, hour_bucket)")
+    await _run_ddl("CREATE INDEX IF NOT EXISTS ix_live_bucket_cal_lookup ON live_bucket_calibrations (city_id, station_id, hour_bucket, observed_floor_bucket_idx, bucket_idx)")
 
     # calibration_params — HRRR/GFS support
     await _run_ddl("ALTER TABLE calibration_params ADD COLUMN bias_hrrr FLOAT DEFAULT 0.0")

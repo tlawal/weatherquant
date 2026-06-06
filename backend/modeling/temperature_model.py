@@ -33,7 +33,7 @@ import math
 import statistics
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Callable, Optional
 from zoneinfo import ZoneInfo
 
 from scipy.stats import norm as _norm
@@ -848,6 +848,11 @@ def compute_model(
     # source not present in the fitted set. None = pure shadow on legacy
     # weights (Phase 1 behavior).
     fitted_bma_weights_by_source: Optional[dict[str, float]] = None,
+    # Same-day threshold survival calibration. Caller supplies a materialized
+    # remapper when enough city/station/hour/floor history exists.
+    threshold_survival_calibrator: Optional[
+        Callable[[dict[float, float]], tuple[dict[float, float], dict]]
+    ] = None,
 ) -> Optional[ModelResult]:
     """
     Fuse all forecast sources and compute temperature distribution + bucket probabilities.
@@ -1224,12 +1229,22 @@ def compute_model(
 
     # Use ML-based remaining rise prediction if features are available
     _ml = ml_features or {}
+    _latest_wx_for_ml = latest_weather or {}
     remaining_rise = predict_remaining_rise(
         hour_local=hour_local,
         current_temp_f=current_temp_f or 70.0,
         temp_slope_3h=_ml.get("temp_slope_3h", 0.0),
         avg_peak_timing_mins=_ml.get("avg_peak_timing_mins", 960.0),
         day_of_year=_ml.get("day_of_year", now_local.timetuple().tm_yday),
+        humidity_pct=_latest_wx_for_ml.get("humidity_pct", 50.0),
+        cloud_cover_val=_latest_wx_for_ml.get("cloud_cover_val", 0.0),
+        wind_speed_kt=_latest_wx_for_ml.get("wind_speed_kt", 0.0),
+        wind_gust_kt=_latest_wx_for_ml.get("wind_gust_kt", 0.0),
+        dewpoint_spread_f=_latest_wx_for_ml.get("dewpoint_spread_f", 10.0),
+        pressure_tendency_3h=_latest_wx_for_ml.get("pressure_tendency", 0.0),
+        precip_flag=1.0 if _latest_wx_for_ml.get("has_precip") else 0.0,
+        precip_recent_3h=1.0 if _latest_wx_for_ml.get("has_precip") else 0.0,
+        regime_score_proxy=_ml.get("regime_score", 0.0),
         unit_mult=unit_mult,
     )
 
@@ -1590,6 +1605,7 @@ def compute_model(
                 trusted_spread=float(trusted_spread),
                 forecast_quality=forecast_quality,
                 lock_regime=lock_regime,
+                survival_calibrator=threshold_survival_calibrator,
             )
             if intraday_threshold_out is not None:
                 intraday_threshold_live_alpha = _intraday_threshold_live_alpha(
@@ -1686,6 +1702,7 @@ def compute_model(
 
     if intraday_threshold_out is not None:
         inputs["intraday_threshold_shadow"] = intraday_threshold_out.to_dict()
+        inputs["threshold_calibration"] = intraday_threshold_out.calibration
         inputs["intraday_threshold_live_alpha"] = round(intraday_threshold_live_alpha, 4)
         inputs["intraday_threshold_live_blend_enabled"] = bool(intraday_threshold_live_alpha > 0)
     if legacy_probs_before_intraday_blend is not None:

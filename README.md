@@ -1,6 +1,6 @@
 # WeatherQuant
 
-Quantitative trading system for daily-high-temperature prediction markets on Polymarket. Fuses **10** numerical and AI weather models, a per-minute METAR nowcast, and a Bayesian-mixture predictive distribution (with offline + online EM weight updates) into bucket-level edge signals; sizes positions via Kelly; executes through Polymarket CLOB v2 with a tiered exit cascade. Independent LLM **Market Context Agent** runs alongside with a 10-source encyclopedia + adversarial reasoning. Real-time **alpha-vs-market** dashboard at `/calibration/edge` measures Brier(model) − Brier(market) and CRPS distribution error for promotion decisions.
+Quantitative trading system for daily-high-temperature prediction markets on Polymarket. Fuses **10** numerical and AI weather models, a per-minute METAR nowcast, checkpoint-safe live calibration layers, and a Bayesian-mixture predictive distribution (with offline + online EM weight updates) into bucket-level edge signals; sizes positions via Kelly; executes through Polymarket CLOB v2 with a tiered exit cascade. Independent LLM **Market Context Agent** runs alongside with a 10-source encyclopedia + adversarial reasoning. Real-time **alpha-vs-market** dashboard at `/calibration/edge` measures Brier(model) − Brier(market) and CRPS distribution error for promotion decisions.
 
 ---
 
@@ -69,6 +69,9 @@ The system's competitive edge is **per-station ensemble post-processing of a 10-
 | **M1 BMA Phase 3** | **Online-EM updates on settlement (every newly-resolved event nudges weights with lr=0.05)** | **✓ live** |
 | **M1 BMA intraday conditioning** | **Conditional BMA probabilities on observed high floor (fixes intraday low-tail mass display bug)** | **✓ live** |
 | **Intraday threshold shadow model** | **Deterministic threshold-crossing probabilities with monotone survival-to-bucket conversion, shadow-only** | **✓ live (shadow)** |
+| **Threshold survival calibration** | **Scores historical same-day survival probabilities by city/station/hour/observed-floor, applies reliable remaps before bucket conversion** | **✓ live; gated by sample count** |
+| **Per-bucket live calibration** | **Bucket/hour/floor reliability diagnostics; live probability remap only for exact contexts with n ≥ 40** | **✓ live; conservative** |
+| **Market-implied posterior sanity gate** | **Gate-only logit posterior blends model and fresh/liquid market mid; blocks auto-entry when posterior edge or gap fails** | **✓ live** |
 | **OBS_PROXIMITY exit layer** | **Pre-observation profit protection for fragile buckets near scheduled station observations, with UI controls in strategies page** | **✓ live** |
 | **Wallet tracker read-only analytics** | **Public Polymarket wallet analytics with scoring, strategy inference, leaderboard, and Smart Money vs Model divergence** | **✓ live (disabled by default)** |
 | **Alpha dashboard** | **`/calibration/edge` — Brier(model) − Brier(market) plus CRPS distribution error, per-city/per-day, plus chip on `/` and card on `/redemptions`** | **✓ live** |
@@ -154,7 +157,7 @@ Components fused into μ:
 
 1. **Per-source weighted mean** of `{NWS, HRRR, NBM, IFS, AIFS, GraphCast, Pangu, FCN-v2, WU hourly peak}` after EWMA bias correction. Weights are `base × lead-skill × freshness`, then re-normalized.
 2. **Kalman + regression nowcast** from same-day 5-min METAR. Two-state filter `[temp, trend]` with adaptive process noise (Mehra 1972 innovation-covariance estimator). Joseph-form update for numerical stability. Blended into μ at up to 30% weight, gated to a ±2h tent around the predicted peak with a 6°F divergence cap.
-3. **METAR intraday projection**. `projected_high = max(daily_high_so_far, current_temp + remaining_rise)`, where `remaining_rise` comes from a `GradientBoostingRegressor` trained on hour-of-day, current temp, 3-hour slope, peak-timing features, and day-of-year. Falls back to a static lookup table when `residual_model.pkl` is absent. Time-of-day weight `w_metar(hour_local)` interpolates between forecast and projection: 0.0 at midnight → 0.99 by 8 PM local.
+3. **METAR intraday projection**. `projected_high = max(daily_high_so_far, current_temp + remaining_rise)`, where `remaining_rise` comes from a `GradientBoostingRegressor` trained on hour-of-day, current temp, 3-hour slope, peak timing, day-of-year, humidity, cloud cover, wind/gust, dewpoint spread, pressure tendency, precipitation, and regime proxy features. Falls back to a static lookup table when no promoted `residual_model.pkl` artifact exists. Time-of-day weight `w_metar(hour_local)` interpolates between forecast and projection: 0.0 at midnight → 0.99 by 8 PM local.
 4. **Late-day lock**. After 6 PM with the day's high firmly above current temp and a negative Kalman trend, `remaining_rise` collapses to 0 and probability mass is locked into the observed bucket (caps at 2/5/10% remaining tail mass depending on conditions).
 
 σ assembly:
@@ -217,6 +220,22 @@ POST /api/admin/recompute-forecast-daily-errors?max_days=60
 Sortable analytics + Leaflet station-health map at `/calibration`.
 
 The complementary **Lead-Time Skill** table (`SourceLeadTimeSkill`) is refreshed on its own 6h job. It tracks `MAE_f` and `bias_f` per `(city, source, lead_bucket)` ∈ {0, 1, 3, 6, 12, 18, 24, 36, 48, 72h}. Surfaced on city pages and used immediately with empirical-Bayes shrinkage: `0 < n_obs < 30` partially blends observed MAE into BMA σᵢ and source-weight factors, while `n_obs ≥ 30` uses the lead-bucket MAE at full strength.
+
+## Live probability calibration
+
+Same-day bucket probabilities now have two additional calibration layers beyond the generic reliability-bin remap:
+
+- **Threshold survival calibration** (`ThresholdCalibration`, `backend/modeling/live_calibration.py`) scores historical `intraday_threshold_shadow.survival` values for `P(final high >= threshold)` against the final settlement high. Context backoff is exact city+station+hour+observed-floor when `n >= 50`, then city+hour+floor at `n >= 50`, then city+hour at `n >= 75`, otherwise identity.
+- **Per-bucket live calibration** (`LiveBucketCalibration`) tracks bucket hit-rate reliability by city/station/hour/observed-floor/bucket/probability-bin. It is diagnostic by default and only remaps live probabilities for exact contexts with `n >= 40`.
+
+Both are refreshed by `refresh_live_calibrations` every `LIVE_CALIBRATION_REFRESH_SECONDS` (default 6h) over `LIVE_CALIBRATION_DAYS_BACK` (default 90d). Diagnostics:
+
+```text
+GET /calibration/threshold?city_slug=atlanta
+GET /calibration/live-buckets?city_slug=atlanta
+```
+
+The auto-entry layer also applies a **market sanity gate**. It computes a logit-space posterior between calibrated model probability and market mid only when the order book is fresh, tight, and deep. It never changes displayed model probabilities; it blocks auto-entry if posterior true edge is below `2¢` or the model-market gap exceeds `20pp` without strong threshold-calibration support. Thin, stale, or wide markets get zero weight and do not block solely from disagreement.
 
 ---
 
@@ -378,13 +397,13 @@ python -m backend.main           # full stack incl. scheduler
 PYTHONPATH=. .venv/bin/pytest tests/ -q --ignore=tests/test_market_context.py
 ```
 
-Train the ML residual tracker after data has accumulated. The trainer builds a remaining-rise model from METAR observations, uses a chronological date-grouped holdout to avoid same-day leakage, and requires at least 50 usable daytime samples:
+The scheduler runs residual ML training in shadow mode every `RESIDUAL_ML_SHADOW_TRAIN_SECONDS` (default 24h). Manual training is still useful when you want an immediate diagnostic after new data has landed. The trainer builds a remaining-rise model from METAR observations, uses a chronological date-grouped holdout to avoid same-day leakage, includes precipitation/regime features, and requires at least 50 usable daytime samples:
 
 ```bash
 python -m backend.modeling.ml_trainer
 ```
 
-By default this is shadow-only and writes `backend/modeling/residual_model_shadow.pkl` plus `backend/modeling/residual_model_shadow_meta.json`. The metadata records train/test MAE, baseline MAE, date split, sample count, city count, and whether promotion is ready.
+By default this is shadow-only and writes `backend/modeling/residual_model_shadow.pkl` plus `backend/modeling/residual_model_shadow_meta.json`. The metadata records train/test MAE, baseline MAE, date split, sample count, city count, feature importances, rain/regime subset MAE, promotion blockers, and whether promotion is ready.
 
 On Railway, promoted ML artifacts are persisted in the existing Postgres database as `model_artifacts` rows. This uses the Postgres volume already attached to the `Postgres` service; do not add a separate app volume just for the residual model. On startup, the app hydrates the promoted artifact from Postgres into the local runtime path before the scheduler computes signals.
 
@@ -398,7 +417,7 @@ railway ssh -s weatherquant "python -m backend.modeling.ml_trainer"
 
 `railway run` only injects Railway environment variables into a local process; it does not join Railway's private network. If `DATABASE_URL` uses `postgres.railway.internal`, run through `railway ssh` or the trainer will fail DNS resolution from your laptop.
 
-Promote only when the chronological holdout beats the static table by at least `0.20°F`:
+Promote only when the chronological holdout beats the static table by at least `0.20°F`, no city/date leakage is detected, and rain/regime subsets do not degrade beyond the configured blockers:
 
 ```bash
 railway ssh -s weatherquant "PROMOTE_RESIDUAL_ML=1 python -m backend.modeling.ml_trainer"
@@ -406,10 +425,16 @@ railway ssh -s weatherquant "PROMOTE_RESIDUAL_ML=1 python -m backend.modeling.ml
 
 Promotion writes `residual_model.pkl` plus `residual_model_meta.json` locally and saves the promoted bytes/metadata into Postgres. Otherwise it still saves the shadow model and logs why promotion was blocked. The signal engine hydrates and loads the promoted model on restart. Until a promoted model artifact exists, `residual_tracker.py` uses the static remaining-rise lookup table.
 
+Residual ML diagnostics:
+
+```text
+GET /calibration/residual-ml
+```
+
 Operator prompt for a shadow-only production check:
 
 ```text
-Run the WeatherQuant residual ML trainer in shadow mode on the live Railway database from inside the service network. Do not promote or change live inference. Report train MAE, test MAE, static-table baseline MAE, improvement in degrees F, sample count, city count, chronological train/test dates, and promotion_ready. If the trainer fails, patch the trainer first, rerun it in shadow, then summarize the exact error and fix.
+Run the WeatherQuant residual ML trainer in shadow mode on the live Railway database from inside the service network. Do not promote or change live inference. Report train MAE, test MAE, static-table baseline MAE, improvement in degrees F, sample count, city count, chronological train/test dates, feature importances, rain_subset_mae, regime_subset_mae, promotion_ready, and promotion_blockers. If the trainer fails, patch the trainer first, rerun it in shadow, then summarize the exact error and fix.
 ```
 
 ---
@@ -454,10 +479,12 @@ Run the WeatherQuant residual ML trainer in shadow mode on the live Railway data
 | `backend/modeling/adaptive.py` | Kalman + regression + station-time predictions |
 | `backend/modeling/distribution.py` | Single-Gaussian bucket integration (legacy path) |
 | `backend/modeling/calibration_engine.py` | Brier-driven probability calibration + lead-time skill computation |
+| `backend/modeling/live_calibration.py` | Threshold survival + per-bucket live calibration materialization and diagnostics |
 | `backend/modeling/station_calibration.py` | 30-day rolling MAE/bias per station using checkpoint-safe source selection |
 | `backend/modeling/station_weights.py` | Checkpoint-safe `ForecastDailyError` rebuild + NIG empirical-Bayes per-source weights |
 | `backend/modeling/ml_trainer.py` | Remaining-rise ML trainer; shadow by default, promotion gated by chronological holdout MAE |
 | `backend/modeling/regime.py` | CALM/NORMAL/VOLATILE label + σ multiplier |
+| `backend/engine/market_sanity.py` | Gate-only market-implied posterior sanity layer for auto-entry |
 | `backend/engine/signal_engine.py` | Per-event orchestration → bucket signals + persistence |
 | `backend/ingestion/aiwp.py` | NOAA AIWP S3 fetcher (Pangu + FCN-v2) |
 | `backend/ingestion/herbie_side_channel.py` | HRRR/NBM/IFS/AIFS via Herbie + cfgrib |

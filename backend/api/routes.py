@@ -2129,6 +2129,80 @@ async def calibration_edge_page_from_api_router(request: Request, days_back: int
     )
 
 
+@router.get("/calibration/threshold")
+async def get_threshold_calibration_diagnostics(city_slug: Optional[str] = None):
+    from backend.modeling.live_calibration import threshold_calibration_diagnostics
+
+    city_id = None
+    if city_slug:
+        async with get_session() as sess:
+            city = await _get_city_or_404(sess, city_slug)
+            city_id = city.id
+    return await threshold_calibration_diagnostics(city_id=city_id)
+
+
+@router.get("/calibration/live-buckets")
+async def get_live_bucket_calibration_diagnostics(city_slug: Optional[str] = None):
+    from backend.modeling.live_calibration import live_bucket_calibration_diagnostics
+
+    city_id = None
+    if city_slug:
+        async with get_session() as sess:
+            city = await _get_city_or_404(sess, city_slug)
+            city_id = city.id
+    return await live_bucket_calibration_diagnostics(city_id=city_id)
+
+
+@router.get("/calibration/residual-ml")
+async def get_residual_ml_diagnostics():
+    from backend.modeling.residual_artifacts import RESIDUAL_ARTIFACT_NAME
+    from backend.modeling.residual_paths import (
+        residual_metadata_path,
+        residual_model_path,
+        residual_shadow_metadata_path,
+        residual_shadow_model_path,
+    )
+    from backend.storage.repos import get_model_artifact
+
+    def _read_meta(path):
+        if not path.exists():
+            return None
+        try:
+            return json.loads(path.read_text())
+        except Exception as exc:
+            return {"error": f"metadata_parse_failed: {exc}"}
+
+    def _parse_meta(raw):
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except Exception as exc:
+            return {"error": f"metadata_parse_failed: {exc}"}
+
+    async with get_session() as sess:
+        artifact = await get_model_artifact(sess, RESIDUAL_ARTIFACT_NAME)
+    promoted_model_path = residual_model_path()
+    shadow_model_path = residual_shadow_model_path()
+    promoted_meta_path = residual_metadata_path()
+    shadow_meta_path = residual_shadow_metadata_path()
+    return {
+        "promoted_loaded": promoted_model_path.exists(),
+        "promoted_model_path": str(promoted_model_path),
+        "promoted_metadata": _read_meta(promoted_meta_path),
+        "shadow_available": shadow_model_path.exists(),
+        "shadow_model_path": str(shadow_model_path),
+        "shadow_metadata": _read_meta(shadow_meta_path),
+        "postgres_artifact": {
+            "name": RESIDUAL_ARTIFACT_NAME,
+            "available": artifact is not None,
+            "updated_at": artifact.updated_at.isoformat() if artifact and artifact.updated_at else None,
+            "metadata": _parse_meta(artifact.metadata_json if artifact else None),
+        },
+        "rollout": "shadow trains automatically; promoted model is used only after promotion gates pass",
+    }
+
+
 @router.get("/calibration/{city_slug}")
 async def get_city_calibration(city_slug: str):
     async with get_session() as sess:

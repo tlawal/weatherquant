@@ -76,6 +76,9 @@ class Config:
     MAX_ENTRY_PRICE: float = _float("MAX_ENTRY_PRICE", 0.36)
     MAX_SPREAD: float = _float("MAX_SPREAD", 0.04)
     MIN_ORDERBOOK_DEPTH_DOLLARS: float = _float("MIN_ORDERBOOK_DEPTH_DOLLARS", 2000.0)
+    LIVE_CALIBRATION_REFRESH_SECONDS: int = _int("LIVE_CALIBRATION_REFRESH_SECONDS", 21600)
+    LIVE_CALIBRATION_DAYS_BACK: int = _int("LIVE_CALIBRATION_DAYS_BACK", 90)
+    RESIDUAL_ML_SHADOW_TRAIN_SECONDS: int = _int("RESIDUAL_ML_SHADOW_TRAIN_SECONDS", 86400)
 
     # ── Exit Engine ──────────────────────────────────────────────────────────
     QUICK_FLIP_TARGET: float = _float("QUICK_FLIP_TARGET", 0.08)

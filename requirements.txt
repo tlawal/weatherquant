@@ -21,6 +21,7 @@ lxml==5.3.0
 xgboost==2.0.3
 scikit-learn==1.4.2
 pandas
+six>=1.16.0
 netCDF4>=1.7.2
 herbie-data>=2024.8.0
 xarray>=2024.10.0

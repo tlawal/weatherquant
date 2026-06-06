@@ -81,6 +81,15 @@ def predict_remaining_rise(
     temp_slope_3h: float = 0.0,
     avg_peak_timing_mins: float = 960.0,
     day_of_year: int = 80,
+    humidity_pct: float = 50.0,
+    cloud_cover_val: float = 0.0,
+    wind_speed_kt: float = 0.0,
+    wind_gust_kt: float = 0.0,
+    dewpoint_spread_f: float = 10.0,
+    pressure_tendency_3h: float = 0.0,
+    precip_flag: float = 0.0,
+    precip_recent_3h: float = 0.0,
+    regime_score_proxy: float = 0.0,
     unit_mult: float = 1.0,
 ) -> float:
     """
@@ -99,6 +108,15 @@ def predict_remaining_rise(
             "temp_slope_3h": temp_slope_3h,
             "avg_peak_timing_mins": avg_peak_timing_mins,
             "day_of_year": day_of_year,
+            "humidity_pct": humidity_pct,
+            "cloud_cover_val": cloud_cover_val,
+            "wind_speed_kt": wind_speed_kt,
+            "wind_gust_kt": wind_gust_kt,
+            "dewpoint_spread_f": dewpoint_spread_f,
+            "pressure_tendency_3h": pressure_tendency_3h,
+            "precip_flag": precip_flag,
+            "precip_recent_3h": precip_recent_3h,
+            "regime_score_proxy": regime_score_proxy,
         }
         # Construct feature vector in the order the model expects
         ordered_features = _features if _features else list(features.keys())

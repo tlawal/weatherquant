@@ -124,6 +124,17 @@ async def run_all_gates(
             f"GATE_EDGE: true_edge={signal.true_edge:.4f} < min={Config.MIN_TRUE_EDGE}"
         )
 
+    # ── Gate: Market-implied posterior sanity ───────────────────────────────
+    # Signal generation computes this from fresh bid/ask/depth metadata.  Keep
+    # the execution gate aligned so stale signal objects cannot bypass it.
+    if side != "SELL":
+        market_sanity = (signal.reason or {}).get("market_sanity") or {}
+        if market_sanity.get("blocked"):
+            failures.append(
+                market_sanity.get("failure")
+                or "GATE_MARKET_SANITY: blocked by market sanity diagnostics"
+            )
+
     # ── Gate: Market price thresholds ─────────────────────────────────────────
     if signal.mkt_prob >= Config.MAX_ENTRY_PRICE:
         failures.append(

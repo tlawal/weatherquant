@@ -477,6 +477,27 @@ async def job_update_wallet_rankings():
         )
 
 
+async def job_refresh_live_calibrations():
+    """Refresh threshold-survival and per-bucket live calibration materializations."""
+    from backend.modeling.live_calibration import refresh_all_live_calibrations
+
+    summary = await refresh_all_live_calibrations(days_back=Config.LIVE_CALIBRATION_DAYS_BACK)
+    log.info(
+        "live_calibration: refreshed cities=%d samples=%d threshold_rows=%d bucket_rows=%d",
+        summary.get("cities", 0),
+        summary.get("samples", 0),
+        summary.get("threshold_rows", 0),
+        summary.get("bucket_rows", 0),
+    )
+
+
+async def job_train_residual_ml_shadow():
+    """Run residual ML training in shadow mode; promotion remains explicitly gated."""
+    from backend.modeling.ml_trainer import extract_features_and_train
+
+    await asyncio.to_thread(extract_features_and_train)
+
+
 async def job_heartbeat():
     """Write a heartbeat so API server can detect worker liveness."""
     from backend.storage.db import get_session
@@ -540,6 +561,16 @@ def create_scheduler() -> AsyncIOScheduler:
     add(job_auto_redeem,             seconds=43200, name="auto_redeem")  # 12h
     add(job_refresh_station_calibrations, seconds=21600, name="refresh_station_cal")  # 6h
     add(job_refresh_lead_time_skills,     seconds=21600, name="refresh_lead_time_skills")  # 6h
+    add(
+        job_refresh_live_calibrations,
+        seconds=max(3600, Config.LIVE_CALIBRATION_REFRESH_SECONDS),
+        name="refresh_live_calibrations",
+    )
+    add(
+        job_train_residual_ml_shadow,
+        seconds=max(3600, Config.RESIDUAL_ML_SHADOW_TRAIN_SECONDS),
+        name="train_residual_ml_shadow",
+    )
     # M1 Phase 2 — refit BMA mixture weights nightly. Cadence is 24h because
     # weights only meaningfully shift after a few new settled events arrive,
     # and the upstream SourceLeadTimeSkill σᵢ refreshes every 6h. Heavy job

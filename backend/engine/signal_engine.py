@@ -20,7 +20,16 @@ from zoneinfo import ZoneInfo
 from backend.config import Config
 from backend.tz_utils import active_dates_for_city, city_local_date, city_local_now
 from backend.modeling.distribution import edge as compute_edge
-from backend.modeling.settlement import bucket_upper_bound, canonical_bucket_ranges
+from backend.engine.market_sanity import evaluate_market_sanity
+from backend.modeling.live_calibration import (
+    load_live_bucket_diagnostic,
+    load_threshold_survival_calibrator,
+)
+from backend.modeling.settlement import (
+    bucket_upper_bound,
+    canonical_bucket_ranges,
+    find_bucket_idx_for_value,
+)
 from backend.modeling.temperature_model import (
     apply_forecast_source_quality_gates,
     compute_model,
@@ -641,6 +650,11 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
     )
     _settlement_utc = _settlement_local.astimezone(timezone.utc)
     _now_utc = datetime.now(timezone.utc)
+    live_calibration_hour_bucket = max(0, min(23, int(now_local.hour)))
+    live_calibration_floor_idx = -1
+    if observed_high_floor is not None:
+        _floor_idx = find_bucket_idx_for_value(canonical_ranges, observed_high_floor)
+        live_calibration_floor_idx = int(_floor_idx) if _floor_idx is not None else -1
 
     _src_to_obs = {
         "nws": nws_obs, "wu_hourly": wu_hourly_obs, "hrrr": hrrr_obs,
@@ -724,6 +738,35 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         regime_sigma_inflation(_pre_regime.score) if _pre_regime else None
     )
 
+    threshold_survival_calibrator = None
+    threshold_calibration_context: dict = {
+        "context_used": "identity",
+        "city_id": city.id,
+        "station_id": active_station_id,
+        "hour_bucket": live_calibration_hour_bucket,
+        "observed_floor_bucket_idx": live_calibration_floor_idx,
+        "applied": False,
+        "reason": "not_loaded",
+    }
+    try:
+        async with get_session() as cal_sess:
+            threshold_survival_calibrator, threshold_calibration_context = (
+                await load_threshold_survival_calibrator(
+                    cal_sess,
+                    city_id=city.id,
+                    station_id=active_station_id,
+                    hour_bucket=live_calibration_hour_bucket,
+                    observed_floor_bucket_idx=live_calibration_floor_idx,
+                )
+            )
+    except Exception:
+        log.exception("signal: %s — threshold calibration load failed", city.city_slug)
+        threshold_calibration_context = {
+            **threshold_calibration_context,
+            "context_used": "error",
+            "reason": "load_failed",
+        }
+
     # Run temperature model
     model = compute_model(
         nws_high=nws_obs.high_f if nws_obs else None,
@@ -761,9 +804,11 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
             "temp_slope_3h": temp_slope_3h,
             "avg_peak_timing_mins": avg_peak_mins,
             "day_of_year": datetime.now(timezone.utc).timetuple().tm_yday,
+            "regime_score": _pre_regime.score if _pre_regime else 0.0,
         },
         adaptive=adaptive_result,
         latest_weather=_latest_wx,
+        threshold_survival_calibrator=threshold_survival_calibrator,
     )
 
     if model is None:
@@ -796,6 +841,13 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
     model.inputs["regime_sigma_multiplier"] = (
         round(_regime_sigma_mult, 3) if _regime_sigma_mult is not None else None
     )
+    if not model.inputs.get("threshold_calibration"):
+        model.inputs["threshold_calibration"] = threshold_calibration_context
+    elif threshold_calibration_context:
+        model.inputs["threshold_calibration"] = {
+            **threshold_calibration_context,
+            **model.inputs["threshold_calibration"],
+        }
 
     # Use a single session for all DB writes (model snapshot + per-bucket reads/inserts)
     signals: list[BucketSignal] = []
@@ -831,7 +883,8 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
             if i >= len(model.probs):
                 continue
 
-            model_prob = model.probs[i]
+            model_prob_threshold_calibrated = model.probs[i]
+            model_prob = model_prob_threshold_calibrated
 
             # If METAR high already exceeds this bucket's ceiling, probability is 0
             # (the final daily high can only go up, never down)
@@ -889,6 +942,18 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
             spread = mkt_snap.spread
             exec_cost = _execution_cost(spread, ask_depth)
 
+            bucket_live_calibration = await load_live_bucket_diagnostic(
+                sess,
+                city_id=city.id,
+                station_id=active_station_id,
+                hour_bucket=live_calibration_hour_bucket,
+                observed_floor_bucket_idx=live_calibration_floor_idx,
+                bucket_idx=i,
+                prob=model_prob,
+            )
+            if bucket_live_calibration.get("applied"):
+                model_prob = float(bucket_live_calibration["bucket_calibrated_prob"])
+
             # Apply probability calibration (remap based on historical reliability)
             calibrated_prob = remap_probability(model_prob, reliability_bins)
 
@@ -905,6 +970,15 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
                 if mkt_snap.yes_bid is not None
                 else None
             )
+            market_age_s = None
+            fetched_at = getattr(mkt_snap, "fetched_at", None)
+            if fetched_at is not None:
+                if fetched_at.tzinfo is None:
+                    fetched_at = fetched_at.replace(tzinfo=timezone.utc)
+                market_age_s = max(
+                    0.0,
+                    (datetime.now(timezone.utc) - fetched_at.astimezone(timezone.utc)).total_seconds(),
+                )
             posterior_kelly_payload = None
             try:
                 pk = posterior_aware_kelly(
@@ -929,6 +1003,8 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
                 "bucket_idx": i,
                 "label": bucket.label,
                 "model_prob_raw": float(round(model_prob, 4)),
+                "model_prob_threshold_calibrated": float(round(model_prob_threshold_calibrated, 4)),
+                "bucket_live_calibration": bucket_live_calibration,
                 "model_prob_cal": float(round(calibrated_prob, 4)),
                 "mkt_prob": float(round(mkt_prob, 4)),
                 "raw_edge": float(round(raw_edge_buy, 4)),
@@ -939,6 +1015,8 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
                 "posterior_kelly": posterior_kelly_payload,
                 "spread": spread,
                 "ask_depth": ask_depth,
+                "bid_depth": bid_depth,
+                "market_snapshot_age_s": round(market_age_s, 1) if market_age_s is not None else None,
                 "city_state": city_state,
                 "prob_hotter_bucket": round(model.prob_hotter_bucket, 4),
                 "prob_new_high_raw": round(model.prob_new_high_raw, 4),
@@ -962,29 +1040,30 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
                 and posterior_kelly_payload.get("conservative_kelly_f", 0.0) <= 0.0
             ):
                 gate_failures.append("posterior_kelly_no_size")
-            trusted_ref = model.inputs.get("trusted_reference_median")
-            market_sanity_gate = None
+            threshold_calibration = reason.get("threshold_calibration") or {}
             try:
-                trusted_ref_f = float(trusted_ref) if trusted_ref is not None else None
+                threshold_cal_n = (
+                    int(threshold_calibration.get("min_sample_count") or 0)
+                    if threshold_calibration.get("context_used") == "city_station_hour_floor"
+                    else 0
+                )
             except (TypeError, ValueError):
-                trusted_ref_f = None
-            cold_tail_contradicted = (
-                trusted_ref_f is not None
-                and bucket.high_f is not None
-                and bucket.high_f <= trusted_ref_f - 3.0
-                and (bucket.low_f is None or bucket.low_f < trusted_ref_f - 3.0)
+                threshold_cal_n = 0
+            market_sanity = evaluate_market_sanity(
+                model_prob=calibrated_prob,
+                market_prob=mkt_prob,
+                exec_cost=exec_cost,
+                model_true_edge=true_edge,
+                market_snapshot_age_s=market_age_s,
+                spread=spread,
+                bid_depth=bid_depth,
+                ask_depth=ask_depth,
+                min_true_edge=Config.MIN_TRUE_EDGE,
+                threshold_calibration_n=threshold_cal_n,
             )
-            if mkt_prob < 0.02 and model_prob > 0.10 and cold_tail_contradicted:
-                market_sanity_gate = {
-                    "reason": "extreme_market_cold_tail_contradicts_trusted_consensus",
-                    "trusted_reference_median": round(trusted_ref_f, 2),
-                    "bucket_high_f": bucket.high_f,
-                    "model_prob": float(round(model_prob, 4)),
-                    "mkt_prob": float(round(mkt_prob, 4)),
-                }
-                gate_failures.append("market_sanity_tail_disagreement")
-            if market_sanity_gate is not None:
-                reason["market_sanity_gate"] = market_sanity_gate
+            reason["market_sanity"] = market_sanity
+            if market_sanity.get("blocked"):
+                gate_failures.append(market_sanity["failure"])
 
             actionable = (
                 true_edge >= Config.MIN_TRUE_EDGE

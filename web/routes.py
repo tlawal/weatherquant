@@ -926,11 +926,158 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
                     },
                     "why_not_tradable": why_not_tradable,
                     "gate_failures": gate_failures,
+                    "bucket_live_calibration": (
+                        sig_reason.get("bucket_live_calibration")
+                        if isinstance(sig_reason.get("bucket_live_calibration"), dict)
+                        else None
+                    ),
+                    "market_sanity": (
+                        sig_reason.get("market_sanity")
+                        if isinstance(sig_reason.get("market_sanity"), dict)
+                        else None
+                    ),
                     "actionable": actionable,
                 })
 
     model_inputs = json.loads(model.inputs_json) if model and model.inputs_json else {}
     probs_json = json.dumps(json.loads(model.probs_json) if model and model.probs_json else [])
+
+    def _float_or_none(value):
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _read_json_file(path):
+        try:
+            if not path.exists():
+                return None
+            return json.loads(path.read_text())
+        except Exception as exc:
+            return {"error": f"metadata_parse_failed: {exc}"}
+
+    def _residual_ml_status() -> dict:
+        try:
+            from backend.modeling.residual_paths import (
+                residual_metadata_path,
+                residual_model_path,
+                residual_shadow_metadata_path,
+                residual_shadow_model_path,
+            )
+        except Exception as exc:
+            return {
+                "loaded": False,
+                "shadow_available": False,
+                "status": "unavailable",
+                "error": str(exc),
+            }
+
+        promoted_meta_raw = _read_json_file(residual_metadata_path())
+        shadow_meta_raw = _read_json_file(residual_shadow_metadata_path())
+        promoted_meta = promoted_meta_raw if isinstance(promoted_meta_raw, dict) else {}
+        shadow_meta = shadow_meta_raw if isinstance(shadow_meta_raw, dict) else {}
+        loaded = residual_model_path().exists()
+        shadow_available = residual_shadow_model_path().exists()
+        if loaded:
+            status = "promoted"
+        elif shadow_available:
+            status = "shadow"
+        else:
+            status = "fallback"
+        return {
+            "loaded": loaded,
+            "shadow_available": shadow_available,
+            "status": status,
+            "promoted_metadata": promoted_meta,
+            "shadow_metadata": shadow_meta,
+            "test_mae": _float_or_none((promoted_meta or {}).get("test_mae")),
+            "baseline_mae": _float_or_none((promoted_meta or {}).get("baseline_mae")),
+            "rain_subset_mae": _float_or_none((promoted_meta or {}).get("rain_subset_mae")),
+            "shadow_test_mae": _float_or_none((shadow_meta or {}).get("test_mae")),
+            "shadow_baseline_mae": _float_or_none((shadow_meta or {}).get("baseline_mae")),
+            "shadow_rain_subset_mae": _float_or_none((shadow_meta or {}).get("rain_subset_mae")),
+            "promotion_blockers": (
+                (shadow_meta or {}).get("promotion_blockers")
+                or (promoted_meta or {}).get("promotion_blockers")
+                or []
+            ),
+        }
+
+    def _accuracy_status() -> dict:
+        threshold_cal = (
+            model_inputs.get("threshold_calibration")
+            if isinstance(model_inputs, dict) and isinstance(model_inputs.get("threshold_calibration"), dict)
+            else {}
+        )
+        sanity_rows = [
+            row
+            for row in (b.get("market_sanity") for b in buckets_with_signals)
+            if isinstance(row, dict)
+        ]
+        bucket_cal_rows = [
+            row
+            for row in (b.get("bucket_live_calibration") for b in buckets_with_signals)
+            if isinstance(row, dict)
+        ]
+        posterior_edges = [
+            _float_or_none(row.get("posterior_edge"))
+            for row in sanity_rows
+            if _float_or_none(row.get("posterior_edge")) is not None
+        ]
+        weights = [
+            _float_or_none(row.get("weight"))
+            for row in sanity_rows
+            if _float_or_none(row.get("weight")) is not None
+        ]
+        gaps = [
+            _float_or_none(row.get("gap"))
+            for row in sanity_rows
+            if _float_or_none(row.get("gap")) is not None
+        ]
+        threshold_sample_count = (
+            threshold_cal.get("min_sample_count")
+            or threshold_cal.get("max_sample_count")
+            or 0
+        )
+        return {
+            "threshold": {
+                "applied": bool(threshold_cal.get("applied")),
+                "context_used": threshold_cal.get("context_used") or "identity",
+                "sample_count": int(threshold_sample_count or 0),
+                "threshold_count": int(
+                    threshold_cal.get("threshold_count")
+                    or threshold_cal.get("thresholds_applied")
+                    or 0
+                ),
+                "brier_raw": _float_or_none(threshold_cal.get("brier_raw")),
+                "brier_cal": _float_or_none(threshold_cal.get("brier_cal")),
+                "rps_raw": _float_or_none(threshold_cal.get("rps_raw")),
+                "rps_cal": _float_or_none(threshold_cal.get("rps_cal")),
+                "reason": threshold_cal.get("reason"),
+            },
+            "bucket_live": {
+                "rows": len(bucket_cal_rows),
+                "applied_count": sum(1 for row in bucket_cal_rows if row.get("applied")),
+                "max_sample_count": max(
+                    [int(row.get("sample_count") or 0) for row in bucket_cal_rows] or [0]
+                ),
+                "avg_brier": (
+                    sum(_float_or_none(row.get("brier")) or 0.0 for row in bucket_cal_rows if _float_or_none(row.get("brier")) is not None)
+                    / max(1, sum(1 for row in bucket_cal_rows if _float_or_none(row.get("brier")) is not None))
+                ) if bucket_cal_rows else None,
+            },
+            "market_sanity": {
+                "rows": len(sanity_rows),
+                "blocked_count": sum(1 for row in sanity_rows if row.get("blocked")),
+                "max_weight": max(weights) if weights else None,
+                "worst_posterior_edge": min(posterior_edges) if posterior_edges else None,
+                "largest_gap": max(gaps) if gaps else None,
+                "failure": next((row.get("failure") for row in sanity_rows if row.get("failure")), None),
+            },
+            "residual_ml": _residual_ml_status(),
+        }
+
+    accuracy_status = _accuracy_status()
 
     def _age(dt):
         if not dt:
@@ -1620,6 +1767,7 @@ async def city_detail(request: Request, city_slug: str, date: str | None = None)
             "hrrr_hourly_json": json.dumps(hrrr_hourly),
             "adaptive_info": adaptive_info,
             "obs_proximity": obs_proximity,
+            "accuracy_status": accuracy_status,
             "wallet_leaderboard": wallet_leaderboard,
             "smart_money_context": smart_money_context,
             "station_cal": station_cal,

@@ -1055,6 +1055,95 @@
   </div>
 </div>
 
+<!-- ── LIVE ACCURACY CONTROLS ─────────────────────────────────────────────── -->
+{% if accuracy_status %}
+{% set threshold_acc = accuracy_status.threshold %}
+{% set bucket_acc = accuracy_status.bucket_live %}
+{% set sanity_acc = accuracy_status.market_sanity %}
+{% set ml_acc = accuracy_status.residual_ml %}
+<div class="card p-4 mb-6">
+  <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between mb-3">
+    <div>
+      <div class="flex items-center gap-2 flex-wrap">
+        <span class="text-[10px] uppercase tracking-widest font-bold" style="color:var(--text-muted)">Live Accuracy Controls</span>
+        {% if threshold_acc.applied %}
+        <span class="text-[10px] px-2 py-0.5 rounded-full font-bold" style="background:rgba(34,197,94,0.15);color:#86efac">Threshold Calibrated</span>
+        {% else %}
+        <span class="text-[10px] px-2 py-0.5 rounded-full font-bold" style="background:var(--bg-panel);color:var(--text-muted);border:1px solid var(--border)">Identity Threshold</span>
+        {% endif %}
+        {% if sanity_acc.blocked_count and sanity_acc.blocked_count > 0 %}
+        <span class="text-[10px] px-2 py-0.5 rounded-full font-bold" style="background:rgba(239,68,68,0.15);color:#fca5a5">Market Gate Blocking</span>
+        {% else %}
+        <span class="text-[10px] px-2 py-0.5 rounded-full font-bold" style="background:rgba(34,211,238,0.12);color:var(--cyan)">Gate Only</span>
+        {% endif %}
+      </div>
+      <div class="mt-1 text-[10px]" style="color:var(--text-muted)">
+        Threshold probabilities are calibrated before bucket conversion; market sanity only gates auto-entry and does not rewrite displayed model probabilities.
+      </div>
+    </div>
+    <div class="flex gap-2 text-[10px]">
+      <a href="/calibration/threshold?city_slug={{ city.city_slug }}" class="px-2 py-1 rounded border hover:bg-white/5" style="border-color:var(--border);color:var(--cyan)">Threshold diag</a>
+      <a href="/calibration/live-buckets?city_slug={{ city.city_slug }}" class="px-2 py-1 rounded border hover:bg-white/5" style="border-color:var(--border);color:var(--cyan)">Bucket diag</a>
+      <a href="/calibration/residual-ml" class="px-2 py-1 rounded border hover:bg-white/5" style="border-color:var(--border);color:var(--cyan)">ML diag</a>
+    </div>
+  </div>
+
+  <div class="grid grid-cols-1 md:grid-cols-4 gap-3 text-[11px]">
+    <div class="rounded p-3" style="background:var(--bg-panel);border:1px solid var(--border)">
+      <div class="text-[9px] uppercase tracking-widest mb-2" style="color:var(--text-muted)">Threshold Survival</div>
+      <div class="space-y-1 mono">
+        <div class="flex justify-between gap-2"><span style="color:var(--text-muted)">Context</span><span class="text-right">{{ threshold_acc.context_used or "identity" }}</span></div>
+        <div class="flex justify-between gap-2"><span style="color:var(--text-muted)">Sample n</span><span>{{ threshold_acc.sample_count or 0 }}</span></div>
+        <div class="flex justify-between gap-2"><span style="color:var(--text-muted)">Brier</span><span>{% if threshold_acc.brier_raw is not none and threshold_acc.brier_cal is not none %}{{ "%.3f"|format(threshold_acc.brier_raw) }} -> {{ "%.3f"|format(threshold_acc.brier_cal) }}{% else %}—{% endif %}</span></div>
+        <div class="flex justify-between gap-2"><span style="color:var(--text-muted)">RPS</span><span>{% if threshold_acc.rps_raw is not none and threshold_acc.rps_cal is not none %}{{ "%.3f"|format(threshold_acc.rps_raw) }} -> {{ "%.3f"|format(threshold_acc.rps_cal) }}{% else %}—{% endif %}</span></div>
+      </div>
+      {% if threshold_acc.reason %}
+      <div class="mt-2 text-[10px] mono opacity-70">{{ threshold_acc.reason }}</div>
+      {% endif %}
+    </div>
+
+    <div class="rounded p-3" style="background:var(--bg-panel);border:1px solid var(--border)">
+      <div class="text-[9px] uppercase tracking-widest mb-2" style="color:var(--text-muted)">Bucket Live Calibration</div>
+      <div class="space-y-1 mono">
+        <div class="flex justify-between gap-2"><span style="color:var(--text-muted)">Rows</span><span>{{ bucket_acc.rows or 0 }}</span></div>
+        <div class="flex justify-between gap-2"><span style="color:var(--text-muted)">Applied</span><span>{{ bucket_acc.applied_count or 0 }}</span></div>
+        <div class="flex justify-between gap-2"><span style="color:var(--text-muted)">Max n</span><span>{{ bucket_acc.max_sample_count or 0 }}</span></div>
+        <div class="flex justify-between gap-2"><span style="color:var(--text-muted)">Avg Brier</span><span>{% if bucket_acc.avg_brier is not none %}{{ "%.3f"|format(bucket_acc.avg_brier) }}{% else %}—{% endif %}</span></div>
+      </div>
+      <div class="mt-2 text-[10px] opacity-70" style="color:var(--text-muted)">Exact context applies live only when n >= 40; otherwise diagnostic.</div>
+    </div>
+
+    <div class="rounded p-3" style="background:var(--bg-panel);border:1px solid var(--border)">
+      <div class="text-[9px] uppercase tracking-widest mb-2" style="color:var(--text-muted)">Market Sanity Gate</div>
+      <div class="space-y-1 mono">
+        <div class="flex justify-between gap-2"><span style="color:var(--text-muted)">Buckets checked</span><span>{{ sanity_acc.rows or 0 }}</span></div>
+        <div class="flex justify-between gap-2"><span style="color:var(--text-muted)">Blocked</span><span>{{ sanity_acc.blocked_count or 0 }}</span></div>
+        <div class="flex justify-between gap-2"><span style="color:var(--text-muted)">Max weight</span><span>{% if sanity_acc.max_weight is not none %}{{ "%.2f"|format(sanity_acc.max_weight) }}{% else %}—{% endif %}</span></div>
+        <div class="flex justify-between gap-2"><span style="color:var(--text-muted)">Worst post edge</span><span>{% if sanity_acc.worst_posterior_edge is not none %}{{ "%+.1f"|format(sanity_acc.worst_posterior_edge * 100) }}pp{% else %}—{% endif %}</span></div>
+      </div>
+      {% if sanity_acc.failure %}
+      <div class="mt-2 text-[10px] mono break-words" style="color:#fca5a5">{{ sanity_acc.failure }}</div>
+      {% endif %}
+    </div>
+
+    <div class="rounded p-3" style="background:var(--bg-panel);border:1px solid var(--border)">
+      <div class="text-[9px] uppercase tracking-widest mb-2" style="color:var(--text-muted)">Residual ML</div>
+      <div class="space-y-1 mono">
+        <div class="flex justify-between gap-2"><span style="color:var(--text-muted)">Status</span><span>{{ (ml_acc.status or "fallback")|upper }}</span></div>
+        <div class="flex justify-between gap-2"><span style="color:var(--text-muted)">Test MAE</span><span>{% if ml_acc.test_mae is not none %}{{ "%.2f"|format(ml_acc.test_mae) }}°F{% elif ml_acc.shadow_test_mae is not none %}{{ "%.2f"|format(ml_acc.shadow_test_mae) }}°F shadow{% else %}—{% endif %}</span></div>
+        <div class="flex justify-between gap-2"><span style="color:var(--text-muted)">Baseline</span><span>{% if ml_acc.baseline_mae is not none %}{{ "%.2f"|format(ml_acc.baseline_mae) }}°F{% elif ml_acc.shadow_baseline_mae is not none %}{{ "%.2f"|format(ml_acc.shadow_baseline_mae) }}°F shadow{% else %}—{% endif %}</span></div>
+        <div class="flex justify-between gap-2"><span style="color:var(--text-muted)">Rain subset</span><span>{% if ml_acc.rain_subset_mae is not none %}{{ "%.2f"|format(ml_acc.rain_subset_mae) }}°F{% elif ml_acc.shadow_rain_subset_mae is not none %}{{ "%.2f"|format(ml_acc.shadow_rain_subset_mae) }}°F shadow{% else %}—{% endif %}</span></div>
+      </div>
+      {% if ml_acc.promotion_blockers %}
+      <div class="mt-2 text-[10px] mono break-words" style="color:var(--text-muted)">Blocked: {{ ml_acc.promotion_blockers|join(", ") }}</div>
+      {% else %}
+      <div class="mt-2 text-[10px] opacity-70" style="color:var(--text-muted)">Shadow training runs on schedule; promotion remains gated.</div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+{% endif %}
+
 <!-- ── RESOLUTION TRACKING ────────────────────────────────────────────────── -->
 {% if event %}
 <div class="card p-4 mb-6">
@@ -1822,7 +1911,7 @@
       <div id="prob-chart" class="w-full" style="height:300px"></div>
       {% if model and model.inputs and model.inputs.intraday_threshold_shadow %}
       <div class="mt-2 text-[10px] leading-relaxed" style="color:var(--text-muted)">
-        Intraday Threshold is a same-day threshold-crossing model. It estimates P(final high reaches each bucket boundary) from the observed high floor, current temperature, remaining heating, trend, and consensus; live alpha is {{ "%.1f"|format((model.inputs.intraday_threshold_shadow.alpha|default(0)) * 100) }}%. Higher alpha means the displayed model probability has moved away from the legacy daily-high PDF toward the intraday threshold curve.
+        Intraday Threshold is a same-day shadow threshold-crossing model. It estimates P(final high reaches each bucket boundary) from the observed high floor, current temperature, remaining heating, trend, and consensus; live alpha is {{ "%.1f"|format((model.inputs.intraday_threshold_shadow.alpha|default(0)) * 100) }}%. Higher alpha means the displayed model probability has moved away from the legacy daily-high PDF toward the intraday threshold curve.
       </div>
       {% endif %}
 

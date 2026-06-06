@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Callable, Optional
 
 from scipy.stats import norm
 
@@ -25,10 +25,11 @@ class IntradayThresholdResult:
     alpha: float
     mode: str
     features: dict = field(default_factory=dict)
+    calibration: dict = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
-        return {
+        payload = {
             "mode": self.mode,
             "alpha": round(self.alpha, 3),
             "probs": [round(p, 6) for p in self.probs],
@@ -39,6 +40,9 @@ class IntradayThresholdResult:
             "features": self.features,
             "notes": self.notes,
         }
+        if self.calibration:
+            payload["calibration"] = self.calibration
+        return payload
 
 
 def _fmt_threshold(value: float) -> str:
@@ -197,6 +201,7 @@ def predict_intraday_threshold_probabilities(
     trusted_spread: Optional[float] = None,
     forecast_quality: str = "ok",
     lock_regime: bool = False,
+    survival_calibrator: Optional[Callable[[dict[float, float]], tuple[dict[float, float], dict[str, Any]]]] = None,
 ) -> Optional[IntradayThresholdResult]:
     """Estimate same-day bucket probabilities from threshold crossings.
 
@@ -277,6 +282,16 @@ def predict_intraday_threshold_probabilities(
         survival[threshold] = _clamp01(1.0 - float(norm.cdf(threshold, center, threshold_sigma)))
 
     survival = enforce_monotone_survival(survival)
+    calibration_diag: dict[str, Any] = {}
+    if survival_calibrator is not None:
+        try:
+            calibrated_survival, calibration_diag = survival_calibrator(dict(survival))
+            survival = enforce_monotone_survival(calibrated_survival)
+            if calibration_diag.get("applied"):
+                notes.append("threshold_calibration_applied")
+        except Exception:
+            calibration_diag = {"applied": False, "reason": "calibrator_failed"}
+            notes.append("threshold_calibration_failed")
     probs = bucket_probs_from_survival(buckets, survival, observed_high=observed_high)
     if upper_tail_compressed:
         notes.append("upper_tail_future_sigma")
@@ -307,5 +322,6 @@ def predict_intraday_threshold_probabilities(
         alpha=alpha,
         mode="physics_threshold_shadow",
         features=features,
+        calibration=calibration_diag,
         notes=notes,
     )

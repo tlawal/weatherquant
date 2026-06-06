@@ -350,6 +350,76 @@ class SourceLeadTimeSkill(Base):
     city_ref: Mapped[City] = relationship("City", back_populates="source_lead_time_skills")
 
 
+class ThresholdCalibration(Base):
+    """Contextual calibration for intraday threshold survival probabilities."""
+    __tablename__ = "threshold_calibrations"
+    __table_args__ = (
+        UniqueConstraint(
+            "city_id",
+            "station_id",
+            "hour_bucket",
+            "observed_floor_bucket_idx",
+            "threshold_f",
+            name="uq_threshold_cal_context",
+        ),
+        Index("ix_threshold_cal_lookup", "city_id", "station_id", "hour_bucket", "observed_floor_bucket_idx"),
+        Index("ix_threshold_cal_city_hour", "city_id", "hour_bucket"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    city_id: Mapped[int] = mapped_column(Integer, ForeignKey("cities.id"), nullable=False)
+    # Empty string means "all stations" fallback. Avoid NULL in uniqueness keys.
+    station_id: Mapped[str] = mapped_column(String(16), default="", nullable=False)
+    # Local checkpoint hour [0, 23], or -1 for fallback contexts.
+    hour_bucket: Mapped[int] = mapped_column(Integer, nullable=False, default=-1)
+    # Observed-high floor bucket index, or -1 for fallback contexts.
+    observed_floor_bucket_idx: Mapped[int] = mapped_column(Integer, nullable=False, default=-1)
+    threshold_f: Mapped[float] = mapped_column(Float, nullable=False)
+    n_samples: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    brier_raw: Mapped[Optional[float]] = mapped_column(Float)
+    brier_cal: Mapped[Optional[float]] = mapped_column(Float)
+    rps_raw: Mapped[Optional[float]] = mapped_column(Float)
+    rps_cal: Mapped[Optional[float]] = mapped_column(Float)
+    bins_json: Mapped[Optional[str]] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+
+class LiveBucketCalibration(Base):
+    """Per-bucket live reliability by city/station/hour/floor context."""
+    __tablename__ = "live_bucket_calibrations"
+    __table_args__ = (
+        UniqueConstraint(
+            "city_id",
+            "station_id",
+            "hour_bucket",
+            "observed_floor_bucket_idx",
+            "bucket_idx",
+            "prob_bin",
+            name="uq_live_bucket_cal_context",
+        ),
+        Index("ix_live_bucket_cal_lookup", "city_id", "station_id", "hour_bucket", "observed_floor_bucket_idx", "bucket_idx"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    city_id: Mapped[int] = mapped_column(Integer, ForeignKey("cities.id"), nullable=False)
+    station_id: Mapped[str] = mapped_column(String(16), default="", nullable=False)
+    hour_bucket: Mapped[int] = mapped_column(Integer, nullable=False, default=-1)
+    observed_floor_bucket_idx: Mapped[int] = mapped_column(Integer, nullable=False, default=-1)
+    bucket_idx: Mapped[int] = mapped_column(Integer, nullable=False)
+    # 0..9 for [0,10%), ... [90,100%].
+    prob_bin: Mapped[int] = mapped_column(Integer, nullable=False)
+    n_samples: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    hits: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    predicted_mean: Mapped[Optional[float]] = mapped_column(Float)
+    observed_rate: Mapped[Optional[float]] = mapped_column(Float)
+    brier: Mapped[Optional[float]] = mapped_column(Float)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+
 class BMAWeights(Base):
     """M1 Phase 2 — fitted Bayesian Model Averaging mixing weights.
 

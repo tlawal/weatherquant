@@ -95,6 +95,21 @@ def test_city_page_surfaces_obs_proximity_readout():
     assert "Armed" in template
 
 
+def test_city_page_surfaces_live_accuracy_controls():
+    template = Path("web/templates/city.html").read_text()
+
+    assert "Live Accuracy Controls" in template
+    assert "Threshold Survival" in template
+    assert "Bucket Live Calibration" in template
+    assert "Market Sanity Gate" in template
+    assert "Residual ML" in template
+    assert "/calibration/threshold?city_slug={{ city.city_slug }}" in template
+    assert "/calibration/live-buckets?city_slug={{ city.city_slug }}" in template
+    assert "/calibration/residual-ml" in template
+    assert "does not rewrite displayed model probabilities" in template
+    assert "promotion remains gated" in template
+
+
 def test_redemptions_quick_exit_uses_market_sell():
     template = Path("web/templates/redemptions.html").read_text()
 
