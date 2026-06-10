@@ -159,6 +159,42 @@
   NO POSITIONS DETECTED FOR CURRENT FILTER.
 </div>
 
+<!-- Position-anchored limit exit modal -->
+<div id="limit-exit-modal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/70 px-4">
+  <div class="card w-full max-w-lg border border-yellow-500/50 bg-[var(--bg-panel)] p-5 shadow-xl">
+    <div class="flex items-start justify-between gap-3 mb-4">
+      <div>
+        <div class="text-[0.6rem] font-bold uppercase tracking-wider text-yellow-300">Limit Exit</div>
+        <div id="limit-exit-title" class="font-mono text-sm text-gray-200 mt-1">--</div>
+      </div>
+      <button onclick="closeLimitExitModal()" class="px-2 py-1 rounded border border-gray-600 text-gray-300 hover:bg-gray-800" aria-label="Close">×</button>
+    </div>
+    <div id="limit-exit-warning" class="hidden mb-3 rounded border border-yellow-500/40 bg-yellow-950/30 p-2 text-xs font-mono text-yellow-200"></div>
+    <div class="grid grid-cols-2 gap-3 text-xs font-mono mb-4">
+      <label class="space-y-1">
+        <span class="block text-gray-500 uppercase tracking-wider text-[0.58rem]">Qty</span>
+        <input id="limit-exit-qty" type="number" min="0" step="0.01" oninput="updateLimitExitEstimate()" class="w-full rounded bg-black/30 border border-[var(--border)] px-2 py-1 text-gray-100">
+      </label>
+      <label class="space-y-1">
+        <span class="block text-gray-500 uppercase tracking-wider text-[0.58rem]">Limit Price</span>
+        <input id="limit-exit-price" type="number" min="0.01" max="0.99" step="0.001" oninput="updateLimitExitEstimate()" class="w-full rounded bg-black/30 border border-[var(--border)] px-2 py-1 text-gray-100">
+      </label>
+    </div>
+    <div class="rounded border border-[var(--border)] bg-black/20 p-3 text-[0.65rem] font-mono text-gray-400 space-y-1 mb-4">
+      <div class="flex justify-between"><span>Bid / Ask</span><span id="limit-exit-bidask">--</span></div>
+      <div class="flex justify-between"><span>Spread</span><span id="limit-exit-spread">--</span></div>
+      <div class="flex justify-between"><span>Bid Depth</span><span id="limit-exit-depth">--</span></div>
+      <div class="flex justify-between"><span>Snapshot Age</span><span id="limit-exit-age">--</span></div>
+      <div class="flex justify-between"><span>Shadow Flow</span><span id="limit-exit-flow">--</span></div>
+      <div class="flex justify-between text-gray-200 border-t border-[rgba(255,255,255,0.08)] pt-1 mt-1"><span>Estimated Proceeds</span><span id="limit-exit-proceeds">--</span></div>
+    </div>
+    <div class="flex justify-end gap-2">
+      <button onclick="closeLimitExitModal()" class="px-3 py-1.5 rounded text-xs font-bold border border-gray-600 text-gray-300 hover:bg-gray-800">Cancel</button>
+      <button id="limit-exit-submit" onclick="submitLimitExit(this)" class="px-3 py-1.5 rounded text-xs font-bold bg-yellow-400 text-black hover:bg-yellow-300">Submit Limit Exit</button>
+    </div>
+  </div>
+</div>
+
 <style>
 /* Spinner */
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -304,6 +340,8 @@ let SORT_COL = null;   // 'city' | 'entry_time' | 'mark' | 'pnl'
 let SORT_DIR = 'desc';
 let _autoRefreshTimer = null;
 let _actionInProgress = false;
+let LIMIT_EXIT_ROWS = {};
+let LIMIT_EXIT_ACTIVE = null;
 
 const STATUS_LABELS = {
   redeemed:                 {text: 'REDEEMED',              color: 'var(--text-muted)', bg: 'transparent'},
@@ -521,13 +559,37 @@ function actionButtons({evt, b}) {
   const positionId = b.position_id ? Number(b.position_id) : null;
   const journal = positionId ? `<a href="/positions/${positionId}/journal" class="text-[0.58rem] text-cyan-400 hover:underline">Journal</a>` : '';
   const openMarket = `<a href="${marketUrl(evt)}" target="_blank" rel="noopener" class="px-2 py-[2px] rounded text-[0.58rem] font-bold border border-cyan-500/50 text-cyan-300 hover:bg-cyan-900/30">Open Market</a>`;
-  const openCity = city ? `<a href="/city/${city}" class="px-2 py-[2px] rounded text-[0.58rem] font-bold border border-cyan-500/50 text-cyan-300 hover:bg-cyan-900/30">Open City</a>` : openMarket;
+  const dateParam = evt.date_et ? `?date=${encodeURIComponent(evt.date_et)}` : '';
+  const openCity = city ? `<a href="/city/${city}${dateParam}" class="px-2 py-[2px] rounded text-[0.58rem] font-bold border border-cyan-500/50 text-cyan-300 hover:bg-cyan-900/30">Open City</a>` : openMarket;
   const refresh = `<button onclick="loadEvents('live')" class="px-2 py-[2px] rounded text-[0.58rem] font-bold border border-cyan-500/50 text-cyan-300 hover:bg-cyan-900/30">Sync From Wallet</button>`;
   const uma = `<button onclick="loadEvents('onchain')" class="px-2 py-[2px] rounded text-[0.58rem] font-bold border border-yellow-500/50 text-yellow-300 hover:bg-yellow-900/30">Check UMA</button>`;
   const markClosed = positionId ? `<button onclick="markClosed(${positionId}, this)" class="px-2 py-[2px] rounded text-[0.58rem] font-bold border border-red-500/50 text-red-300 hover:bg-red-900/30">Mark Closed</button>` : '';
   const liveBid = Number(b.live_bid || 0);
   const liveSpread = Number(b.live_spread || 0);
+  const liveAsk = Number((b.exit_plan && b.exit_plan.live_ask) || 0);
   const bidDepth = Number((b.exit_plan && b.exit_plan.bid_depth) || 0);
+  const snapshotAge = Number((b.exit_plan && b.exit_plan.snapshot_age_s) || 0);
+  const flow = (b.exit_plan && b.exit_plan.microstructure_shadow) || {};
+  const pending = b.pending_exit_order;
+  const rowKey = positionId ? `pos_${positionId}` : '';
+  if (positionId) {
+    LIMIT_EXIT_ROWS[rowKey] = {
+      positionId,
+      qty,
+      city,
+      date: evt.date_et || '',
+      bucketId,
+      label: b.label || '',
+      liveBid,
+      liveAsk,
+      liveSpread,
+      bidDepth,
+      snapshotAge,
+      flowImbalance: flow.imbalance,
+      toxicityScore: flow.toxicity_score,
+      directionSource: flow.direction_source || 'unavailable'
+    };
+  }
 
   if (b.sync_status === 'missing_on_chain') {
     return `<div class="flex flex-col items-end gap-1">${refresh}${markClosed}${openMarket}${journal}</div>`;
@@ -539,7 +601,13 @@ function actionButtons({evt, b}) {
     return `<div class="flex flex-col items-end gap-1">${uma}${refresh}${openMarket}${journal}</div>`;
   }
   if (evt.status === 'open' && b.tradable !== false) {
-    return `<div class="flex flex-col items-end gap-1"><button onclick="marketSell('${cid}', ${qty}, '${city}', ${bucketId}, ${liveBid}, ${liveSpread}, ${bidDepth}, this)" class="px-2 py-[2px] rounded text-[0.58rem] font-bold border border-red-500/50 text-red-400 hover:bg-red-900/30">Quick Exit</button><a href="/city/${city}" class="px-2 py-[2px] rounded text-[0.58rem] font-bold border border-yellow-500/50 text-yellow-300 hover:bg-yellow-900/30">Limit Exit</a>${openCity}${journal}</div>`;
+    const pendingHtml = pending
+      ? `<div class="text-[0.55rem] text-yellow-300 text-right">SELL ${Number(pending.qty || 0).toFixed(1)} @ $${Number(pending.limit_price || 0).toFixed(3)}<br/><button onclick="cancelExitOrder('${esc(pending.order_id || pending.clob_order_id)}', this)" class="mt-1 px-2 py-[2px] rounded text-[0.58rem] font-bold border border-yellow-500/50 text-yellow-300 hover:bg-yellow-900/30">Cancel</button></div>`
+      : `<button onclick="openLimitExitModal('${rowKey}', this)" class="px-2 py-[2px] rounded text-[0.58rem] font-bold border border-yellow-500/50 text-yellow-300 hover:bg-yellow-900/30">Limit Exit</button>`;
+    const quick = positionId
+      ? `<button onclick="marketSell(${positionId}, ${qty}, ${liveBid}, ${liveSpread}, ${bidDepth}, this)" class="px-2 py-[2px] rounded text-[0.58rem] font-bold border border-red-500/50 text-red-400 hover:bg-red-900/30">Quick Exit</button>`
+      : '';
+    return `<div class="flex flex-col items-end gap-1">${quick}${pendingHtml}${openCity}${journal}</div>`;
   }
   return `<div class="flex flex-col items-end gap-1">${refresh}${openMarket}${journal}</div>`;
 }
@@ -654,6 +722,7 @@ function sectionBlock(title, description, rows, closed=false) {
 function renderSections() {
   const root = document.getElementById('sections-root');
   root.innerHTML = '';
+  LIMIT_EXIT_ROWS = {};
   const flat = _flattenAndSort();
 
   if (flat.length === 0) {
@@ -863,7 +932,115 @@ async function markClosed(positionId, btn) {
   }
 }
 
-async function marketSell(conditionId, qty, citySlug, bucketId, liveBid, spread, bidDepth, btn) {
+function openLimitExitModal(rowKey, btn) {
+  const row = LIMIT_EXIT_ROWS[rowKey];
+  if (!row || !row.positionId) {
+    alert('Exit unavailable: missing position id.');
+    return;
+  }
+  LIMIT_EXIT_ACTIVE = row;
+  const modal = document.getElementById('limit-exit-modal');
+  document.getElementById('limit-exit-title').textContent = `${row.city.toUpperCase()} ${row.date} · ${row.label}`;
+  document.getElementById('limit-exit-qty').value = Number(row.qty || 0).toFixed(2);
+  document.getElementById('limit-exit-price').value = Number(row.liveBid || 0).toFixed(3);
+  document.getElementById('limit-exit-bidask').textContent = `$${Number(row.liveBid || 0).toFixed(3)} / $${Number(row.liveAsk || 0).toFixed(3)}`;
+  document.getElementById('limit-exit-spread').textContent = `${(Number(row.liveSpread || 0) * 100).toFixed(1)}c`;
+  document.getElementById('limit-exit-depth').textContent = `${Number(row.bidDepth || 0).toFixed(1)} shares`;
+  document.getElementById('limit-exit-age').textContent = row.snapshotAge ? `${Math.round(Number(row.snapshotAge))}s` : '--';
+  document.getElementById('limit-exit-flow').textContent = `${row.directionSource || 'unavailable'} · imb ${row.flowImbalance == null ? '--' : Number(row.flowImbalance).toFixed(2)} · tox ${row.toxicityScore == null ? '--' : Number(row.toxicityScore).toFixed(2)}`;
+  const warn = document.getElementById('limit-exit-warning');
+  if (Number(row.snapshotAge || 0) > 90) {
+    warn.textContent = `Orderbook snapshot is ${Math.round(Number(row.snapshotAge))}s old. Refresh live data before submitting if the book may have moved.`;
+    warn.classList.remove('hidden');
+  } else {
+    warn.classList.add('hidden');
+  }
+  updateLimitExitEstimate();
+  modal.classList.remove('hidden');
+  modal.classList.add('flex');
+}
+
+function closeLimitExitModal() {
+  LIMIT_EXIT_ACTIVE = null;
+  const modal = document.getElementById('limit-exit-modal');
+  modal.classList.add('hidden');
+  modal.classList.remove('flex');
+}
+
+function updateLimitExitEstimate() {
+  const qty = Number(document.getElementById('limit-exit-qty').value || 0);
+  const price = Number(document.getElementById('limit-exit-price').value || 0);
+  document.getElementById('limit-exit-proceeds').textContent = fmtUsd(qty * price, 3);
+}
+
+async function submitLimitExit(btn) {
+  const row = LIMIT_EXIT_ACTIVE;
+  if (!row || !row.positionId) return;
+  const qty = Number(document.getElementById('limit-exit-qty').value || 0);
+  const limitPrice = Number(document.getElementById('limit-exit-price').value || 0);
+  if (!(qty > 0)) {
+    alert('Qty must be positive.');
+    return;
+  }
+  if (!(limitPrice >= 0.01 && limitPrice <= 0.99)) {
+    alert('Limit price must be between $0.01 and $0.99.');
+    return;
+  }
+  _actionInProgress = true;
+  btn.disabled = true;
+  const oldText = btn.textContent;
+  btn.textContent = 'Submitting...';
+  try {
+    const data = await apiCall(`/api/positions/${row.positionId}/exit-order`, 'POST', {
+      order_type: 'limit',
+      qty,
+      limit_price: limitPrice,
+    });
+    if (data && (data.status === 'filled' || data.status === 'open' || data.status === 'order_placed' || data.status === 'timeout')) {
+      btn.textContent = 'Submitted';
+      closeLimitExitModal();
+      if (data.warning) alert('Exit submitted: ' + data.warning);
+      setTimeout(() => loadEvents('live'), 1000);
+    } else {
+      alert('Limit exit error: ' + (data?.error || data?.detail || JSON.stringify(data)));
+      btn.textContent = oldText;
+      btn.disabled = false;
+    }
+  } catch (e) {
+    alert('Network error: ' + e.message);
+    btn.textContent = oldText;
+    btn.disabled = false;
+  } finally {
+    _actionInProgress = false;
+  }
+}
+
+async function cancelExitOrder(orderId, btn) {
+  if (!orderId || !confirm('Cancel the pending sell order?')) return;
+  _actionInProgress = true;
+  btn.disabled = true;
+  const oldText = btn.textContent;
+  btn.textContent = '...';
+  try {
+    const data = await apiCall(`/trade/orders/${encodeURIComponent(orderId)}`, 'DELETE');
+    if (data && data.success) {
+      btn.textContent = 'CANCELLED';
+      setTimeout(() => loadEvents('live'), 1000);
+    } else {
+      alert('Cancel failed: ' + (data?.detail || data?.error || JSON.stringify(data)));
+      btn.textContent = oldText;
+      btn.disabled = false;
+    }
+  } catch (e) {
+    alert('Network error: ' + e.message);
+    btn.textContent = oldText;
+    btn.disabled = false;
+  } finally {
+    _actionInProgress = false;
+  }
+}
+
+async function marketSell(positionId, qty, liveBid, spread, bidDepth, btn) {
   const bidLine = liveBid > 0
     ? `Current bid: $${Number(liveBid).toFixed(3)} · spread ${(Number(spread || 0) * 100).toFixed(1)}¢ · depth ${Number(bidDepth || 0).toFixed(1)} shares`
     : 'Current bid unavailable; this will attempt a FOK market sell against the live book.';
@@ -873,10 +1050,7 @@ async function marketSell(conditionId, qty, citySlug, bucketId, liveBid, spread,
   const origText = btn.textContent;
   btn.textContent = '...';
   try {
-    const data = await apiCall('/trade', 'POST', {
-      city_slug: citySlug,
-      bucket_id: bucketId,
-      side: 'sell_yes',
+    const data = await apiCall(`/api/positions/${positionId}/exit-order`, 'POST', {
       qty: qty,
       order_type: 'market',
     });

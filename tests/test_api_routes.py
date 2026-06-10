@@ -405,6 +405,154 @@ def test_manual_trade_hydrates_signal_reason_and_bucket_idx(tmp_path, monkeypatc
     _run(engine.dispose())
 
 
+def test_position_exit_order_resolves_position_and_caps_qty(tmp_path, monkeypatch):
+    engine, session_factory = _run(_setup_test_db(tmp_path, monkeypatch))
+    city = _run(_create_city(session_factory))
+    captured = {}
+
+    async def seed():
+        async with session_factory() as session:
+            event = Event(city_id=city.id, date_et="2026-06-11", status="ok")
+            session.add(event)
+            await session.flush()
+            bucket = Bucket(
+                event_id=event.id,
+                bucket_idx=7,
+                label="Will the highest temperature in Atlanta be 90-91F?",
+                low_f=90.0,
+                high_f=91.0,
+                yes_token_id="yes-token",
+                condition_id="cond-token",
+            )
+            session.add(bucket)
+            await session.flush()
+            pos = Position(
+                bucket_id=bucket.id,
+                side="yes",
+                net_qty=5.0,
+                avg_cost=0.35,
+                entry_type="MANUAL",
+                entry_strategy="manual_scalp",
+            )
+            session.add(pos)
+            session.add(Signal(
+                bucket_id=bucket.id,
+                model_prob=0.60,
+                mkt_prob=0.45,
+                raw_edge=0.15,
+                exec_cost=0.02,
+                true_edge=0.13,
+                reason_json='{"regime_score":0.2}',
+            ))
+            session.add(MarketSnapshot(
+                bucket_id=bucket.id,
+                yes_bid=0.44,
+                yes_ask=0.46,
+                yes_mid=0.45,
+                yes_bid_depth=20.0,
+                yes_ask_depth=20.0,
+                spread=0.02,
+            ))
+            await session.commit()
+            await session.refresh(pos)
+            return pos.id, bucket.id
+
+    class FakeClob:
+        can_trade = True
+
+        async def get_balance(self):
+            return 10.0
+
+    async def fake_execute_signal(signal, *args, **kwargs):
+        captured["signal"] = signal
+        captured["kwargs"] = kwargs
+        return {"status": "open", "order_id": 123}
+
+    position_id, bucket_id = _run(seed())
+    monkeypatch.setattr("backend.ingestion.polymarket_clob.get_clob", lambda: FakeClob())
+    monkeypatch.setattr("backend.execution.trader.execute_signal", fake_execute_signal)
+
+    res = _run(api_routes.position_exit_order(
+        position_id,
+        api_routes.PositionExitOrderRequest(order_type="limit", qty=50.0, limit_price=0.44),
+        actor="test",
+    ))
+
+    assert res["status"] == "open"
+    assert res["warning"] == "Capped qty to current DB position (5)"
+    assert captured["signal"].bucket_id == bucket_id
+    assert captured["signal"].event_id
+    assert captured["kwargs"]["side"] == "SELL"
+    assert captured["kwargs"]["order_type"] == "limit"
+    assert captured["kwargs"]["limit_price_override"] == 0.44
+    assert captured["kwargs"]["qty_override"] == 5.0
+
+    _run(engine.dispose())
+
+
+def test_position_exit_order_rejects_invalid_limit_price():
+    try:
+        _run(api_routes.position_exit_order(
+            1,
+            api_routes.PositionExitOrderRequest(order_type="limit", qty=1.0, limit_price=1.05),
+            actor="test",
+        ))
+    except Exception as exc:
+        assert getattr(exc, "status_code", None) == 400
+        assert "limit_price" in str(getattr(exc, "detail", ""))
+    else:
+        raise AssertionError("expected HTTPException")
+
+
+def test_position_exit_order_blocks_duplicate_pending_sell(tmp_path, monkeypatch):
+    engine, session_factory = _run(_setup_test_db(tmp_path, monkeypatch))
+    city = _run(_create_city(session_factory))
+
+    async def seed():
+        async with session_factory() as session:
+            event = Event(city_id=city.id, date_et="2026-06-11", status="ok")
+            session.add(event)
+            await session.flush()
+            bucket = Bucket(
+                event_id=event.id,
+                bucket_idx=7,
+                label="Will the highest temperature in Atlanta be 90-91F?",
+                yes_token_id="yes-token",
+                condition_id="cond-token",
+            )
+            session.add(bucket)
+            await session.flush()
+            pos = Position(bucket_id=bucket.id, side="yes", net_qty=5.0, avg_cost=0.35)
+            session.add(pos)
+            session.add(Order(
+                bucket_id=bucket.id,
+                side="sell_yes",
+                qty=5.0,
+                limit_price=0.44,
+                status="pending",
+                clob_order_id="clob-1",
+            ))
+            await session.commit()
+            await session.refresh(pos)
+            return pos.id
+
+    position_id = _run(seed())
+
+    try:
+        _run(api_routes.position_exit_order(
+            position_id,
+            api_routes.PositionExitOrderRequest(order_type="limit", qty=5.0, limit_price=0.44),
+            actor="test",
+        ))
+    except Exception as exc:
+        assert getattr(exc, "status_code", None) == 409
+        assert getattr(exc, "detail", {}).get("error") == "duplicate_pending_sell_order"
+    else:
+        raise AssertionError("expected HTTPException")
+
+    _run(engine.dispose())
+
+
 def test_quick_exit_market_sell_does_not_submit_near_par_limit(tmp_path, monkeypatch):
     engine, session_factory = _run(_setup_test_db(tmp_path, monkeypatch))
     city = _run(_create_city(session_factory))

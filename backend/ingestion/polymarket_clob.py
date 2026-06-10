@@ -7,6 +7,7 @@ Handles authentication, order books, limit order placement.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass, field
 from typing import Optional
@@ -14,6 +15,13 @@ from typing import Optional
 import aiohttp
 
 from backend.config import Config
+from backend.execution.microstructure import (
+    book_imbalance,
+    depth_at_touch,
+    depth_within_cents,
+    parse_book_levels,
+    simulate_fill,
+)
 from backend.tz_utils import city_local_date
 from backend.storage.db import get_session
 from backend.storage.repos import (
@@ -43,6 +51,21 @@ class BucketOrderBook:
     yes_bid_depth: float = 0.0
     yes_ask_depth: float = 0.0
     spread: Optional[float] = None
+    bid_levels: list[dict[str, float]] = field(default_factory=list)
+    ask_levels: list[dict[str, float]] = field(default_factory=list)
+    bid_depth_1c: float = 0.0
+    ask_depth_1c: float = 0.0
+    bid_depth_3c: float = 0.0
+    ask_depth_3c: float = 0.0
+    bid_depth_5c: float = 0.0
+    ask_depth_5c: float = 0.0
+    book_imbalance: Optional[float] = None
+    sell_5_avg_price: Optional[float] = None
+    sell_10_avg_price: Optional[float] = None
+    sell_25_avg_price: Optional[float] = None
+    buy_5_avg_price: Optional[float] = None
+    buy_10_avg_price: Optional[float] = None
+    buy_25_avg_price: Optional[float] = None
     fetched_ok: bool = False
 
 
@@ -118,19 +141,33 @@ class CLOBClient:
         if not data:
             return ob
 
-        bids = data.get("bids") or []
-        asks = data.get("asks") or []
+        bids = parse_book_levels(data.get("bids") or [], side="bid")
+        asks = parse_book_levels(data.get("asks") or [], side="ask")
+        ob.bid_levels = bids[:25]
+        ob.ask_levels = asks[:25]
 
         if bids:
-            ob.yes_bid = max(float(b.get("price", 0)) for b in bids)
-            ob.yes_bid_depth = sum(float(b.get("size", 0)) for b in bids if float(b.get("price", 0)) >= ob.yes_bid)
+            ob.yes_bid = bids[0]["price"]
+            ob.yes_bid_depth = depth_at_touch(bids)
+            ob.bid_depth_1c = depth_within_cents(bids, side="bid", cents=1)
+            ob.bid_depth_3c = depth_within_cents(bids, side="bid", cents=3)
+            ob.bid_depth_5c = depth_within_cents(bids, side="bid", cents=5)
         if asks:
-            ob.yes_ask = min(float(a.get("price", 0)) for a in asks if float(a.get("price", 0)) > 0)
-            ob.yes_ask_depth = sum(float(a.get("size", 0)) for a in asks if float(a.get("price", 0)) <= (ob.yes_ask or 999))
+            ob.yes_ask = asks[0]["price"]
+            ob.yes_ask_depth = depth_at_touch(asks)
+            ob.ask_depth_1c = depth_within_cents(asks, side="ask", cents=1)
+            ob.ask_depth_3c = depth_within_cents(asks, side="ask", cents=3)
+            ob.ask_depth_5c = depth_within_cents(asks, side="ask", cents=5)
 
         if ob.yes_bid and ob.yes_ask:
             ob.yes_mid = round((ob.yes_bid + ob.yes_ask) / 2, 4)
             ob.spread = round(ob.yes_ask - ob.yes_bid, 4)
+        ob.book_imbalance = book_imbalance(ob.bid_depth_5c, ob.ask_depth_5c)
+        for size in (5, 10, 25):
+            sell = simulate_fill(bids, size)
+            buy = simulate_fill(asks, size)
+            setattr(ob, f"sell_{size}_avg_price", sell.avg_price)
+            setattr(ob, f"buy_{size}_avg_price", buy.avg_price)
 
         ob.fetched_ok = True
         return ob
@@ -490,6 +527,21 @@ async def fetch_clob_orderbooks(clob: CLOBClient) -> None:
                     "yes_bid_depth": ob.yes_bid_depth,
                     "yes_ask_depth": ob.yes_ask_depth,
                     "spread": ob.spread,
+                    "bid_levels_json": json.dumps(ob.bid_levels[:10]),
+                    "ask_levels_json": json.dumps(ob.ask_levels[:10]),
+                    "bid_depth_1c": ob.bid_depth_1c,
+                    "ask_depth_1c": ob.ask_depth_1c,
+                    "bid_depth_3c": ob.bid_depth_3c,
+                    "ask_depth_3c": ob.ask_depth_3c,
+                    "bid_depth_5c": ob.bid_depth_5c,
+                    "ask_depth_5c": ob.ask_depth_5c,
+                    "book_imbalance": ob.book_imbalance,
+                    "sell_5_avg_price": ob.sell_5_avg_price,
+                    "sell_10_avg_price": ob.sell_10_avg_price,
+                    "sell_25_avg_price": ob.sell_25_avg_price,
+                    "buy_5_avg_price": ob.buy_5_avg_price,
+                    "buy_10_avg_price": ob.buy_10_avg_price,
+                    "buy_25_avg_price": ob.buy_25_avg_price,
                 })
                 # Brief pause between token fetches
                 await asyncio.sleep(0.3)
@@ -497,8 +549,9 @@ async def fetch_clob_orderbooks(clob: CLOBClient) -> None:
     # Batch-insert all snapshots in a single session/transaction
     async with get_session() as sess:
         for snap_data in snapshots_to_insert:
-            await insert_market_snapshot(sess, **snap_data)
+            await insert_market_snapshot(sess, commit=False, **snap_data)
         await update_heartbeat(sess, "fetch_clob", success=True)
+        await sess.commit()
 
 
 # Global singleton — set by main.py startup

@@ -13,11 +13,12 @@ import logging
 import math
 import statistics
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
 
 from backend.config import Config
+from backend.execution.microstructure import rolling_mid_volatility
 from backend.tz_utils import active_dates_for_city, city_local_date, city_local_now
 from backend.modeling.distribution import edge as compute_edge
 from backend.engine.market_sanity import evaluate_market_sanity
@@ -57,10 +58,12 @@ from backend.storage.repos import (
     get_event,
     get_latest_successful_forecast,
     get_latest_market_snapshot,
+    get_latest_market_flow_features_bulk,
     get_latest_metar,
     get_latest_model_snapshot,
     get_lead_skills_for_city,
     get_recent_model_snapshots,
+    get_market_snapshots_for_bucket,
     get_resolution_high_metar,
     get_station_calibration,
     get_station_profile,
@@ -271,6 +274,29 @@ def _execution_cost(spread: Optional[float], ask_depth: float) -> float:
     else:
         slippage = 0.025  # thin market, high impact
     return float(round(half_spread + slippage, 4))
+
+
+def _execution_cost_from_snapshot(mkt_snap) -> float:
+    """Prefer executable book-sweep cost over a static spread/depth proxy."""
+    fallback = _execution_cost(
+        getattr(mkt_snap, "spread", None),
+        getattr(mkt_snap, "yes_ask_depth", 0.0) or 0.0,
+    )
+    mid = getattr(mkt_snap, "yes_mid", None)
+    avg_buy = (
+        getattr(mkt_snap, "buy_10_avg_price", None)
+        or getattr(mkt_snap, "buy_5_avg_price", None)
+        or getattr(mkt_snap, "yes_ask", None)
+    )
+    try:
+        if mid is None or avg_buy is None:
+            return fallback
+        sweep_cost = max(0.0, float(avg_buy) - float(mid))
+        if not math.isfinite(sweep_cost):
+            return fallback
+        return float(round(max(0.001, sweep_cost), 4))
+    except (TypeError, ValueError):
+        return fallback
 
 
 async def run_signal_engine() -> list[BucketSignal]:
@@ -875,6 +901,12 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         # σ inflation could flow through compute_model. Reuse the result for
         # downstream Kelly multiplier + per-bucket telemetry.
         _regime = _pre_regime
+        bucket_ids = [bucket.id for bucket in buckets]
+        flow_map = await get_latest_market_flow_features_bulk(
+            sess,
+            bucket_ids,
+            window_minutes=15,
+        )
 
         if city_state == "resolved":
             log.info(
@@ -945,7 +977,41 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
             ask_depth = mkt_snap.yes_ask_depth or 0.0
             bid_depth = mkt_snap.yes_bid_depth or 0.0
             spread = mkt_snap.spread
-            exec_cost = _execution_cost(spread, ask_depth)
+            exec_cost = _execution_cost_from_snapshot(mkt_snap)
+            try:
+                recent_market_snaps = await get_market_snapshots_for_bucket(
+                    sess,
+                    bucket.id,
+                    since=datetime.now(timezone.utc).replace(microsecond=0) - timedelta(minutes=30),
+                    limit=120,
+                )
+                micro_vol_30m = rolling_mid_volatility(recent_market_snaps)
+            except Exception:
+                log.debug("signal: market micro-vol lookup failed for bucket %s", bucket.id, exc_info=True)
+                micro_vol_30m = 0.0
+            flow = flow_map.get(bucket.id)
+            microstructure_shadow = {
+                "enabled": True,
+                "decision_impact": "shadow_only",
+                "book_imbalance": getattr(mkt_snap, "book_imbalance", None),
+                "bid_depth_1c": getattr(mkt_snap, "bid_depth_1c", None),
+                "ask_depth_1c": getattr(mkt_snap, "ask_depth_1c", None),
+                "bid_depth_3c": getattr(mkt_snap, "bid_depth_3c", None),
+                "ask_depth_3c": getattr(mkt_snap, "ask_depth_3c", None),
+                "bid_depth_5c": getattr(mkt_snap, "bid_depth_5c", None),
+                "ask_depth_5c": getattr(mkt_snap, "ask_depth_5c", None),
+                "sim_buy_10_avg_price": getattr(mkt_snap, "buy_10_avg_price", None),
+                "sim_sell_10_avg_price": getattr(mkt_snap, "sell_10_avg_price", None),
+                "micro_vol_30m": micro_vol_30m,
+                "flow_window_minutes": getattr(flow, "window_minutes", None),
+                "flow_signed_net_notional": getattr(flow, "signed_net_notional", None),
+                "flow_imbalance": getattr(flow, "imbalance", None),
+                "vpin": getattr(flow, "vpin", None),
+                "toxicity_score": getattr(flow, "toxicity_score", None),
+                "direction_source": getattr(flow, "direction_source", "unavailable"),
+                "direction_confidence": getattr(flow, "direction_confidence", 0.0),
+                "computed_at": flow.computed_at.isoformat() if flow and flow.computed_at else None,
+            }
 
             bucket_live_calibration = await load_live_bucket_diagnostic(
                 sess,
@@ -1026,6 +1092,7 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
                 "ask_depth": ask_depth,
                 "bid_depth": bid_depth,
                 "market_snapshot_age_s": round(market_age_s, 1) if market_age_s is not None else None,
+                "microstructure_shadow": microstructure_shadow,
                 "city_state": city_state,
                 "prob_hotter_bucket": round(model.prob_hotter_bucket, 4),
                 "prob_new_high_raw": round(model.prob_new_high_raw, 4),

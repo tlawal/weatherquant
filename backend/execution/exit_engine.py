@@ -35,6 +35,7 @@ from backend.storage.repos import (
     get_station_profile,
 )
 from backend.engine.signal_engine import run_signal_engine, BucketSignal
+from backend.execution.microstructure import dynamic_trailing_distance, rolling_mid_volatility
 from backend.execution.trader import execute_signal, normalize_limit_price_for_clob
 from backend.execution.obs_proximity import evaluate_obs_proximity_exit, normalize_observation_minutes
 from backend.tz_utils import city_local_now
@@ -215,14 +216,19 @@ async def _record_ev(bucket_id: int, ev_at_bid: float, yes_bid: float | None,
         await sess.commit()
 
 
-def _edge_decay_triggered(bucket_id: int) -> bool:
+def _edge_decay_triggered(
+    bucket_id: int,
+    *,
+    required_runs: int | None = None,
+    threshold: float | None = None,
+) -> bool:
     """True if the last EDGE_DECAY_DEBOUNCE_RUNS recorded EVs are all <= threshold."""
     hist = _ev_cache.get(bucket_id, [])
-    n = Config.EDGE_DECAY_DEBOUNCE_RUNS
+    n = required_runs or Config.EDGE_DECAY_DEBOUNCE_RUNS
     if len(hist) < n:
         return False
     recent = hist[-n:]
-    return all(e <= Config.EDGE_DECAY_THRESHOLD for e in recent)
+    return all(e <= (threshold if threshold is not None else Config.EDGE_DECAY_THRESHOLD) for e in recent)
 
 
 def _safe_float(value, default: float | None = None) -> float | None:
@@ -397,21 +403,83 @@ def _edge_decay_diagnostics(pos, signal: BucketSignal, entry_decision: dict) -> 
     return diagnostics
 
 
+def _signal_regime_score(signal: BucketSignal) -> float:
+    reason = signal.reason or {}
+    return float(max(0.0, min(1.0, _safe_float(signal.regime_score, _safe_float(reason.get("regime_score"), 0.0)) or 0.0)))
+
+
+def _signal_microstructure_shadow(signal: BucketSignal) -> dict:
+    reason = signal.reason or {}
+    shadow = reason.get("microstructure_shadow")
+    return shadow if isinstance(shadow, dict) else {}
+
+
+def _edge_decay_dynamic_params(signal: BucketSignal) -> dict:
+    regime_score = _signal_regime_score(signal)
+    shadow = _signal_microstructure_shadow(signal)
+    micro_vol_30m = _safe_float(shadow.get("micro_vol_30m"), 0.0) or 0.0
+    toxicity = _safe_float(shadow.get("toxicity_score"), 0.0) or 0.0
+    required_runs = Config.EDGE_DECAY_DEBOUNCE_RUNS
+    noisy = regime_score >= 0.65 or micro_vol_30m >= 0.025 or toxicity >= 0.65
+    if noisy:
+        required_runs += 1
+    required_runs = min(4, max(Config.EDGE_DECAY_DEBOUNCE_RUNS, required_runs))
+    return {
+        "regime_score": round(regime_score, 4),
+        "micro_vol_30m": round(micro_vol_30m, 6),
+        "toxicity_score": round(toxicity, 4),
+        "required_runs": required_runs,
+        "required_ev_drop": Config.EDGE_DECAY_MIN_EV_DROP * (1.0 + 0.33 * regime_score),
+        "required_model_prob_drop": Config.EDGE_DECAY_MIN_MODEL_PROB_DROP * (1.0 + 0.50 * regime_score),
+        "required_source_temp_deterioration_f": Config.EDGE_DECAY_MIN_SOURCE_TEMP_DETERIORATION_F * (1.0 + 0.33 * regime_score),
+    }
+
+
+async def _market_micro_vol_30m(bucket_id: int, signal: BucketSignal) -> float:
+    shadow = _signal_microstructure_shadow(signal)
+    embedded = _safe_float(shadow.get("micro_vol_30m"))
+    if embedded is not None:
+        return embedded
+    try:
+        from backend.storage.repos import get_market_snapshots_for_bucket
+        async with get_session() as sess:
+            snaps = await get_market_snapshots_for_bucket(
+                sess,
+                bucket_id,
+                since=datetime.now(timezone.utc) - timedelta(minutes=30),
+                limit=120,
+            )
+        return rolling_mid_volatility(snaps)
+    except Exception:
+        log.debug("exit: micro-vol lookup failed for bucket %s", bucket_id, exc_info=True)
+        return 0.0
+
+
 def _edge_decay_exit_allowed(pos, signal: BucketSignal, age_s: float, bid: float) -> tuple[bool, dict]:
     """Return whether EV deterioration is strong enough to trigger EDGE_DECAY."""
     entry_decision = _load_entry_decision(pos)
     diagnostics = _edge_decay_diagnostics(pos, signal, entry_decision)
+    dynamic = _edge_decay_dynamic_params(signal)
     diagnostics["threshold"] = Config.EDGE_DECAY_THRESHOLD
-    diagnostics["required_min_drop"] = Config.EDGE_DECAY_MIN_EV_DROP
+    diagnostics["base_required_runs"] = Config.EDGE_DECAY_DEBOUNCE_RUNS
+    diagnostics["required_runs"] = dynamic["required_runs"]
+    diagnostics["regime_score"] = dynamic["regime_score"]
+    diagnostics["micro_vol_30m"] = dynamic["micro_vol_30m"]
+    diagnostics["toxicity_score"] = dynamic["toxicity_score"]
+    diagnostics["required_min_drop"] = round(dynamic["required_ev_drop"], 6)
     diagnostics["required_entry_min_ev"] = Config.EDGE_DECAY_ENTRY_MIN_EV
     diagnostics["require_model_deterioration"] = Config.EDGE_DECAY_REQUIRE_MODEL_DETERIORATION
-    diagnostics["required_model_prob_drop"] = Config.EDGE_DECAY_MIN_MODEL_PROB_DROP
-    diagnostics["required_source_temp_deterioration_f"] = Config.EDGE_DECAY_MIN_SOURCE_TEMP_DETERIORATION_F
+    diagnostics["required_model_prob_drop"] = round(dynamic["required_model_prob_drop"], 6)
+    diagnostics["required_source_temp_deterioration_f"] = round(dynamic["required_source_temp_deterioration_f"], 6)
+    diagnostics["recent_ev_at_bid"] = [
+        round(e, 6)
+        for e in _ev_cache.get(pos.bucket_id, [])[-dynamic["required_runs"]:]
+    ]
 
     if signal.ev_at_bid is None:
         diagnostics["blocked_reason"] = "missing_current_ev_at_bid"
         return False, diagnostics
-    if not _edge_decay_triggered(pos.bucket_id):
+    if not _edge_decay_triggered(pos.bucket_id, required_runs=dynamic["required_runs"]):
         diagnostics["blocked_reason"] = "ev_not_debounced"
         return False, diagnostics
     if bid < Config.EDGE_DECAY_MIN_BID:
@@ -448,14 +516,14 @@ def _edge_decay_exit_allowed(pos, signal: BucketSignal, age_s: float, bid: float
         if not is_manual_scalp:
             diagnostics["blocked_reason"] = "manual_strategy_exempt"
             return False, diagnostics
-        if ev_drop < Config.EDGE_DECAY_MIN_EV_DROP:
+        if ev_drop < dynamic["required_ev_drop"]:
             diagnostics["blocked_reason"] = "manual_ev_not_worse_by_min_drop"
             return False, diagnostics
     else:
         if entry_ev < Config.EDGE_DECAY_ENTRY_MIN_EV:
             diagnostics["blocked_reason"] = "auto_entry_ev_below_min"
             return False, diagnostics
-        if ev_drop < Config.EDGE_DECAY_MIN_EV_DROP:
+        if ev_drop < dynamic["required_ev_drop"]:
             diagnostics["blocked_reason"] = "auto_ev_not_worse_by_min_drop"
             return False, diagnostics
 
@@ -464,8 +532,8 @@ def _edge_decay_exit_allowed(pos, signal: BucketSignal, age_s: float, bid: float
         diagnostics.get("max_source_forecast_deterioration_f"), 0.0
     ) or 0.0
     model_deteriorated = (
-        model_prob_drop >= Config.EDGE_DECAY_MIN_MODEL_PROB_DROP
-        or source_temp_deterioration >= Config.EDGE_DECAY_MIN_SOURCE_TEMP_DETERIORATION_F
+        model_prob_drop >= dynamic["required_model_prob_drop"]
+        or source_temp_deterioration >= dynamic["required_source_temp_deterioration_f"]
     )
     diagnostics["model_deteriorated"] = model_deteriorated
     if Config.EDGE_DECAY_REQUIRE_MODEL_DETERIORATION and not model_deteriorated:
@@ -685,7 +753,7 @@ async def _run_exit_cascade_for_position(
                 signal.city_slug, pos.net_qty,
             )
         else:
-            recent = _ev_cache.get(pos.bucket_id, [])[-Config.EDGE_DECAY_DEBOUNCE_RUNS:]
+            recent = _ev_cache.get(pos.bucket_id, [])[-int(edge_decay_diag.get("required_runs") or Config.EDGE_DECAY_DEBOUNCE_RUNS):]
             log.info(
                 "exit: EDGE_DECAY %s — ev_at_bid deteriorated from %s to %.4f "
                 "(drop=%s, recent=%s, age_s=%d). Selling %.1f shares at bid=%.3f.",
@@ -868,8 +936,27 @@ async def _run_exit_cascade_for_position(
         }
 
     # ── Update trailing stop high-water mark ──
-    # Ratchet up max_bid_seen and trailing stop on every cycle
+    # Ratchet using a regime/micro-vol aware distance instead of a fixed 5c.
+    micro_vol_30m = await _market_micro_vol_30m(pos.bucket_id, signal)
+    regime_score = _signal_regime_score(signal)
+    trail_distance = dynamic_trailing_distance(
+        micro_vol_30m,
+        regime_score,
+        tier2_exited=bool(pos.tier_2_exited),
+    )
+    trail_diag = {
+        "trail_distance": trail_distance,
+        "micro_vol_30m": micro_vol_30m,
+        "regime_score": regime_score,
+        "previous_stop": pos.trailing_stop_price,
+        "max_bid_seen": pos.max_bid_seen,
+        "tier2_exited": bool(pos.tier_2_exited),
+    }
     if bid > (pos.max_bid_seen or 0.0):
+        new_stop = (
+            max(bid - trail_distance, pos.trailing_stop_price or 0.0)
+            if pos.tier_1_exited else None
+        )
         async with get_session() as sess:
             from sqlalchemy import update
             import backend.storage.models as m
@@ -877,10 +964,12 @@ async def _run_exit_cascade_for_position(
                 update(m.Position).where(m.Position.bucket_id == pos.bucket_id)
                 .values(
                     max_bid_seen=bid,
-                    trailing_stop_price=max(bid - 0.05, pos.trailing_stop_price or 0.0) if pos.tier_1_exited else None,
+                    trailing_stop_price=new_stop,
                 )
             )
             await sess.commit()
+        trail_diag["new_stop"] = new_stop
+        trail_diag["max_bid_seen"] = bid
 
     # ── 3. PROFIT — Tiered partial exits + trailing stop ──
     tier_1_target = pos.avg_cost + 0.08  # +8¢ → sell 50%
@@ -896,9 +985,10 @@ async def _run_exit_cascade_for_position(
                      signal.city_slug, tier_1_qty, bid, pos.avg_cost)
             return {"level": "PROFIT", "price": bid, "reason": "tier_1_50pct",
                     "qty_override": tier_1_qty,
+                    "diagnostics": {"trailing": {**trail_diag, "trigger_reason": "tier_1_init"}},
                     "post_exit_update": {"tier_1_exited": True,
                                           "moon_bag_qty": round(original_qty * 0.25, 2),
-                                          "trailing_stop_price": bid - 0.05,
+                                          "trailing_stop_price": bid - dynamic_trailing_distance(micro_vol_30m, regime_score, tier2_exited=False),
                                           "max_bid_seen": bid}}
 
     # Tier 2: Sell 25% at +15¢
@@ -910,7 +1000,15 @@ async def _run_exit_cascade_for_position(
                      signal.city_slug, tier_2_qty, bid)
             return {"level": "PROFIT", "price": bid, "reason": "tier_2_25pct",
                     "qty_override": tier_2_qty,
-                    "post_exit_update": {"tier_2_exited": True}}
+                    "diagnostics": {"trailing": {**trail_diag, "trigger_reason": "tier_2_tighten"}},
+                    "post_exit_update": {
+                        "tier_2_exited": True,
+                        "trailing_stop_price": max(
+                            bid - dynamic_trailing_distance(micro_vol_30m, regime_score, tier2_exited=True),
+                            pos.trailing_stop_price or 0.0,
+                        ),
+                        "max_bid_seen": max(bid, pos.max_bid_seen or 0.0),
+                    }}
 
     # Trailing stop: After Tier 1, if bid drops below trailing stop, exit non-moon portion
     if pos.tier_1_exited and pos.trailing_stop_price and bid < pos.trailing_stop_price:
@@ -919,7 +1017,8 @@ async def _run_exit_cascade_for_position(
             log.info("exit: PROFIT Trailing-Stop %s — bid %.3f < stop %.3f. Selling %.1f shares.",
                      signal.city_slug, bid, pos.trailing_stop_price, trailing_qty)
             return {"level": "PROFIT", "price": bid, "reason": "trailing_stop",
-                    "qty_override": trailing_qty}
+                    "qty_override": trailing_qty,
+                    "diagnostics": {"trailing": {**trail_diag, "trigger_reason": "stop_crossed", "trigger_price": bid}}}
 
     # Legacy quick-flip for positions that haven't been initialized with tiers
     if not pos.tier_1_exited and not pos.original_qty:

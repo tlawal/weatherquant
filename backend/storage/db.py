@@ -250,6 +250,45 @@ async def init_db() -> None:
     await _run_ddl("ALTER TABLE forecast_obs ADD COLUMN raw_payload_hash VARCHAR(64)")
     await _run_ddl("CREATE INDEX IF NOT EXISTS ix_forecast_city_date_source_ts ON forecast_obs (city_id, date_et, source, fetched_at)")
 
+    # market_snapshots — raw depth + book-sweep slippage features
+    await _run_ddl("ALTER TABLE market_snapshots ADD COLUMN bid_levels_json TEXT")
+    await _run_ddl("ALTER TABLE market_snapshots ADD COLUMN ask_levels_json TEXT")
+    await _run_ddl("ALTER TABLE market_snapshots ADD COLUMN bid_depth_1c FLOAT")
+    await _run_ddl("ALTER TABLE market_snapshots ADD COLUMN ask_depth_1c FLOAT")
+    await _run_ddl("ALTER TABLE market_snapshots ADD COLUMN bid_depth_3c FLOAT")
+    await _run_ddl("ALTER TABLE market_snapshots ADD COLUMN ask_depth_3c FLOAT")
+    await _run_ddl("ALTER TABLE market_snapshots ADD COLUMN bid_depth_5c FLOAT")
+    await _run_ddl("ALTER TABLE market_snapshots ADD COLUMN ask_depth_5c FLOAT")
+    await _run_ddl("ALTER TABLE market_snapshots ADD COLUMN book_imbalance FLOAT")
+    await _run_ddl("ALTER TABLE market_snapshots ADD COLUMN sell_5_avg_price FLOAT")
+    await _run_ddl("ALTER TABLE market_snapshots ADD COLUMN sell_10_avg_price FLOAT")
+    await _run_ddl("ALTER TABLE market_snapshots ADD COLUMN sell_25_avg_price FLOAT")
+    await _run_ddl("ALTER TABLE market_snapshots ADD COLUMN buy_5_avg_price FLOAT")
+    await _run_ddl("ALTER TABLE market_snapshots ADD COLUMN buy_10_avg_price FLOAT")
+    await _run_ddl("ALTER TABLE market_snapshots ADD COLUMN buy_25_avg_price FLOAT")
+
+    await _run_ddl("""
+        CREATE TABLE IF NOT EXISTS market_flow_features (
+            id SERIAL PRIMARY KEY,
+            bucket_id INTEGER NOT NULL REFERENCES buckets(id),
+            computed_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+            window_minutes INTEGER NOT NULL DEFAULT 15,
+            signed_net_notional FLOAT NOT NULL DEFAULT 0.0,
+            buy_notional FLOAT NOT NULL DEFAULT 0.0,
+            sell_notional FLOAT NOT NULL DEFAULT 0.0,
+            imbalance FLOAT NOT NULL DEFAULT 0.0,
+            vpin FLOAT NOT NULL DEFAULT 0.0,
+            toxicity_score FLOAT NOT NULL DEFAULT 0.0,
+            top_wallet_weighted_flow FLOAT NOT NULL DEFAULT 0.0,
+            lead_lag_seconds FLOAT,
+            direction_source VARCHAR(32) NOT NULL DEFAULT 'unavailable',
+            direction_confidence FLOAT NOT NULL DEFAULT 0.0,
+            raw_json TEXT
+        )
+    """)
+    await _run_ddl("CREATE INDEX IF NOT EXISTS ix_flow_bucket_ts ON market_flow_features (bucket_id, computed_at)")
+    await _run_ddl("CREATE INDEX IF NOT EXISTS ix_flow_bucket_window_ts ON market_flow_features (bucket_id, window_minutes, computed_at)")
+
     # orders
     await _run_ddl("ALTER TABLE orders ADD COLUMN signal_id INTEGER")
     await _run_ddl("ALTER TABLE orders ADD COLUMN gates_json TEXT")

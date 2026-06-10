@@ -78,6 +78,23 @@ def test_edge_decay_isolated_per_bucket():
     assert ee._edge_decay_triggered(bucket_id=999) is False  # untracked bucket
 
 
+def test_edge_decay_dynamic_params_require_four_runs_in_volatile_regime():
+    signal = _make_signal()
+    signal.reason = {
+        "regime_score": 0.70,
+        "microstructure_shadow": {"micro_vol_30m": 0.03, "toxicity_score": 0.10},
+    }
+    params = ee._edge_decay_dynamic_params(signal)
+    n = Config.EDGE_DECAY_DEBOUNCE_RUNS
+    ee._ev_cache[signal.bucket_id] = [Config.EDGE_DECAY_THRESHOLD - 0.01] * n
+
+    assert params["required_runs"] == 4
+    assert ee._edge_decay_triggered(signal.bucket_id, required_runs=params["required_runs"]) is False
+    ee._ev_cache[signal.bucket_id].append(Config.EDGE_DECAY_THRESHOLD - 0.01)
+    assert ee._edge_decay_triggered(signal.bucket_id, required_runs=params["required_runs"]) is True
+    assert params["required_ev_drop"] > Config.EDGE_DECAY_MIN_EV_DROP
+
+
 # ── Cascade integration tests (Phase A6) ────────────────────────────────
 # Exercise _run_exit_cascade_for_position end-to-end with the new EDGE_DECAY
 # gate and the EV-corroboration suppression on URGENT. Plumbing for DB lookups

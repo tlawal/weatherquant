@@ -26,6 +26,7 @@ from backend.storage.models import (
     Fill,
     ForecastObs,
     MarketContextSnapshot,
+    MarketFlowFeature,
     MarketSnapshot,
     MadisObs,
     MetarObs,
@@ -784,10 +785,19 @@ async def get_lead_skills_for_city(
 
 # ─── Market Snapshots ─────────────────────────────────────────────────────────
 
-async def insert_market_snapshot(session: AsyncSession, **kwargs) -> MarketSnapshot:
+async def insert_market_snapshot(
+    session: AsyncSession,
+    *,
+    commit: bool = True,
+    **kwargs,
+) -> MarketSnapshot:
     snap = MarketSnapshot(**kwargs)
     session.add(snap)
-    await session.commit()
+    if commit:
+        await session.commit()
+        await session.refresh(snap)
+    else:
+        await session.flush()
     return snap
 
 
@@ -860,6 +870,59 @@ async def get_market_snapshots_for_event(
         q = q.where(MarketSnapshot.fetched_at >= since)
     result = await session.execute(q)
     return list(result.scalars().all())
+
+
+# ─── Shadow Market Flow Features ─────────────────────────────────────────────
+
+async def insert_market_flow_feature(
+    session: AsyncSession,
+    *,
+    commit: bool = True,
+    **kwargs,
+) -> MarketFlowFeature:
+    clean_kwargs = {
+        key: value
+        for key, value in kwargs.items()
+        if hasattr(MarketFlowFeature, key)
+    }
+    row = MarketFlowFeature(**clean_kwargs)
+    session.add(row)
+    if commit:
+        await session.commit()
+        await session.refresh(row)
+    else:
+        await session.flush()
+    return row
+
+
+async def get_latest_market_flow_features_bulk(
+    session: AsyncSession,
+    bucket_ids: list[int],
+    *,
+    window_minutes: int | None = None,
+) -> dict[int, MarketFlowFeature]:
+    if not bucket_ids:
+        return {}
+    filters = [MarketFlowFeature.bucket_id.in_(bucket_ids)]
+    if window_minutes is not None:
+        filters.append(MarketFlowFeature.window_minutes == window_minutes)
+    sub = (
+        select(
+            MarketFlowFeature.bucket_id,
+            func.max(MarketFlowFeature.computed_at).label("max_ts"),
+        )
+        .where(*filters)
+        .group_by(MarketFlowFeature.bucket_id)
+        .subquery()
+    )
+    result = await session.execute(
+        select(MarketFlowFeature).join(
+            sub,
+            (MarketFlowFeature.bucket_id == sub.c.bucket_id)
+            & (MarketFlowFeature.computed_at == sub.c.max_ts),
+        ).where(*filters)
+    )
+    return {row.bucket_id: row for row in result.scalars().all()}
 
 
 # ─── Wallet Stats ─────────────────────────────────────────────────────────────
@@ -1608,6 +1671,27 @@ async def get_open_orders(session: AsyncSession) -> list[Order]:
         select(Order).where(Order.status.in_(["pending", "open"]))
     )
     return list(result.scalars().all())
+
+
+async def get_open_sell_orders_for_buckets(
+    session: AsyncSession,
+    bucket_ids: list[int],
+) -> dict[int, list[Order]]:
+    if not bucket_ids:
+        return {}
+    result = await session.execute(
+        select(Order)
+        .where(
+            Order.bucket_id.in_(bucket_ids),
+            Order.side.in_(["sell_yes", "sell_no"]),
+            Order.status.in_(["pending", "open", "retrying"]),
+        )
+        .order_by(Order.created_at.desc())
+    )
+    grouped: dict[int, list[Order]] = {}
+    for order in result.scalars().all():
+        grouped.setdefault(order.bucket_id, []).append(order)
+    return grouped
 
 
 async def insert_fill(session: AsyncSession, **kwargs) -> Fill:

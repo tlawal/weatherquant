@@ -89,6 +89,7 @@ class MarketRef:
     city_slug: str
     date: str
     condition_id: str
+    bucket_id: int | None = None
     market_slug: str | None = None
     bucket_idx: int | None = None
     bucket_label: str | None = None
@@ -982,6 +983,7 @@ async def _discover_market_refs_for_city(
                 city_slug=city.city_slug,
                 date=event.date_et,
                 condition_id=bucket.condition_id,
+                bucket_id=bucket.id,
                 market_slug=event.gamma_slug,
                 bucket_idx=bucket.bucket_idx,
                 bucket_label=bucket.label,
@@ -1037,7 +1039,9 @@ async def update_wallet_rankings(
         bulk_upsert_wallet_skill_scores,
         bulk_upsert_wallet_stats,
         bulk_upsert_wallet_trades,
+        insert_market_flow_feature,
     )
+    from backend.execution.microstructure import compute_shadow_flow_features
     from backend.tz_utils import city_local_date
 
     adapter = adapter or PolymarketDataApiTradeAdapter()
@@ -1083,6 +1087,37 @@ async def update_wallet_rankings(
                 if (market := market_by_condition.get(trade.condition_id)) is not None
             ]
             await bulk_upsert_wallet_trades(sess, trade_rows)
+            now_utc = datetime.now(timezone.utc)
+            for market in market_refs:
+                if not market.bucket_id:
+                    continue
+                market_trades = [
+                    trade for trade in trades
+                    if trade.condition_id == market.condition_id
+                ]
+                for window_minutes in (5, 15, 60):
+                    features = compute_shadow_flow_features(
+                        market_trades,
+                        as_of=now_utc,
+                        window_minutes=window_minutes,
+                    )
+                    await insert_market_flow_feature(
+                        sess,
+                        commit=False,
+                        bucket_id=market.bucket_id,
+                        computed_at=now_utc,
+                        window_minutes=window_minutes,
+                        signed_net_notional=features["signed_net_notional"],
+                        buy_notional=features["buy_notional"],
+                        sell_notional=features["sell_notional"],
+                        imbalance=features["imbalance"],
+                        vpin=features["vpin"],
+                        toxicity_score=features["toxicity_score"],
+                        top_wallet_weighted_flow=features["top_wallet_weighted_flow"],
+                        direction_source=features["direction_source"],
+                        direction_confidence=features["direction_confidence"],
+                        raw_json=json.dumps(features, default=str),
+                    )
             await bulk_upsert_wallet_market_exposures(
                 sess,
                 [exposure.to_db_kwargs() for exposure in exposures],

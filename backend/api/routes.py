@@ -1380,7 +1380,12 @@ async def _build_redemptions_payload(
     """
     from sqlalchemy import select
     from backend.storage.models import Bucket, City, Event, ExitEvent, Position
-    from backend.storage.repos import get_all_station_calibrations, get_heartbeat
+    from backend.storage.repos import (
+        get_all_station_calibrations,
+        get_heartbeat,
+        get_latest_market_flow_features_bulk,
+        get_open_sell_orders_for_buckets,
+    )
 
     total_t0 = time.perf_counter()
     db_t0 = time.perf_counter()
@@ -1402,6 +1407,8 @@ async def _build_redemptions_payload(
         bucket_ids = [bucket.id for _, bucket, _, _ in pos_rows]
         position_ids = [pos.id for pos, _, _, _ in pos_rows if pos.id]
         snap_map = await get_latest_market_snapshots_bulk(sess, bucket_ids)
+        flow_map = await get_latest_market_flow_features_bulk(sess, bucket_ids, window_minutes=15)
+        pending_sell_orders = await get_open_sell_orders_for_buckets(sess, bucket_ids)
         sig_map = await get_latest_signals_for_buckets(sess, bucket_ids)
         exit_events_by_pos: dict[int, list[ExitEvent]] = {}
         if position_ids:
@@ -1473,6 +1480,7 @@ async def _build_redemptions_payload(
         api_pos = api_pos_by_cid.get(cid)
         api_price = api_price_by_cid.get(cid, 0.0)
         snap = snap_map.get(bucket.id)
+        flow = flow_map.get(bucket.id)
         sig = sig_map.get(bucket.id)
         sig_reason = {}
         if sig and sig.reason_json:
@@ -1607,7 +1615,24 @@ async def _build_redemptions_payload(
             "spread": live_spread,
             "bid_depth": _float_or_zero(snap.yes_bid_depth) if snap else 0.0,
             "ask_depth": _float_or_zero(snap.yes_ask_depth) if snap else 0.0,
+            "book_imbalance": getattr(snap, "book_imbalance", None) if snap else None,
+            "sim_sell_10_avg_price": getattr(snap, "sell_10_avg_price", None) if snap else None,
+            "sim_buy_10_avg_price": getattr(snap, "buy_10_avg_price", None) if snap else None,
             "snapshot_age_s": _age_seconds(snap.fetched_at) if snap else None,
+            "microstructure_shadow": {
+                "decision_impact": "shadow_only",
+                "window_minutes": getattr(flow, "window_minutes", None),
+                "signed_net_notional": getattr(flow, "signed_net_notional", None),
+                "buy_notional": getattr(flow, "buy_notional", None),
+                "sell_notional": getattr(flow, "sell_notional", None),
+                "imbalance": getattr(flow, "imbalance", None),
+                "vpin": getattr(flow, "vpin", None),
+                "toxicity_score": getattr(flow, "toxicity_score", None),
+                "top_wallet_weighted_flow": getattr(flow, "top_wallet_weighted_flow", None),
+                "direction_source": getattr(flow, "direction_source", "unavailable"),
+                "direction_confidence": getattr(flow, "direction_confidence", 0.0),
+                "computed_at": flow.computed_at.isoformat() if flow and flow.computed_at else None,
+            },
             "observed_high_f": observed_high,
             "bucket_lock_status": "winner" if is_winner else ("resolved_other_bucket" if evt.winning_bucket_idx is not None else event_status),
             "sell_now_pnl": round(sell_now_pnl, 4) if sell_now_pnl is not None else None,
@@ -1674,6 +1699,19 @@ async def _build_redemptions_payload(
             pos_qty = _float_or_zero(pos.net_qty)
             avg_cost = _float_or_zero(pos.avg_cost)
 
+        pending_exit = None
+        pending_rows = pending_sell_orders.get(bucket.id, [])
+        if pending_rows:
+            order = pending_rows[0]
+            pending_exit = {
+                "order_id": order.id,
+                "clob_order_id": order.clob_order_id,
+                "status": order.status,
+                "qty": order.qty,
+                "limit_price": order.limit_price,
+                "created_at": order.created_at.isoformat() if order.created_at else None,
+            }
+
         event_payload["buckets"].append({
             "bucket_idx": bucket.bucket_idx,
             "bucket_id": bucket.id,
@@ -1693,6 +1731,7 @@ async def _build_redemptions_payload(
             "on_chain_determined": on_chain_determined,
             "exit_strategy": exit_strategy,
             "exit_plan": exit_plan,
+            "pending_exit_order": pending_exit,
             "exit_events": exit_events_payload,
             "entry_decision": entry_decision,
             "entry_type": pos.entry_type,
@@ -2396,12 +2435,146 @@ async def get_wallet_balance():
     }
 
 
+@router.get("/api/automation/readiness")
+async def automation_readiness():
+    """Read-only automation checklist for the 24h clean soak gate."""
+    from sqlalchemy import select
+    from backend.ingestion.polymarket_clob import get_clob
+    from backend.modeling.residual_tracker import is_ml_model_loaded
+    from backend.storage.models import Bucket, City, Event, ExitEvent, Position
+    from backend.storage.repos import (
+        get_all_heartbeats,
+        get_latest_market_flow_features_bulk,
+        get_latest_market_snapshots_bulk,
+        get_open_sell_orders_for_buckets,
+    )
+
+    now = datetime.now(timezone.utc)
+    clob = get_clob()
+    balance = None
+    if clob and clob.can_trade:
+        try:
+            balance = await clob.get_balance()
+        except Exception:
+            balance = None
+
+    async with get_session() as sess:
+        arming = await get_arming_state(sess)
+        heartbeats = await get_all_heartbeats(sess)
+        rows = (await sess.execute(
+            select(Position, Bucket, Event, City)
+            .join(Bucket, Position.bucket_id == Bucket.id)
+            .join(Event, Bucket.event_id == Event.id)
+            .join(City, Event.city_id == City.id)
+            .where(Position.net_qty > 0)
+        )).all()
+        bucket_ids = [bucket.id for _, bucket, _, _ in rows]
+        snap_map = await get_latest_market_snapshots_bulk(sess, bucket_ids)
+        flow_map = await get_latest_market_flow_features_bulk(sess, bucket_ids, window_minutes=15)
+        pending_sells = await get_open_sell_orders_for_buckets(sess, bucket_ids)
+        last_exit_failure = (await sess.execute(
+            select(ExitEvent)
+            .where(ExitEvent.reason_json.ilike("%failed%"))
+            .order_by(ExitEvent.ts.desc())
+            .limit(1)
+        )).scalar_one_or_none()
+
+    stale_positions = []
+    for pos, bucket, event, city in rows:
+        snap = snap_map.get(bucket.id)
+        age_s = _age_seconds(snap.fetched_at) if snap and snap.fetched_at else None
+        stale = age_s is None or age_s > 180
+        if stale:
+            stale_positions.append({
+                "position_id": pos.id,
+                "bucket_id": bucket.id,
+                "city_slug": city.city_slug,
+                "date_et": event.date_et,
+                "snapshot_age_s": age_s,
+            })
+
+    pending_payload = []
+    for orders in pending_sells.values():
+        for order in orders:
+            pending_payload.append({
+                "order_id": order.id,
+                "clob_order_id": order.clob_order_id,
+                "bucket_id": order.bucket_id,
+                "status": order.status,
+                "qty": order.qty,
+                "limit_price": order.limit_price,
+            })
+
+    flow_ages = []
+    for flow in flow_map.values():
+        if flow.computed_at:
+            ts = flow.computed_at if flow.computed_at.tzinfo else flow.computed_at.replace(tzinfo=timezone.utc)
+            flow_ages.append((now - ts.astimezone(timezone.utc)).total_seconds())
+    missing_flow_count = max(0, len(bucket_ids) - len(flow_map))
+    stale_flow_count = missing_flow_count + sum(1 for age in flow_ages if age > 900)
+    checks = {
+        "disarmed_for_soak": (arming.state if arming else "DISARMED") != "ARMED",
+        "clob_can_trade": bool(clob and clob.can_trade),
+        "balance_ready": balance is not None,
+        "residual_ml_loaded": bool(is_ml_model_loaded()),
+        "scheduler_heartbeats_present": bool(heartbeats),
+        "no_stale_held_snapshots": len(stale_positions) == 0,
+        "no_pending_sell_orders": len(pending_payload) == 0,
+        "shadow_microstructure_fresh": stale_flow_count == 0,
+    }
+    go_live_ready = all(checks.values()) and bool(rows)
+    return {
+        "as_of": now.isoformat(),
+        "arming_state": arming.state if arming else "DISARMED",
+        "auto_trading_should_remain_disarmed": True,
+        "go_live_ready_after_24h_soak": go_live_ready,
+        "checks": checks,
+        "clob": {
+            "available": clob is not None,
+            "can_trade": bool(clob and clob.can_trade),
+            "balance": round(balance, 4) if balance is not None else None,
+        },
+        "heartbeats": [
+            {
+                "job_name": hb.job_name,
+                "last_run_at": hb.last_run_at.isoformat() if hb.last_run_at else None,
+                "last_success_at": hb.last_success_at.isoformat() if hb.last_success_at else None,
+                "error_count": hb.error_count,
+                "last_error": hb.last_error,
+            }
+            for hb in sorted(heartbeats, key=lambda item: item.job_name)
+        ],
+        "stale_positions": stale_positions,
+        "pending_sell_orders": pending_payload,
+        "last_exit_failure": {
+            "ts": last_exit_failure.ts.isoformat() if last_exit_failure and last_exit_failure.ts else None,
+            "position_id": last_exit_failure.position_id if last_exit_failure else None,
+            "bucket_id": last_exit_failure.bucket_id if last_exit_failure else None,
+            "reason": last_exit_failure.trigger_reason if last_exit_failure else None,
+        } if last_exit_failure else None,
+        "shadow_microstructure": {
+            "markets_with_features": len(flow_map),
+            "missing_count": missing_flow_count,
+            "stale_count": stale_flow_count,
+            "freshness_max_age_s": round(max(flow_ages), 1) if flow_ages else None,
+        },
+    }
+
+
 # ─── Live Orderbook ──────────────────────────────────────────────────────────
 
 @router.get("/api/orderbook/{city_slug}/{bucket_idx}")
 async def get_orderbook(city_slug: str, bucket_idx: int, date_et: str | None = None):
     """Live orderbook + balance for the trading panel."""
+    from backend.execution.microstructure import (
+        book_imbalance,
+        depth_at_touch,
+        depth_within_cents,
+        parse_book_levels,
+        simulate_fill,
+    )
     from backend.ingestion.polymarket_clob import get_clob
+    from backend.storage.repos import get_latest_market_flow_features_bulk
 
     async with get_session() as sess:
         city = await _get_city_or_404(sess, city_slug)
@@ -2437,29 +2610,15 @@ async def get_orderbook(city_slug: str, bucket_idx: int, date_et: str | None = N
     yes_ask_depth = 0.0
 
     if raw_book:
-        raw_bids = raw_book.get("bids") or []
-        raw_asks = raw_book.get("asks") or []
-
-        for b in raw_bids:
-            price = float(b.get("price", 0))
-            size = float(b.get("size", 0))
-            if price > 0:
-                bids.append({"price": price, "size": size})
-        for a in raw_asks:
-            price = float(a.get("price", 0))
-            size = float(a.get("size", 0))
-            if price > 0:
-                asks.append({"price": price, "size": size})
-
-        bids.sort(key=lambda x: x["price"], reverse=True)
-        asks.sort(key=lambda x: x["price"])
+        bids = parse_book_levels(raw_book.get("bids") or [], side="bid")
+        asks = parse_book_levels(raw_book.get("asks") or [], side="ask")
 
         if bids:
             yes_bid = bids[0]["price"]
-            yes_bid_depth = sum(b["size"] for b in bids if b["price"] >= yes_bid)
+            yes_bid_depth = depth_at_touch(bids)
         if asks:
             yes_ask = asks[0]["price"]
-            yes_ask_depth = sum(a["size"] for a in asks if a["price"] <= yes_ask)
+            yes_ask_depth = depth_at_touch(asks)
 
     spread = round(yes_ask - yes_bid, 4) if (yes_ask and yes_bid) else None
     yes_mid = round((yes_ask + yes_bid) / 2, 4) if (yes_ask and yes_bid) else None
@@ -2467,6 +2626,15 @@ async def get_orderbook(city_slug: str, bucket_idx: int, date_et: str | None = N
     # Also fetch latest stored signal for model info
     async with get_session() as sess:
         sig = await get_latest_market_snapshot(sess, bucket.id)
+        flow = (await get_latest_market_flow_features_bulk(
+            sess,
+            [bucket.id],
+            window_minutes=15,
+        )).get(bucket.id)
+    sell_10 = simulate_fill(bids, 10)
+    buy_10 = simulate_fill(asks, 10)
+    bid_depth_5c = depth_within_cents(bids, side="bid", cents=5)
+    ask_depth_5c = depth_within_cents(asks, side="ask", cents=5)
 
     return {
         "bucket_idx": bucket_idx,
@@ -2480,11 +2648,31 @@ async def get_orderbook(city_slug: str, bucket_idx: int, date_et: str | None = N
         "spread": spread,
         "yes_bid_depth": round(yes_bid_depth, 2),
         "yes_ask_depth": round(yes_ask_depth, 2),
+        "bid_depth_1c": depth_within_cents(bids, side="bid", cents=1),
+        "ask_depth_1c": depth_within_cents(asks, side="ask", cents=1),
+        "bid_depth_3c": depth_within_cents(bids, side="bid", cents=3),
+        "ask_depth_3c": depth_within_cents(asks, side="ask", cents=3),
+        "bid_depth_5c": bid_depth_5c,
+        "ask_depth_5c": ask_depth_5c,
+        "book_imbalance": book_imbalance(bid_depth_5c, ask_depth_5c),
+        "sim_sell_10_avg_price": sell_10.avg_price,
+        "sim_buy_10_avg_price": buy_10.avg_price,
         "bids": bids[:10],
         "asks": asks[:10],
         "balance": round(balance, 2) if balance is not None else None,
         "stored_ask": sig.yes_ask if sig else None,
         "stored_bid": sig.yes_bid if sig else None,
+        "microstructure_shadow": {
+            "decision_impact": "shadow_only",
+            "window_minutes": getattr(flow, "window_minutes", None),
+            "signed_net_notional": getattr(flow, "signed_net_notional", None),
+            "imbalance": getattr(flow, "imbalance", None),
+            "vpin": getattr(flow, "vpin", None),
+            "toxicity_score": getattr(flow, "toxicity_score", None),
+            "direction_source": getattr(flow, "direction_source", "unavailable"),
+            "direction_confidence": getattr(flow, "direction_confidence", 0.0),
+            "computed_at": flow.computed_at.isoformat() if flow and flow.computed_at else None,
+        },
     }
 
 
@@ -2498,6 +2686,12 @@ class ManualTradeRequest(BaseModel):
     qty: Optional[float] = None  # None = auto-size
     limit_price: Optional[float] = None
     order_type: str = "limit"  # "limit" | "market"
+
+
+class PositionExitOrderRequest(BaseModel):
+    order_type: str = "limit"  # "limit" | "market"
+    qty: Optional[float] = None
+    limit_price: Optional[float] = None
 
 
 async def _notify_late_manual_fill_if_synced(
@@ -2608,6 +2802,195 @@ async def _retry_late_manual_fill_alert(
         )
         if sent:
             return
+
+
+async def _bucket_signal_from_state(sess, *, city, event, bucket, city_slug: str):
+    """Build a manual/actionable BucketSignal from latest stored signal/book."""
+    from backend.engine.signal_engine import BucketSignal
+    from backend.storage.repos import get_latest_signal_for_bucket, get_latest_market_snapshot
+
+    sig_row = await get_latest_signal_for_bucket(sess, bucket.id)
+    mkt_snap = await get_latest_market_snapshot(sess, bucket.id)
+
+    signal_reason: dict = {}
+    gate_failures: list[str] = []
+    if sig_row and sig_row.reason_json:
+        try:
+            parsed_reason = json.loads(sig_row.reason_json)
+            if isinstance(parsed_reason, dict):
+                signal_reason = parsed_reason
+        except (TypeError, ValueError, json.JSONDecodeError):
+            signal_reason = {}
+    if sig_row and sig_row.gate_failures_json:
+        try:
+            parsed_failures = json.loads(sig_row.gate_failures_json)
+            if isinstance(parsed_failures, list):
+                gate_failures = [str(x) for x in parsed_failures]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            gate_failures = []
+    if sig_row:
+        signal_reason.setdefault("signal_id", sig_row.id)
+        signal_reason.setdefault("model_snapshot_id", sig_row.model_snapshot_id)
+        signal_reason.setdefault(
+            "signal_computed_at",
+            sig_row.computed_at.isoformat() if sig_row.computed_at else None,
+        )
+    if mkt_snap:
+        signal_reason.setdefault("market_snapshot_id", mkt_snap.id)
+        signal_reason.setdefault(
+            "market_snapshot_at",
+            mkt_snap.fetched_at.isoformat() if mkt_snap.fetched_at else None,
+        )
+
+    model_prob = sig_row.model_prob if sig_row else 0.5
+    mkt_prob = (
+        mkt_snap.yes_mid
+        if mkt_snap and mkt_snap.yes_mid is not None
+        else (sig_row.mkt_prob if sig_row else 0.5)
+    )
+    exec_cost = sig_row.exec_cost if sig_row else 0.02
+    raw_edge = sig_row.raw_edge if sig_row else model_prob - mkt_prob
+    true_edge = sig_row.true_edge if sig_row else raw_edge - exec_cost
+    yes_bid_val = mkt_snap.yes_bid if mkt_snap else None
+    return BucketSignal(
+        city_slug=city_slug,
+        city_display=city.display_name,
+        unit=getattr(city, "unit", "F"),
+        event_id=event.id,
+        bucket_id=bucket.id,
+        bucket_idx=bucket.bucket_idx,
+        label=bucket.label or f"Bucket {bucket.bucket_idx}",
+        low_f=bucket.low_f,
+        high_f=bucket.high_f,
+        model_prob=model_prob,
+        mkt_prob=mkt_prob,
+        raw_edge=raw_edge,
+        exec_cost=exec_cost,
+        true_edge=true_edge,
+        ev_per_share=model_prob - mkt_prob,
+        ev_at_bid=(model_prob - yes_bid_val) if yes_bid_val is not None else None,
+        yes_bid=yes_bid_val,
+        yes_ask=mkt_snap.yes_ask if mkt_snap else None,
+        yes_mid=mkt_prob,
+        spread=mkt_snap.spread if mkt_snap else None,
+        yes_ask_depth=mkt_snap.yes_ask_depth if mkt_snap else 0.0,
+        yes_bid_depth=mkt_snap.yes_bid_depth if mkt_snap else 0.0,
+        reason=signal_reason,
+        gate_failures=gate_failures,
+        actionable=True,
+        regime_score=signal_reason.get("regime_score"),
+        regime_label=signal_reason.get("regime_label"),
+    )
+
+
+@router.post("/api/positions/{position_id}/exit-order")
+async def position_exit_order(
+    position_id: int,
+    body: PositionExitOrderRequest,
+    actor: str = Depends(require_admin),
+):
+    """Submit a position-anchored YES sell, avoiding city/date guessing."""
+    from sqlalchemy import select
+    from backend.execution.trader import execute_signal
+    from backend.ingestion.polymarket_clob import get_clob
+    from backend.storage.models import Bucket, City, Event, Position
+    from backend.storage.repos import append_audit, get_open_sell_orders_for_buckets
+
+    order_type = (body.order_type or "limit").strip().lower()
+    if order_type not in {"limit", "market"}:
+        raise HTTPException(status_code=400, detail="order_type must be 'limit' or 'market'")
+    if order_type == "limit":
+        if body.limit_price is None:
+            raise HTTPException(status_code=400, detail="limit_price is required for limit exits")
+        if not (0.01 <= float(body.limit_price) <= 0.99):
+            raise HTTPException(status_code=400, detail="limit_price must be in [0.01, 0.99]")
+
+    async with get_session() as sess:
+        row = (await sess.execute(
+            select(Position, Bucket, Event, City)
+            .join(Bucket, Position.bucket_id == Bucket.id)
+            .join(Event, Bucket.event_id == Event.id)
+            .join(City, Event.city_id == City.id)
+            .where(Position.id == position_id)
+        )).one_or_none()
+        if not row:
+            raise HTTPException(status_code=404, detail=f"position id={position_id} not found")
+        pos, bucket, event, city = row
+        if pos.net_qty <= 0:
+            raise HTTPException(status_code=400, detail="position has no shares to exit")
+        if not bucket.yes_token_id:
+            raise HTTPException(status_code=400, detail="bucket has no YES token id")
+
+        pending = (await get_open_sell_orders_for_buckets(sess, [bucket.id])).get(bucket.id, [])
+        if pending:
+            first = pending[0]
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "duplicate_pending_sell_order",
+                    "order_id": first.id,
+                    "clob_order_id": first.clob_order_id,
+                    "status": first.status,
+                },
+            )
+
+        requested_qty = float(body.qty) if body.qty is not None else float(pos.net_qty)
+        if requested_qty <= 0:
+            raise HTTPException(status_code=400, detail="qty must be positive")
+        qty = min(requested_qty, float(pos.net_qty))
+        signal = await _bucket_signal_from_state(sess, city=city, event=event, bucket=bucket, city_slug=city.city_slug)
+
+    clob = get_clob()
+    bankroll = Config.BANKROLL_CAP
+    if clob and clob.can_trade:
+        balance = await clob.get_balance()
+        if balance:
+            bankroll = min(balance, Config.BANKROLL_CAP)
+
+    result = await execute_signal(
+        signal,
+        bankroll=bankroll,
+        actor=actor,
+        manual=True,
+        qty_override=qty,
+        order_type=order_type,
+        side="SELL",
+        limit_price_override=float(body.limit_price) if order_type == "limit" else None,
+        outcome="yes",
+        operator_reason="position_exit_order",
+    )
+    result["position_id"] = position_id
+    result["requested_qty"] = requested_qty
+    if qty < requested_qty:
+        result["warning"] = (
+            (result.get("warning") + "; ") if result.get("warning") else ""
+        ) + f"Capped qty to current DB position ({qty:g})"
+    if order_type == "market" and result.get("status") in {"filled", "open"}:
+        try:
+            from backend.execution.position_sync import sync_positions_from_chain
+            result["position_sync"] = await sync_positions_from_chain(http_timeout_s=5.0)
+        except Exception:
+            log.debug("position_exit_order: post-exit position sync failed", exc_info=True)
+
+    async with get_session() as sess:
+        await append_audit(
+            sess,
+            actor=actor,
+            action="position_exit_order_submitted",
+            payload={
+                "position_id": position_id,
+                "bucket_id": signal.bucket_id,
+                "order_type": order_type,
+                "requested_qty": requested_qty,
+                "submitted_qty": qty,
+                "limit_price": body.limit_price if order_type == "limit" else None,
+                "result_status": result.get("status"),
+                "order_id": result.get("order_id"),
+            },
+            ok=result.get("status") not in {"error", "gate_blocked", "order_failed"},
+            error_msg=result.get("error"),
+        )
+    return result
 
 
 @router.post("/trade")
@@ -2747,7 +3130,7 @@ async def manual_trade(
             bankroll = min(balance, Config.BANKROLL_CAP)
 
     clob_side = "SELL" if is_sell else "BUY"
-    token_outcome = "no" if body.side == "buy_no" else "yes"
+    token_outcome = "no" if body.side.endswith("_no") else "yes"
     result = await execute_signal(
         signal,
         bankroll=bankroll,
@@ -2969,15 +3352,43 @@ async def get_active_orders(city_slug: str, date_et: str | None = None, actor: s
 @router.delete("/trade/orders/{order_id}")
 async def cancel_order(order_id: str, actor: str = Depends(require_admin)):
     """Cancel an active Polymarket CLOB limit order."""
+    from sqlalchemy import select
     from backend.ingestion.polymarket_clob import get_clob
+    from backend.storage.models import Order
+
+    db_order = None
+    clob_order_id = order_id
+    async with get_session() as sess:
+        if str(order_id).isdigit():
+            db_order = await sess.get(Order, int(order_id))
+        if db_order is None:
+            db_order = (await sess.execute(
+                select(Order).where(Order.clob_order_id == str(order_id)).limit(1)
+            )).scalar_one_or_none()
+        if db_order is not None and db_order.clob_order_id:
+            clob_order_id = db_order.clob_order_id
+        elif db_order is not None and not db_order.clob_order_id:
+            db_order.status = "cancelled"
+            db_order.cancel_reason = "local_pending_cancelled_before_clob_id"
+            await sess.commit()
+            return {"success": True, "local_only": True}
+
     clob = get_clob()
     if not clob:
         raise HTTPException(500, "CLOB client unavailable")
         
-    success = await clob.cancel_order(order_id)
+    success = await clob.cancel_order(clob_order_id)
     if not success:
         raise HTTPException(400, "Failed to cancel order or order already filled")
-        
+
+    if db_order is not None:
+        async with get_session() as sess:
+            fresh = await sess.get(Order, db_order.id)
+            if fresh is not None:
+                fresh.status = "cancelled"
+                fresh.cancel_reason = f"cancelled_by_{actor}"
+                await sess.commit()
+
     return {"success": True}
 
 

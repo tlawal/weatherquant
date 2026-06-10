@@ -275,8 +275,48 @@ class MarketSnapshot(Base):
     yes_bid_depth: Mapped[Optional[float]] = mapped_column(Float)
     yes_ask_depth: Mapped[Optional[float]] = mapped_column(Float)
     spread: Mapped[Optional[float]] = mapped_column(Float)
+    bid_levels_json: Mapped[Optional[str]] = mapped_column(Text)
+    ask_levels_json: Mapped[Optional[str]] = mapped_column(Text)
+    bid_depth_1c: Mapped[Optional[float]] = mapped_column(Float)
+    ask_depth_1c: Mapped[Optional[float]] = mapped_column(Float)
+    bid_depth_3c: Mapped[Optional[float]] = mapped_column(Float)
+    ask_depth_3c: Mapped[Optional[float]] = mapped_column(Float)
+    bid_depth_5c: Mapped[Optional[float]] = mapped_column(Float)
+    ask_depth_5c: Mapped[Optional[float]] = mapped_column(Float)
+    book_imbalance: Mapped[Optional[float]] = mapped_column(Float)
+    sell_5_avg_price: Mapped[Optional[float]] = mapped_column(Float)
+    sell_10_avg_price: Mapped[Optional[float]] = mapped_column(Float)
+    sell_25_avg_price: Mapped[Optional[float]] = mapped_column(Float)
+    buy_5_avg_price: Mapped[Optional[float]] = mapped_column(Float)
+    buy_10_avg_price: Mapped[Optional[float]] = mapped_column(Float)
+    buy_25_avg_price: Mapped[Optional[float]] = mapped_column(Float)
 
     bucket: Mapped[Bucket] = relationship("Bucket", back_populates="market_snapshots")
+
+
+class MarketFlowFeature(Base):
+    """Shadow-only CLOB/data-api/wallet flow features for one bucket window."""
+    __tablename__ = "market_flow_features"
+    __table_args__ = (
+        Index("ix_flow_bucket_ts", "bucket_id", "computed_at"),
+        Index("ix_flow_bucket_window_ts", "bucket_id", "window_minutes", "computed_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    bucket_id: Mapped[int] = mapped_column(Integer, ForeignKey("buckets.id"), nullable=False)
+    computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    window_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=15)
+    signed_net_notional: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    buy_notional: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    sell_notional: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    imbalance: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    vpin: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    toxicity_score: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    top_wallet_weighted_flow: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    lead_lag_seconds: Mapped[Optional[float]] = mapped_column(Float)
+    direction_source: Mapped[str] = mapped_column(String(32), default="unavailable", nullable=False)
+    direction_confidence: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    raw_json: Mapped[Optional[str]] = mapped_column(Text)
 
 
 # ─── Model Output ─────────────────────────────────────────────────────────────

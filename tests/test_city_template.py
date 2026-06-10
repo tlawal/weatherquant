@@ -122,5 +122,15 @@ def test_redemptions_quick_exit_uses_market_sell():
     template = Path("web/templates/redemptions.html").read_text()
 
     assert "SELL ${qty.toFixed(1)} shares with a FOK market exit" in template
+    assert "/api/positions/${positionId}/exit-order" in template
     assert "order_type: 'market'" in template
-    assert "order_type: 'limit'" not in template[template.index("async function marketSell"):]
+    assert "apiCall('/trade', 'POST'" not in template[template.index("async function marketSell"):]
+
+
+def test_redemptions_limit_exit_is_modal_not_city_link():
+    template = Path("web/templates/redemptions.html").read_text()
+
+    assert "openLimitExitModal" in template
+    assert "Submit Limit Exit" in template
+    assert "href=\"/city/${city}\"" not in template
+    assert "/city/${city}${dateParam}" in template
