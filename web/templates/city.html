@@ -1,6 +1,9 @@
 {% extends "base.html" %}
 {% set city_title = city.display_name %}
 {% block title %}{{ city_title }} — WeatherQuant{% endblock %}
+{% block extra_head %}
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js" defer></script>
+{% endblock %}
 
 {% block content %}
 <!-- ── HEADER ROW ─────────────────────────────────────────────────────────── -->

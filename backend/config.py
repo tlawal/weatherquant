@@ -40,6 +40,10 @@ class Config:
         "DATABASE_URL",
         "sqlite+aiosqlite:////tmp/weatherquant.db",
     )
+    POSTGRES_POOL_SIZE: int = _int("POSTGRES_POOL_SIZE", 6)
+    POSTGRES_MAX_OVERFLOW: int = _int("POSTGRES_MAX_OVERFLOW", 4)
+    POSTGRES_POOL_TIMEOUT_SECONDS: int = _int("POSTGRES_POOL_TIMEOUT_SECONDS", 10)
+    POSTGRES_POOL_RECYCLE_SECONDS: int = _int("POSTGRES_POOL_RECYCLE_SECONDS", 900)
 
     # ── Service mode ─────────────────────────────────────────────────────────
     SERVICE_TYPE: str = os.environ.get("SERVICE_TYPE", "api").lower()

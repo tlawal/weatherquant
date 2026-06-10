@@ -1800,6 +1800,11 @@ async def cities_admin(request: Request):
     )
 
 
+@dashboard_router.get("/admin/db", response_class=HTMLResponse)
+async def db_admin(request: Request):
+    return templates.TemplateResponse("db_admin.html", {"request": request})
+
+
 @dashboard_router.get("/htmx/signals-table", response_class=HTMLResponse)
 async def htmx_signals_table(request: Request):
     """HTMX partial — refreshes only the signals table body."""

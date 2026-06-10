@@ -532,7 +532,7 @@ function _flattenAndSort() {
 function toggleAutoRefresh(on) {
   if (_autoRefreshTimer) { clearInterval(_autoRefreshTimer); _autoRefreshTimer = null; }
   if (on) {
-    _autoRefreshTimer = setInterval(() => { if (!_actionInProgress) loadEvents(); }, 30000);
+    _autoRefreshTimer = setInterval(() => { if (!_actionInProgress) loadEvents('default', { silent: true }); }, 30000);
   }
 }
 
@@ -785,17 +785,20 @@ async function loadPerformance() {
 }
 
 // ── Data Loading ─────────────────────────────────────────────────────────────
-async function loadEvents(mode='default') {
+async function loadEvents(mode='default', opts={}) {
   const loading = document.getElementById('loading');
   const refreshBtn = document.getElementById('refresh-btn');
   const endpoint = mode === 'onchain' ? '/api/redemptions/onchain' : (mode === 'live' ? '/api/redemptions/live' : '/api/redemptions');
-  loading.innerHTML = '<div class="spinner mx-auto"></div><div class="text-sm font-mono" style="color:var(--cyan)">LOADING POSITIONS...</div>';
-  loading.classList.remove('hidden');
-  document.getElementById('sections-root').classList.add('hidden');
-  document.getElementById('empty').classList.add('hidden');
-  if (refreshBtn) { refreshBtn.disabled = true; refreshBtn.textContent = mode === 'onchain' ? 'Checking UMA...' : 'Refreshing...'; }
+  const silent = opts && opts.silent === true;
+  if (!silent) {
+    loading.innerHTML = '<div class="spinner mx-auto"></div><div class="text-sm font-mono" style="color:var(--cyan)">LOADING POSITIONS...</div>';
+    loading.classList.remove('hidden');
+    document.getElementById('sections-root').classList.add('hidden');
+    document.getElementById('empty').classList.add('hidden');
+    if (refreshBtn) { refreshBtn.disabled = true; refreshBtn.textContent = mode === 'onchain' ? 'Checking UMA...' : 'Refreshing...'; }
+  }
   const slowLoadTimer = setTimeout(() => {
-    if (!loading.classList.contains('hidden')) {
+    if (!silent && !loading.classList.contains('hidden')) {
       loading.innerHTML = '<div class="spinner mx-auto"></div><div class="text-sm font-mono" style="color:var(--cyan)">LOADING POSITIONS...</div><div class="text-xs font-mono text-gray-500">DB rows are loaded first; live wallet and UMA checks are short-timeout side channels.</div>';
     }
   }, 2500);
@@ -830,7 +833,7 @@ async function loadEvents(mode='default') {
     document.getElementById('summary-auto-manual').innerHTML = `<span class="${(summary.stale_rows || 0) > 0 ? 'text-red-400' : 'text-gray-300'}">${summary.stale_rows || 0}</span>`;
 
     if (!red.events || red.events.length === 0) {
-      loading.classList.add('hidden');
+      if (!silent) loading.classList.add('hidden');
       document.getElementById('empty').classList.remove('hidden');
       return;
     }
@@ -839,10 +842,14 @@ async function loadEvents(mode='default') {
     renderSections();
     loading.classList.add('hidden');
   } catch (e) {
-    loading.innerHTML = '<div class="text-red-400 text-sm font-mono">SYSTEM ERROR: ' + e.message + '</div>';
+    if (silent) {
+      document.getElementById('last-run-banner').textContent = `Refresh failed: ${e.message}`;
+    } else {
+      loading.innerHTML = '<div class="text-red-400 text-sm font-mono">SYSTEM ERROR: ' + e.message + '</div>';
+    }
   } finally {
     clearTimeout(slowLoadTimer);
-    if (refreshBtn) { refreshBtn.disabled = false; refreshBtn.textContent = 'Refresh Wallet \u21BB'; }
+    if (!silent && refreshBtn) { refreshBtn.disabled = false; refreshBtn.textContent = 'Refresh Wallet \u21BB'; }
   }
 }
 

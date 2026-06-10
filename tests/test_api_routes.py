@@ -1067,7 +1067,7 @@ def test_redemptions_marks_db_only_position_missing_on_chain(tmp_path, monkeypat
     _run(seed())
     monkeypatch.setattr(api_routes, "_fetch_wallet_api_positions", fake_fetch_wallet_api_positions)
 
-    res = _run(api_routes.redemptions_list())
+    res = _run(api_routes.redemptions_live())
     bucket = res["events"][0]["buckets"][0]
     assert bucket["sync_status"] == "missing_on_chain"
     assert bucket["requires_action"] is True
@@ -1110,19 +1110,19 @@ def test_redemptions_wallet_timeout_still_returns_db_rows(tmp_path, monkeypatch)
             ))
             await session.commit()
 
-    async def fake_fetch_wallet_api_positions(*args, **kwargs):
-        raise TimeoutError("wallet slow")
+    async def fail_wallet_fetch(*args, **kwargs):
+        raise AssertionError("default redemptions endpoint must not call wallet refresh")
 
     async def fail_onchain(*args, **kwargs):
         raise AssertionError("default redemptions endpoint must not call on-chain checks")
 
     _run(seed())
-    monkeypatch.setattr(api_routes, "_fetch_wallet_api_positions", fake_fetch_wallet_api_positions)
+    monkeypatch.setattr(api_routes, "_fetch_wallet_api_positions", fail_wallet_fetch)
     monkeypatch.setattr(api_routes, "_fetch_onchain_determined_map", fail_onchain)
 
     res = _run(api_routes.redemptions_list())
     assert res["events"][0]["buckets"][0]["net_qty"] == 1.0
-    assert "wallet_positions_unavailable" in res["timing"]["degraded_reason"]
+    assert "wallet_refresh_skipped_db_fast" in res["timing"]["degraded_reason"]
 
     _run(engine.dispose())
 

@@ -1368,15 +1368,15 @@ async def _fetch_onchain_determined_map(
 
 async def _build_redemptions_payload(
     *,
-    wallet_timeout_s: float = 1.5,
+    wallet_timeout_s: float = 0.0,
     include_missing_wallet_positions: bool = False,
     include_onchain: bool = False,
 ) -> dict:
     """DB-first position reconciliation payload.
 
-    The default page path must never wait on Gamma or Polygon. Wallet/data-api
-    enrichment is short-timeout only; DB rows still render if that side-channel
-    is down or slow.
+    The default page path must never wait on Gamma, Data API, or Polygon. Live
+    wallet/data-api enrichment is reserved for explicit refresh paths; DB rows
+    still render if that side-channel is down or slow.
     """
     from sqlalchemy import select
     from backend.storage.models import Bucket, City, Event, ExitEvent, Position
@@ -1431,14 +1431,17 @@ async def _build_redemptions_payload(
     wallet_positions: list[dict] = []
     wallet_addr = None
     wallet_checked = False
-    try:
-        wallet_positions, wallet_addr = await _fetch_wallet_api_positions(timeout_s=wallet_timeout_s)
-        wallet_checked = bool(wallet_addr)
-        if not wallet_checked:
-            degraded_reasons.append("wallet_address_not_configured")
-    except Exception as exc:
-        degraded_reasons.append(f"wallet_positions_unavailable:{type(exc).__name__}")
-        log.warning("redemptions: wallet position refresh failed: %s", exc)
+    if wallet_timeout_s and wallet_timeout_s > 0:
+        try:
+            wallet_positions, wallet_addr = await _fetch_wallet_api_positions(timeout_s=wallet_timeout_s)
+            wallet_checked = bool(wallet_addr)
+            if not wallet_checked:
+                degraded_reasons.append("wallet_address_not_configured")
+        except Exception as exc:
+            degraded_reasons.append(f"wallet_positions_unavailable:{type(exc).__name__}")
+            log.warning("redemptions: wallet position refresh failed: %s", exc)
+    else:
+        degraded_reasons.append("wallet_refresh_skipped_db_fast")
     wallet_ms = round((time.perf_counter() - wallet_t0) * 1000, 1)
 
     api_pos_by_cid = {
@@ -1852,7 +1855,7 @@ async def _build_redemptions_payload(
 
 @router.get("/api/redemptions")
 async def redemptions_list():
-    return await _build_redemptions_payload(wallet_timeout_s=1.5)
+    return await _build_redemptions_payload(wallet_timeout_s=0.0)
 
 
 @router.get("/api/redemptions/live")
@@ -2559,6 +2562,47 @@ async def automation_readiness():
             "freshness_max_age_s": round(max(flow_ages), 1) if flow_ages else None,
         },
     }
+
+
+# ─── Database Maintenance ────────────────────────────────────────────────────
+
+@router.get("/api/admin/db/size-report")
+async def admin_db_size_report(actor: str = Depends(require_admin)):
+    """Postgres table-size/dead-tuple report for Railway memory/storage audits."""
+    from backend.storage.maintenance import build_db_size_report
+
+    async with get_session() as sess:
+        report = await build_db_size_report(sess)
+    report["actor"] = actor
+    return report
+
+
+@router.post("/api/admin/db/maintenance/prune")
+async def admin_db_retention_prune(
+    dry_run: bool = True,
+    market_snapshot_days: int = 21,
+    market_flow_days: int = 14,
+    raw_payload_days: int = 30,
+    signal_days: int = 60,
+    prune_signals: bool = False,
+    batch_size: int = 5000,
+    actor: str = Depends(require_admin),
+):
+    """Dry-run or execute conservative hot-DB retention cleanup."""
+    from backend.storage.maintenance import RetentionPolicy, run_retention_maintenance
+
+    policy = RetentionPolicy(
+        market_snapshot_days=market_snapshot_days,
+        market_flow_days=market_flow_days,
+        raw_payload_days=raw_payload_days,
+        signal_days=signal_days,
+        prune_signals=prune_signals,
+        batch_size=batch_size,
+    )
+    async with get_session() as sess:
+        report = await run_retention_maintenance(sess, dry_run=dry_run, policy=policy)
+    report["actor"] = actor
+    return report
 
 
 # ─── Live Orderbook ──────────────────────────────────────────────────────────

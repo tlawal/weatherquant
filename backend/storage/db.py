@@ -81,24 +81,18 @@ def _build_engine() -> AsyncEngine:
     kwargs: dict = {"echo": False}
 
     if not is_sqlite:
-        # PostgreSQL — asyncpg uses one TCP connection per pool slot with no
-        # daemon-thread cost (unlike aiosqlite), so we can size generously.
-        # Sizing rationale:
-        #   - fetch_gamma_all() does asyncio.gather over ~22 (city × date) tasks,
-        #     each opening a session — 20 base slots cover the typical concurrent
-        #     load of ingestion + dashboard polling + scheduler heartbeats.
-        #   - 10 overflow gives 30 ceiling for force-compute / refresh bursts.
-        #   - Railway Postgres defaults to max_connections=100, well above this.
-        # pool_timeout shortened from 30s → 15s so a stuck checkout fails fast
-        # instead of blocking the 60s scheduler heartbeat past its window
-        # (which triggered "Execution of job skipped: max instances reached").
+        # PostgreSQL - keep the pool small by default. Railway's smallest
+        # Postgres tiers hit memory pressure from idle backends long before
+        # they hit max_connections; the scheduler now batches the largest
+        # snapshot writes, so a 6+4 ceiling is enough for API traffic plus
+        # worker bursts. Override via env vars if the service moves tiers.
         kwargs.update(
             {
                 "pool_pre_ping": True,
-                "pool_size": 20,
-                "max_overflow": 10,
-                "pool_timeout": 15,
-                "pool_recycle": 1800,
+                "pool_size": Config.POSTGRES_POOL_SIZE,
+                "max_overflow": Config.POSTGRES_MAX_OVERFLOW,
+                "pool_timeout": Config.POSTGRES_POOL_TIMEOUT_SECONDS,
+                "pool_recycle": Config.POSTGRES_POOL_RECYCLE_SECONDS,
             }
         )
     else:

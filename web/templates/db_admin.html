@@ -1,0 +1,276 @@
+{% extends "base.html" %}
+{% block title %}DB Health — WeatherQuant{% endblock %}
+
+{% block content %}
+<div x-data="dbAdminPage()" x-init="init()" class="space-y-6">
+  <div class="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+    <div>
+      <h1 class="text-2xl font-bold tracking-tight" style="color:var(--cyan)">DB Health & Retention</h1>
+      <p class="mt-1 max-w-3xl text-sm" style="color:var(--text-muted)">
+        Hot-store size, dead rows, and safe pruning controls. Retention preserves trades, fills, positions, events, calibration, model artifacts, and wallet skill history.
+      </p>
+    </div>
+    <div class="flex flex-wrap gap-2">
+      <button @click="loadSizeReport()" class="rounded px-3 py-1.5 text-xs font-bold" style="background:var(--bg-panel);border:1px solid var(--border);color:var(--text-main)">
+        Refresh Size
+      </button>
+      <button @click="runPrune(true)" class="rounded px-3 py-1.5 text-xs font-bold" style="background:var(--cyan);color:#000">
+        Dry Run
+      </button>
+      <button @click="runPrune(false)" class="rounded px-3 py-1.5 text-xs font-bold" style="background:rgba(239,68,68,0.16);border:1px solid rgba(239,68,68,0.5);color:var(--red)">
+        Execute Prune
+      </button>
+    </div>
+  </div>
+
+  <template x-if="error">
+    <div class="card p-3 text-sm mono" style="border-color:rgba(239,68,68,0.5);color:var(--red)" x-text="error"></div>
+  </template>
+
+  <div class="grid grid-cols-2 gap-3 lg:grid-cols-5">
+    <div class="card p-4">
+      <div class="text-[10px] uppercase tracking-widest" style="color:var(--text-muted)">Total Size</div>
+      <div class="mt-1 text-xl font-bold mono" x-text="sizeReport && sizeReport.supported ? fmtBytes(sizeReport.totals.total_bytes) : '--'"></div>
+    </div>
+    <div class="card p-4">
+      <div class="text-[10px] uppercase tracking-widest" style="color:var(--text-muted)">Index Size</div>
+      <div class="mt-1 text-xl font-bold mono" x-text="sizeReport && sizeReport.supported ? fmtBytes(sizeReport.totals.index_bytes) : '--'"></div>
+    </div>
+    <div class="card p-4">
+      <div class="text-[10px] uppercase tracking-widest" style="color:var(--text-muted)">Dead Rows Est.</div>
+      <div class="mt-1 text-xl font-bold mono" :style="deadRows() > 10000 ? 'color:var(--yellow)' : ''" x-text="deadRows().toLocaleString()"></div>
+    </div>
+    <div class="card p-4">
+      <div class="text-[10px] uppercase tracking-widest" style="color:var(--text-muted)">Top Table</div>
+      <div class="mt-1 truncate text-xl font-bold mono" x-text="topTableName()"></div>
+    </div>
+    <div class="card p-4">
+      <div class="text-[10px] uppercase tracking-widest" style="color:var(--text-muted)">Prune Candidates</div>
+      <div class="mt-1 text-xl font-bold mono" x-text="candidateRows().toLocaleString()"></div>
+    </div>
+  </div>
+
+  <div class="grid gap-4 xl:grid-cols-[360px_1fr]">
+    <section class="card p-4">
+      <h2 class="mb-3 text-sm font-bold uppercase tracking-wider" style="color:var(--text-muted)">Retention Policy</h2>
+      <div class="space-y-3 text-xs">
+        <label class="block">
+          <span class="mb-1 block uppercase tracking-wider" style="color:var(--text-muted)">Market snapshot days</span>
+          <input type="number" min="3" max="365" x-model.number="policy.market_snapshot_days" class="w-full rounded px-2 py-1 mono" style="background:var(--bg-panel);border:1px solid var(--border)">
+        </label>
+        <label class="block">
+          <span class="mb-1 block uppercase tracking-wider" style="color:var(--text-muted)">Shadow flow days</span>
+          <input type="number" min="1" max="365" x-model.number="policy.market_flow_days" class="w-full rounded px-2 py-1 mono" style="background:var(--bg-panel);border:1px solid var(--border)">
+        </label>
+        <label class="block">
+          <span class="mb-1 block uppercase tracking-wider" style="color:var(--text-muted)">Raw payload days</span>
+          <input type="number" min="7" max="365" x-model.number="policy.raw_payload_days" class="w-full rounded px-2 py-1 mono" style="background:var(--bg-panel);border:1px solid var(--border)">
+        </label>
+        <label class="block">
+          <span class="mb-1 block uppercase tracking-wider" style="color:var(--text-muted)">Batch size</span>
+          <input type="number" min="100" max="20000" x-model.number="policy.batch_size" class="w-full rounded px-2 py-1 mono" style="background:var(--bg-panel);border:1px solid var(--border)">
+        </label>
+        <label class="flex items-center gap-2 rounded p-2" style="background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.25)">
+          <input type="checkbox" x-model="policy.prune_signals" class="accent-red-500">
+          <span>
+            <span class="block font-bold" style="color:var(--red)">Optional signal pruning</span>
+            <span style="color:var(--text-muted)">Deletes only old unreferenced inactive-market signals. Leave off unless size report proves signals are material.</span>
+          </span>
+        </label>
+      </div>
+    </section>
+
+    <section class="card overflow-hidden">
+      <div class="flex items-center justify-between border-b px-4 py-3" style="border-color:var(--border)">
+        <h2 class="text-sm font-bold uppercase tracking-wider" style="color:var(--text-muted)">Prune Plan</h2>
+        <span class="text-xs mono" style="color:var(--text-muted)" x-text="pruneReport ? (pruneReport.dry_run ? 'dry run' : 'executed') : 'not run'"></span>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="min-w-full text-left text-xs">
+          <thead style="background:var(--bg-panel);color:var(--text-muted)">
+            <tr>
+              <th class="px-3 py-2">Action</th>
+              <th class="px-3 py-2">Table</th>
+              <th class="px-3 py-2 text-right">Candidates</th>
+              <th class="px-3 py-2 text-right">Affected</th>
+              <th class="px-3 py-2">Mode</th>
+            </tr>
+          </thead>
+          <tbody>
+            <template x-for="action in pruneActions()" :key="action.name">
+              <tr class="border-t" style="border-color:var(--border)">
+                <td class="px-3 py-2 mono" x-text="action.name"></td>
+                <td class="px-3 py-2 mono" x-text="action.table"></td>
+                <td class="px-3 py-2 text-right mono" x-text="Number(action.candidate_rows || 0).toLocaleString()"></td>
+                <td class="px-3 py-2 text-right mono" x-text="Number(action.affected_rows || 0).toLocaleString()"></td>
+                <td class="px-3 py-2" x-text="action.mode"></td>
+              </tr>
+            </template>
+            <template x-if="!pruneActions().length">
+              <tr><td colspan="5" class="px-3 py-6 text-center" style="color:var(--text-muted)">Run a dry run to inspect candidates.</td></tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <div class="grid gap-4 xl:grid-cols-2">
+    <section class="card overflow-hidden">
+      <div class="border-b px-4 py-3" style="border-color:var(--border)">
+        <h2 class="text-sm font-bold uppercase tracking-wider" style="color:var(--text-muted)">Largest Tables</h2>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="min-w-full text-left text-xs">
+          <thead style="background:var(--bg-panel);color:var(--text-muted)">
+            <tr>
+              <th class="px-3 py-2">Table</th>
+              <th class="px-3 py-2 text-right">Total</th>
+              <th class="px-3 py-2 text-right">Rows</th>
+              <th class="px-3 py-2 text-right">Dead</th>
+              <th class="px-3 py-2">Autovacuum</th>
+            </tr>
+          </thead>
+          <tbody>
+            <template x-for="row in topTables()" :key="row.table_name">
+              <tr class="border-t" style="border-color:var(--border)">
+                <td class="px-3 py-2 mono" x-text="row.table_name"></td>
+                <td class="px-3 py-2 text-right mono" x-text="fmtBytes(row.total_bytes)"></td>
+                <td class="px-3 py-2 text-right mono" x-text="Number(row.live_rows_est || 0).toLocaleString()"></td>
+                <td class="px-3 py-2 text-right mono" :style="Number(row.dead_rows_est || 0) > 10000 ? 'color:var(--yellow)' : ''" x-text="Number(row.dead_rows_est || 0).toLocaleString()"></td>
+                <td class="px-3 py-2 mono" x-text="shortDate(row.last_autovacuum)"></td>
+              </tr>
+            </template>
+            <template x-if="sizeReport && sizeReport.supported === false">
+              <tr><td colspan="5" class="px-3 py-6 text-center" style="color:var(--text-muted)" x-text="sizeReport.reason"></td></tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card p-4">
+      <h2 class="mb-3 text-sm font-bold uppercase tracking-wider" style="color:var(--text-muted)">Protected History</h2>
+      <div class="flex flex-wrap gap-2">
+        <template x-for="name in protectedTables()" :key="name">
+          <span class="rounded px-2 py-1 text-[11px] mono" style="background:var(--bg-panel);border:1px solid var(--border);color:var(--text-muted)" x-text="name"></span>
+        </template>
+      </div>
+      <div class="mt-4 rounded p-3 text-xs leading-relaxed" style="background:rgba(34,211,238,0.06);border:1px solid rgba(34,211,238,0.2);color:var(--text-muted)">
+        Safe cleanup removes hot operational clutter, not learning history. If market snapshots or shadow flow are needed for long-window microstructure research, export them to cold storage before executing retention.
+      </div>
+    </section>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function dbAdminPage() {
+  return {
+    sizeReport: null,
+    pruneReport: null,
+    error: '',
+    loading: false,
+    policy: {
+      market_snapshot_days: 21,
+      market_flow_days: 14,
+      raw_payload_days: 30,
+      signal_days: 60,
+      prune_signals: false,
+      batch_size: 5000,
+    },
+    init() {
+      this.loadSizeReport();
+      this.runPrune(true);
+    },
+    fmtBytes(bytes) {
+      const n = Number(bytes || 0);
+      if (n <= 0) return '0 B';
+      const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+      let v = n;
+      let i = 0;
+      while (v >= 1024 && i < units.length - 1) { v /= 1024; i += 1; }
+      return `${v.toFixed(v >= 10 || i === 0 ? 0 : 1)} ${units[i]}`;
+    },
+    shortDate(value) {
+      if (!value) return '--';
+      const d = new Date(value);
+      if (Number.isNaN(d.getTime())) return '--';
+      return d.toLocaleString();
+    },
+    async adminFetch(url, opts={}) {
+      this.error = '';
+      const token = getAdminToken();
+      if (!token) {
+        promptForToken();
+        throw new Error('Admin token required.');
+      }
+      const res = await fetch(url, {
+        ...opts,
+        headers: {
+          ...(opts.headers || {}),
+          'X-Admin-Token': token,
+        },
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || data.error || `${res.status} ${res.statusText}`);
+      return data;
+    },
+    async loadSizeReport() {
+      try {
+        this.sizeReport = await this.adminFetch('/api/admin/db/size-report');
+      } catch (e) {
+        this.error = e.message;
+      }
+    },
+    pruneUrl(dryRun) {
+      const p = new URLSearchParams({
+        dry_run: String(dryRun),
+        market_snapshot_days: String(this.policy.market_snapshot_days),
+        market_flow_days: String(this.policy.market_flow_days),
+        raw_payload_days: String(this.policy.raw_payload_days),
+        signal_days: String(this.policy.signal_days),
+        prune_signals: String(this.policy.prune_signals),
+        batch_size: String(this.policy.batch_size),
+      });
+      return `/api/admin/db/maintenance/prune?${p.toString()}`;
+    },
+    async runPrune(dryRun) {
+      if (!dryRun) {
+        const ok = confirm('Execute retention cleanup on Postgres now? Run a dry run first and verify candidate rows.');
+        if (!ok) return;
+      }
+      try {
+        this.pruneReport = await this.adminFetch(this.pruneUrl(dryRun), { method: 'POST' });
+        if (!dryRun) await this.loadSizeReport();
+      } catch (e) {
+        this.error = e.message;
+      }
+    },
+    topTables() {
+      if (!this.sizeReport || !this.sizeReport.supported) return [];
+      return (this.sizeReport.tables || []).slice(0, 12);
+    },
+    pruneActions() {
+      return (this.pruneReport && this.pruneReport.actions) ? this.pruneReport.actions : [];
+    },
+    protectedTables() {
+      if (this.pruneReport && this.pruneReport.protected_tables) return this.pruneReport.protected_tables;
+      if (this.sizeReport && this.sizeReport.protected_tables) return this.sizeReport.protected_tables;
+      return [];
+    },
+    deadRows() {
+      return this.sizeReport && this.sizeReport.supported ? Number(this.sizeReport.totals.dead_rows_est || 0) : 0;
+    },
+    topTableName() {
+      const top = this.topTables()[0];
+      return top ? top.table_name : '--';
+    },
+    candidateRows() {
+      return this.pruneActions().reduce((acc, item) => acc + Number(item.candidate_rows || 0), 0);
+    },
+  };
+}
+</script>
+{% endblock %}

@@ -54,9 +54,6 @@
   <!-- Alpine.js -->
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
 
-  <!-- Plotly (city page charts) -->
-  <script src="https://cdn.plot.ly/plotly-2.27.0.min.js" defer></script>
-
   <style>
     :root {
       --bg-primary: #F8FAFC;
@@ -132,6 +129,7 @@
           <a href="/stations" class="text-sm hover:text-white transition-colors" style="color:var(--text-muted)">Stations</a>
           <a href="/strategies" class="text-sm hover:text-white transition-colors" style="color:var(--text-muted)">Strategies</a>
           <a href="/admin/cities" class="text-sm hover:text-white transition-colors hidden lg:inline" style="color:var(--text-muted)">Cities</a>
+          <a href="/admin/db" class="text-sm hover:text-white transition-colors hidden lg:inline" style="color:var(--text-muted)">DB</a>
           <a href="/backtest" class="text-sm hover:text-white transition-colors hidden lg:inline" style="color:var(--text-muted)">Backtest</a>
           <a href="/herbie-timing" class="text-sm hover:text-white transition-colors hidden xl:inline" style="color:var(--text-muted)" title="Herbie side-channel: latency + accuracy comparison vs Open-Meteo">Herbie</a>
         </nav>
@@ -197,6 +195,7 @@
       <a href="/stations" @click="mobileNav = false" class="text-sm py-1.5 px-2 rounded hover:text-white transition-colors" style="color:var(--text-muted)">Stations</a>
       <a href="/strategies" @click="mobileNav = false" class="text-sm py-1.5 px-2 rounded hover:text-white transition-colors" style="color:var(--text-muted)">Strategies</a>
       <a href="/admin/cities" @click="mobileNav = false" class="text-sm py-1.5 px-2 rounded hover:text-white transition-colors" style="color:var(--text-muted)">Cities</a>
+      <a href="/admin/db" @click="mobileNav = false" class="text-sm py-1.5 px-2 rounded hover:text-white transition-colors" style="color:var(--text-muted)">DB</a>
       <a href="/backtest" @click="mobileNav = false" class="text-sm py-1.5 px-2 rounded hover:text-white transition-colors" style="color:var(--text-muted)">Backtest</a>
       <a href="/herbie-timing" @click="mobileNav = false" class="text-sm py-1.5 px-2 rounded hover:text-white transition-colors" style="color:var(--text-muted)">Herbie</a>
     </nav>
