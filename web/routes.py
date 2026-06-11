@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from time import monotonic
 from datetime import datetime, timezone, date
 from zoneinfo import ZoneInfo
 from typing import Optional
@@ -388,6 +389,7 @@ def _format_current_temp_dual(
 
 
 dashboard_router = APIRouter()
+_DASHBOARD_CONTEXT_CACHE: dict[str, dict] = {}
 
 
 @dashboard_router.get("/", response_class=HTMLResponse)
@@ -399,15 +401,21 @@ async def dashboard(request: Request):
         get_arming_state,
         get_daily_realized_pnl,
         get_all_positions,
-        get_latest_signals,
-        get_signals_for_latest_snapshot,
-        get_position,
-        get_recently_redeemed_events,
-        get_unredeemed_resolved_events,
+        get_dashboard_signal_rows,
+        get_recently_redeemed_event_summaries,
+        get_unredeemed_winning_position_summaries,
     )
-    from backend.storage.models import Bucket, Event, City
 
     today_et = et_today()
+    cache_ttl_s = max(0, int(Config.DASHBOARD_CACHE_TTL_SECONDS or 0))
+    cache_key = f"dashboard:{today_et}"
+    cached = _DASHBOARD_CONTEXT_CACHE.get(cache_key)
+    now_mono = monotonic()
+    if cache_ttl_s and cached and cached.get("expires_at", 0) > now_mono:
+        context = dict(cached["context"])
+        context["request"] = request
+        context["dashboard_cache_hit"] = True
+        return templates.TemplateResponse("dashboard.html", context)
 
     # Single outer session for the whole request — one connection check-out
     # rather than one per signal × N signals. The previous N-session pattern
@@ -421,10 +429,7 @@ async def dashboard(request: Request):
         arming = await get_arming_state(sess)
         daily_pnl = await get_daily_realized_pnl(sess, today_et)
         positions = await get_all_positions(sess)
-        # Filter to "rows from the latest model snapshot per event" so a
-        # half-finished signal-engine pass can never leave stale signals
-        # alongside the freshly-written ones for the same bucket.
-        raw_signals = await get_signals_for_latest_snapshot(
+        signal_context_rows = await get_dashboard_signal_rows(
             sess, limit=200, date_et=today_et
         )
 
@@ -432,14 +437,10 @@ async def dashboard(request: Request):
 
         # Build signal rows for the table — reuses the outer session.
         signal_rows = []
-        for sig in raw_signals:
-            bucket_row = await sess.get(Bucket, sig.bucket_id)
-            if not bucket_row:
-                continue
-            event_row = await sess.get(Event, bucket_row.event_id)
-            if not event_row or event_row.date_et != today_et:
-                continue
-            city_row = await sess.get(City, event_row.city_id)
+        for row in signal_context_rows:
+            sig = row["signal"]
+            bucket_row = row["bucket"]
+            city_row = row["city"]
 
             reason = json.loads(sig.reason_json) if sig.reason_json else {}
             gate_failures = json.loads(sig.gate_failures_json) if sig.gate_failures_json else []
@@ -490,72 +491,32 @@ async def dashboard(request: Request):
         city_groups = _build_city_groups(deduped)
 
         total_exposure = sum((p.net_qty * p.avg_cost) for p in positions if p.net_qty > 0)
+        unredeemed_wins = await get_unredeemed_winning_position_summaries(sess)
+        recent_redeems = await get_recently_redeemed_event_summaries(sess, days=7)
 
-        # Unredeemed winning positions — only events where the user actually holds
-        # a winning position (positive net_qty on the winning bucket). Reuses the
-        # same outer session.
-        unredeemed_events = await get_unredeemed_resolved_events(sess, require_position=True)
+    context = {
+        "request": request,
+        "signal_rows": deduped,
+        "city_groups": city_groups,
+        "arming_state": arming.state,
+        "daily_pnl": round(daily_pnl, 2),
+        "total_exposure": round(total_exposure, 2),
+        "open_positions": len([p for p in positions if p.net_qty > 0]),
+        "cities": [c.city_slug for c in cities],
+        "today_et": today_et,
+        "unredeemed_wins": unredeemed_wins,
+        "recent_redeems": recent_redeems,
+        "dashboard_cache_hit": False,
+    }
+    if cache_ttl_s:
+        cache_context = {k: v for k, v in context.items() if k != "request"}
+        _DASHBOARD_CONTEXT_CACHE.clear()
+        _DASHBOARD_CONTEXT_CACHE[cache_key] = {
+            "expires_at": monotonic() + cache_ttl_s,
+            "context": cache_context,
+        }
 
-        unredeemed_wins = []
-        for evt in unredeemed_events:
-            if evt.winning_bucket_idx is None:
-                continue
-            city = await sess.get(City, evt.city_id)
-            total_payout = 0.0
-            winning_label = None
-            for bucket in evt.buckets:
-                if bucket.bucket_idx != evt.winning_bucket_idx:
-                    continue
-                winning_label = bucket.label
-                pos = await get_position(sess, bucket.id)
-                if pos and pos.net_qty > 0:
-                    total_payout += pos.net_qty * 1.0
-                break
-            if total_payout > 0:
-                unredeemed_wins.append({
-                    "event_id": evt.id,
-                    "city_name": city.display_name if city else "?",
-                    "date_et": evt.date_et,
-                    "winning_label": winning_label or "N/A",
-                    "total_payout": round(total_payout, 2),
-                })
-
-        # Recently redeemed events (last 7 days) for history/retry — same session.
-        redeemed_events = await get_recently_redeemed_events(sess, days=7)
-
-        recent_redeems = []
-        for evt in redeemed_events:
-            city = await sess.get(City, evt.city_id)
-            winning_label = None
-            for bucket in evt.buckets:
-                if (evt.winning_bucket_idx is not None
-                        and bucket.bucket_idx == evt.winning_bucket_idx):
-                    winning_label = bucket.label
-                    break
-            recent_redeems.append({
-                "event_id": evt.id,
-                "city_name": city.display_name if city else "?",
-                "date_et": evt.date_et,
-                "winning_label": winning_label or "N/A",
-                "redeemed_at": evt.redeemed_at.strftime("%b %d %H:%M") if evt.redeemed_at else "",
-            })
-
-    return templates.TemplateResponse(
-        "dashboard.html",
-        {
-            "request": request,
-            "signal_rows": deduped,
-            "city_groups": city_groups,
-            "arming_state": arming.state,
-            "daily_pnl": round(daily_pnl, 2),
-            "total_exposure": round(total_exposure, 2),
-            "open_positions": len([p for p in positions if p.net_qty > 0]),
-            "cities": [c.city_slug for c in cities],
-            "today_et": today_et,
-            "unredeemed_wins": unredeemed_wins,
-            "recent_redeems": recent_redeems,
-        },
-    )
+    return templates.TemplateResponse("dashboard.html", context)
 
 
 @dashboard_router.get("/city/{city_slug}", response_class=HTMLResponse)

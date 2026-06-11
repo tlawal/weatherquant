@@ -33,7 +33,6 @@ PROTECTED_TABLES = (
     "calibration_params",
     "model_artifacts",
     "wallet_stats",
-    "wallet_market_exposures",
     "wallet_skill_scores",
 )
 
@@ -44,6 +43,10 @@ class RetentionPolicy:
     market_flow_days: int = 14
     raw_payload_days: int = 30
     signal_days: int = 60
+    forecast_obs_days: int = 180
+    wallet_trade_days: int = 120
+    wallet_exposure_days: int = 45
+    model_input_days: int = 14
     prune_signals: bool = False
     batch_size: int = 5000
 
@@ -53,6 +56,10 @@ class RetentionPolicy:
             market_flow_days=max(1, min(int(self.market_flow_days), 365)),
             raw_payload_days=max(7, min(int(self.raw_payload_days), 365)),
             signal_days=max(14, min(int(self.signal_days), 365)),
+            forecast_obs_days=max(90, min(int(self.forecast_obs_days), 730)),
+            wallet_trade_days=max(30, min(int(self.wallet_trade_days), 730)),
+            wallet_exposure_days=max(14, min(int(self.wallet_exposure_days), 365)),
+            model_input_days=max(7, min(int(self.model_input_days), 365)),
             prune_signals=bool(self.prune_signals),
             batch_size=max(100, min(int(self.batch_size), 20000)),
         )
@@ -166,6 +173,14 @@ async def run_retention_maintenance(
         "market_flow_cutoff": _cutoff(policy.market_flow_days),
         "raw_payload_cutoff": _cutoff(policy.raw_payload_days),
         "signal_cutoff": _cutoff(policy.signal_days),
+        "forecast_obs_cutoff_date": (
+            now - timedelta(days=policy.forecast_obs_days)
+        ).strftime("%Y-%m-%d"),
+        "wallet_trade_cutoff": _cutoff(policy.wallet_trade_days),
+        "wallet_exposure_cutoff_date": (
+            now - timedelta(days=policy.wallet_exposure_days)
+        ).strftime("%Y-%m-%d"),
+        "model_input_cutoff": _cutoff(policy.model_input_days),
     }
 
     action_specs: list[dict[str, Any]] = [
@@ -293,6 +308,112 @@ async def run_retention_maintenance(
             """,
             "params": {"raw_payload_cutoff": params["raw_payload_cutoff"]},
             "rationale": "Keeps normalized wallet flow/trade fields while shedding duplicated API payload blobs.",
+        },
+        {
+            "name": "null_old_model_snapshot_inputs",
+            "table": "model_snapshots",
+            "mode": "null_debug_payload",
+            "count_sql": """
+                SELECT count(*)
+                FROM model_snapshots ms
+                JOIN events e ON e.id = ms.event_id
+                WHERE ms.computed_at < :model_input_cutoff
+                  AND ms.inputs_json IS NOT NULL
+                  AND e.date_et < to_char((now() AT TIME ZONE 'America/New_York')::date, 'YYYY-MM-DD')
+                  AND NOT EXISTS (
+                    SELECT 1 FROM buckets b
+                    JOIN positions p ON p.bucket_id = b.id
+                    WHERE b.event_id = ms.event_id AND COALESCE(p.net_qty, 0) > 0
+                  )
+            """,
+            "exec_sql": """
+                WITH doomed AS (
+                    SELECT ms.id
+                    FROM model_snapshots ms
+                    JOIN events e ON e.id = ms.event_id
+                    WHERE ms.computed_at < :model_input_cutoff
+                      AND ms.inputs_json IS NOT NULL
+                      AND e.date_et < to_char((now() AT TIME ZONE 'America/New_York')::date, 'YYYY-MM-DD')
+                      AND NOT EXISTS (
+                        SELECT 1 FROM buckets b
+                        JOIN positions p ON p.bucket_id = b.id
+                        WHERE b.event_id = ms.event_id AND COALESCE(p.net_qty, 0) > 0
+                      )
+                    ORDER BY ms.computed_at ASC
+                    LIMIT :batch_size
+                )
+                UPDATE model_snapshots
+                SET inputs_json = NULL
+                WHERE id IN (SELECT id FROM doomed)
+            """,
+            "params": {"model_input_cutoff": params["model_input_cutoff"]},
+            "rationale": "Keeps timestamp, mu, sigma, probability vector, and quality while removing old debug input JSON from inactive markets.",
+        },
+        {
+            "name": "delete_old_forecast_obs_beyond_skill_window",
+            "table": "forecast_obs",
+            "mode": "delete_rolling_history",
+            "count_sql": """
+                SELECT count(*)
+                FROM forecast_obs
+                WHERE date_et < :forecast_obs_cutoff_date
+            """,
+            "exec_sql": """
+                WITH doomed AS (
+                    SELECT id
+                    FROM forecast_obs
+                    WHERE date_et < :forecast_obs_cutoff_date
+                    ORDER BY date_et ASC, fetched_at ASC
+                    LIMIT :batch_size
+                )
+                DELETE FROM forecast_obs WHERE id IN (SELECT id FROM doomed)
+            """,
+            "params": {"forecast_obs_cutoff_date": params["forecast_obs_cutoff_date"]},
+            "rationale": "Lead-time skill and live calibration use rolling windows; aggregate error tables preserve older learning while the hot DB keeps the most relevant normalized forecasts.",
+        },
+        {
+            "name": "delete_old_wallet_trades_beyond_skill_window",
+            "table": "wallet_trades",
+            "mode": "delete_rolling_history",
+            "count_sql": """
+                SELECT count(*)
+                FROM wallet_trades
+                WHERE trade_ts < :wallet_trade_cutoff
+            """,
+            "exec_sql": """
+                WITH doomed AS (
+                    SELECT id
+                    FROM wallet_trades
+                    WHERE trade_ts < :wallet_trade_cutoff
+                    ORDER BY trade_ts ASC
+                    LIMIT :batch_size
+                )
+                DELETE FROM wallet_trades WHERE id IN (SELECT id FROM doomed)
+            """,
+            "params": {"wallet_trade_cutoff": params["wallet_trade_cutoff"]},
+            "rationale": "Wallet skill is finite-window and aggregate WalletStat/WalletSkillScore rows preserve the signal; stale public trade firehose rows are not production-critical.",
+        },
+        {
+            "name": "delete_old_wallet_market_exposures",
+            "table": "wallet_market_exposures",
+            "mode": "delete_rolling_exposure",
+            "count_sql": """
+                SELECT count(*)
+                FROM wallet_market_exposures
+                WHERE date < :wallet_exposure_cutoff_date
+            """,
+            "exec_sql": """
+                WITH doomed AS (
+                    SELECT id
+                    FROM wallet_market_exposures
+                    WHERE date < :wallet_exposure_cutoff_date
+                    ORDER BY date ASC, last_updated_ts ASC
+                    LIMIT :batch_size
+                )
+                DELETE FROM wallet_market_exposures WHERE id IN (SELECT id FROM doomed)
+            """,
+            "params": {"wallet_exposure_cutoff_date": params["wallet_exposure_cutoff_date"]},
+            "rationale": "Exposure rows are point-in-time wallet state. Current/recent rows inform shadow flow; old exposure state can be regenerated from retained trade windows or aggregates.",
         },
     ]
 

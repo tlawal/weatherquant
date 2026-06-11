@@ -519,6 +519,49 @@ async def job_train_residual_ml_shadow():
     await asyncio.to_thread(extract_features_and_train)
 
 
+async def job_db_retention_maintenance():
+    """Keep the hot Postgres database under the Railway volume cap."""
+    if not Config.DB_RETENTION_ENABLED:
+        return
+
+    from backend.storage.db import get_session
+    from backend.storage.maintenance import RetentionPolicy, run_retention_maintenance
+
+    policy = RetentionPolicy(
+        market_snapshot_days=Config.DB_RETENTION_MARKET_SNAPSHOT_DAYS,
+        market_flow_days=Config.DB_RETENTION_MARKET_FLOW_DAYS,
+        raw_payload_days=Config.DB_RETENTION_RAW_PAYLOAD_DAYS,
+        signal_days=Config.DB_RETENTION_SIGNAL_DAYS,
+        forecast_obs_days=Config.DB_RETENTION_FORECAST_OBS_DAYS,
+        wallet_trade_days=Config.DB_RETENTION_WALLET_TRADE_DAYS,
+        wallet_exposure_days=Config.DB_RETENTION_WALLET_EXPOSURE_DAYS,
+        model_input_days=Config.DB_RETENTION_MODEL_INPUT_DAYS,
+        prune_signals=Config.DB_RETENTION_PRUNE_SIGNALS,
+        batch_size=Config.DB_RETENTION_BATCH_SIZE,
+    )
+    async with get_session() as sess:
+        report = await run_retention_maintenance(sess, dry_run=False, policy=policy)
+
+    if not report.get("supported"):
+        log.info("db_retention: skipped dialect=%s", report.get("dialect"))
+        return
+
+    actions = report.get("actions") or []
+    affected = sum(int(a.get("affected_rows") or 0) for a in actions)
+    candidates = sum(int(a.get("candidate_rows") or 0) for a in actions)
+    nonzero = [
+        f"{a.get('name')}={a.get('affected_rows')}"
+        for a in actions
+        if int(a.get("affected_rows") or 0) > 0
+    ]
+    log.info(
+        "db_retention: completed candidates=%d affected=%d actions=%s",
+        candidates,
+        affected,
+        ",".join(nonzero[:8]) if nonzero else "none",
+    )
+
+
 async def job_heartbeat():
     """Write a heartbeat so API server can detect worker liveness."""
     from backend.storage.db import get_session
@@ -591,6 +634,11 @@ def create_scheduler() -> AsyncIOScheduler:
         job_train_residual_ml_shadow,
         seconds=max(3600, Config.RESIDUAL_ML_SHADOW_TRAIN_SECONDS),
         name="train_residual_ml_shadow",
+    )
+    add(
+        job_db_retention_maintenance,
+        seconds=max(3600, Config.DB_RETENTION_INTERVAL_SECONDS),
+        name="db_retention_maintenance",
     )
     # M1 Phase 2 — refit BMA mixture weights nightly. Cadence is 24h because
     # weights only meaningfully shift after a few new settled events arrive,

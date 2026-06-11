@@ -24,5 +24,8 @@ def test_db_admin_template_uses_safe_admin_endpoints():
     assert "/api/admin/db/size-report" in text
     assert "/api/admin/db/maintenance/prune" in text
     assert "dry_run: String(dryRun)" in text
+    assert "forecast_obs_days: String(this.policy.forecast_obs_days)" in text
+    assert "wallet_trade_days: String(this.policy.wallet_trade_days)" in text
+    assert "model_input_days: String(this.policy.model_input_days)" in text
     assert "Execute Prune" in text
     assert "Protected History" in text

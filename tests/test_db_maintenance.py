@@ -42,6 +42,10 @@ def test_retention_policy_clamps_unsafe_inputs():
         market_flow_days=0,
         raw_payload_days=1,
         signal_days=2,
+        forecast_obs_days=3,
+        wallet_trade_days=3,
+        wallet_exposure_days=3,
+        model_input_days=3,
         prune_signals=True,
         batch_size=999999,
     ).normalized()
@@ -49,6 +53,10 @@ def test_retention_policy_clamps_unsafe_inputs():
     assert policy.market_flow_days == 1
     assert policy.raw_payload_days == 7
     assert policy.signal_days == 14
+    assert policy.forecast_obs_days == 90
+    assert policy.wallet_trade_days == 30
+    assert policy.wallet_exposure_days == 14
+    assert policy.model_input_days == 7
     assert policy.prune_signals is True
     assert policy.batch_size == 20000
 

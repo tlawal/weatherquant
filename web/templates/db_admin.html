@@ -67,6 +67,22 @@
           <input type="number" min="7" max="365" x-model.number="policy.raw_payload_days" class="w-full rounded px-2 py-1 mono" style="background:var(--bg-panel);border:1px solid var(--border)">
         </label>
         <label class="block">
+          <span class="mb-1 block uppercase tracking-wider" style="color:var(--text-muted)">Forecast obs days</span>
+          <input type="number" min="90" max="730" x-model.number="policy.forecast_obs_days" class="w-full rounded px-2 py-1 mono" style="background:var(--bg-panel);border:1px solid var(--border)">
+        </label>
+        <label class="block">
+          <span class="mb-1 block uppercase tracking-wider" style="color:var(--text-muted)">Wallet trade days</span>
+          <input type="number" min="30" max="730" x-model.number="policy.wallet_trade_days" class="w-full rounded px-2 py-1 mono" style="background:var(--bg-panel);border:1px solid var(--border)">
+        </label>
+        <label class="block">
+          <span class="mb-1 block uppercase tracking-wider" style="color:var(--text-muted)">Wallet exposure days</span>
+          <input type="number" min="14" max="365" x-model.number="policy.wallet_exposure_days" class="w-full rounded px-2 py-1 mono" style="background:var(--bg-panel);border:1px solid var(--border)">
+        </label>
+        <label class="block">
+          <span class="mb-1 block uppercase tracking-wider" style="color:var(--text-muted)">Model input days</span>
+          <input type="number" min="7" max="365" x-model.number="policy.model_input_days" class="w-full rounded px-2 py-1 mono" style="background:var(--bg-panel);border:1px solid var(--border)">
+        </label>
+        <label class="block">
           <span class="mb-1 block uppercase tracking-wider" style="color:var(--text-muted)">Batch size</span>
           <input type="number" min="100" max="20000" x-model.number="policy.batch_size" class="w-full rounded px-2 py-1 mono" style="background:var(--bg-panel);border:1px solid var(--border)">
         </label>
@@ -173,10 +189,14 @@ function dbAdminPage() {
     error: '',
     loading: false,
     policy: {
-      market_snapshot_days: 21,
-      market_flow_days: 14,
-      raw_payload_days: 30,
-      signal_days: 60,
+      market_snapshot_days: 5,
+      market_flow_days: 7,
+      raw_payload_days: 14,
+      signal_days: 45,
+      forecast_obs_days: 180,
+      wallet_trade_days: 120,
+      wallet_exposure_days: 45,
+      model_input_days: 14,
       prune_signals: false,
       batch_size: 5000,
     },
@@ -231,6 +251,10 @@ function dbAdminPage() {
         market_flow_days: String(this.policy.market_flow_days),
         raw_payload_days: String(this.policy.raw_payload_days),
         signal_days: String(this.policy.signal_days),
+        forecast_obs_days: String(this.policy.forecast_obs_days),
+        wallet_trade_days: String(this.policy.wallet_trade_days),
+        wallet_exposure_days: String(this.policy.wallet_exposure_days),
+        model_input_days: String(this.policy.model_input_days),
         prune_signals: String(this.policy.prune_signals),
         batch_size: String(this.policy.batch_size),
       });

@@ -81,11 +81,11 @@ def _build_engine() -> AsyncEngine:
     kwargs: dict = {"echo": False}
 
     if not is_sqlite:
-        # PostgreSQL - keep the pool small by default. Railway's smallest
-        # Postgres tiers hit memory pressure from idle backends long before
-        # they hit max_connections; the scheduler now batches the largest
-        # snapshot writes, so a 6+4 ceiling is enough for API traffic plus
-        # worker bursts. Override via env vars if the service moves tiers.
+        # PostgreSQL - keep the pool bounded. Railway's smallest Postgres
+        # tiers hit memory pressure from idle backends long before they hit
+        # max_connections; default Config is 10+5 after the emergency
+        # compaction so worker bursts wait instead of deadlocking, but the
+        # ceiling stays small enough for the 5GB volume/tiny-memory tier.
         kwargs.update(
             {
                 "pool_pre_ping": True,

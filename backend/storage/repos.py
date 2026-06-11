@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import desc, func, select, tuple_, update
+from sqlalchemy import and_, desc, func, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.config import Config
@@ -1729,6 +1729,48 @@ async def get_signals_for_latest_snapshot(
     return list(result.scalars().all())
 
 
+async def get_dashboard_signal_rows(
+    session: AsyncSession,
+    *,
+    date_et: str,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    """Signals with bucket/event/city context for the root dashboard.
+
+    This is the joined equivalent of get_signals_for_latest_snapshot(). Keeping
+    it in the repo layer avoids one ORM fetch per signal row in web/routes.py.
+    """
+    latest_per_event = (
+        select(
+            ModelSnapshot.event_id.label("event_id"),
+            func.max(ModelSnapshot.id).label("max_id"),
+        )
+        .join(Event, Event.id == ModelSnapshot.event_id)
+        .where(Event.date_et == date_et)
+        .group_by(ModelSnapshot.event_id)
+        .subquery()
+    )
+    stmt = (
+        select(Signal, Bucket, Event, City)
+        .join(Bucket, Bucket.id == Signal.bucket_id)
+        .join(Event, Event.id == Bucket.event_id)
+        .join(City, City.id == Event.city_id)
+        .join(latest_per_event, latest_per_event.c.event_id == Event.id)
+        .where(
+            Event.date_et == date_et,
+            (Signal.model_snapshot_id == latest_per_event.c.max_id)
+            | (Signal.model_snapshot_id.is_(None)),
+        )
+        .order_by(desc(Signal.computed_at))
+        .limit(max(1, min(int(limit), 1000)))
+    )
+    rows = (await session.execute(stmt)).all()
+    return [
+        {"signal": signal, "bucket": bucket, "event": event, "city": city}
+        for signal, bucket, event, city in rows
+    ]
+
+
 async def get_latest_signal_for_bucket(
     session: AsyncSession,
     bucket_id: int,
@@ -2164,6 +2206,49 @@ async def get_unredeemed_resolved_events(
     return list(result.scalars().all())
 
 
+async def get_unredeemed_winning_position_summaries(
+    session: AsyncSession,
+) -> list[dict[str, Any]]:
+    """Resolved, unredeemed winning positions for the root dashboard."""
+    stmt = (
+        select(
+            Event.id.label("event_id"),
+            City.display_name.label("city_name"),
+            Event.date_et.label("date_et"),
+            Bucket.label.label("winning_label"),
+            func.sum(Position.net_qty).label("total_payout"),
+        )
+        .join(City, City.id == Event.city_id)
+        .join(
+            Bucket,
+            and_(
+                Bucket.event_id == Event.id,
+                Bucket.bucket_idx == Event.winning_bucket_idx,
+            ),
+        )
+        .join(Position, Position.bucket_id == Bucket.id)
+        .where(
+            Event.resolved_at.isnot(None),
+            Event.redeemed_at.is_(None),
+            Event.winning_bucket_idx.isnot(None),
+            Position.net_qty > 0,
+        )
+        .group_by(Event.id, City.display_name, Event.date_et, Bucket.label)
+        .order_by(desc(Event.date_et), Event.id)
+    )
+    rows = (await session.execute(stmt)).mappings().all()
+    return [
+        {
+            "event_id": int(row["event_id"]),
+            "city_name": row["city_name"] or "?",
+            "date_et": row["date_et"],
+            "winning_label": row["winning_label"] or "N/A",
+            "total_payout": round(float(row["total_payout"] or 0.0), 2),
+        }
+        for row in rows
+    ]
+
+
 async def get_recently_redeemed_events(session: AsyncSession, days: int = 7) -> list[Event]:
     """Events redeemed within the last N days."""
     from datetime import timedelta
@@ -2175,6 +2260,43 @@ async def get_recently_redeemed_events(session: AsyncSession, days: int = 7) -> 
         .options(selectinload(Event.buckets))
     )
     return list(result.scalars().all())
+
+
+async def get_recently_redeemed_event_summaries(
+    session: AsyncSession,
+    days: int = 7,
+    *,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Recently redeemed events with city and winning-label context."""
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    stmt = (
+        select(Event, City, Bucket)
+        .join(City, City.id == Event.city_id)
+        .outerjoin(
+            Bucket,
+            and_(
+                Bucket.event_id == Event.id,
+                Bucket.bucket_idx == Event.winning_bucket_idx,
+            ),
+        )
+        .where(Event.redeemed_at.isnot(None), Event.redeemed_at >= cutoff)
+        .order_by(desc(Event.redeemed_at))
+        .limit(max(1, min(int(limit), 500)))
+    )
+    rows = (await session.execute(stmt)).all()
+    return [
+        {
+            "event_id": event.id,
+            "city_name": city.display_name if city else "?",
+            "date_et": event.date_et,
+            "winning_label": (bucket.label if bucket else None) or "N/A",
+            "redeemed_at": event.redeemed_at.strftime("%b %d %H:%M")
+            if event.redeemed_at
+            else "",
+        }
+        for event, city, bucket in rows
+    ]
 
 
 # ─── Station Calibrations ─────────────────────────────────────────────────────
