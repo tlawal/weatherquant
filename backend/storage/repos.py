@@ -1087,6 +1087,49 @@ async def get_latest_market_flow_features_bulk(
     return {row.bucket_id: row for row in result.scalars().all()}
 
 
+async def get_market_flow_refresh_targets(
+    session: AsyncSession,
+    *,
+    bucket_ids: list[int] | None = None,
+    open_positions_only: bool = True,
+    min_date_et: str | None = None,
+    limit: int = 80,
+) -> list[dict[str, Any]]:
+    """Bucket/condition targets for lightweight shadow-flow refresh."""
+    stmt = (
+        select(Bucket, Event, City)
+        .join(Event, Event.id == Bucket.event_id)
+        .join(City, City.id == Event.city_id)
+        .where(Bucket.condition_id.isnot(None))
+        .order_by(desc(Event.date_et), City.city_slug, Bucket.bucket_idx)
+        .limit(max(1, min(int(limit), 500)))
+    )
+    if bucket_ids:
+        stmt = stmt.where(Bucket.id.in_(bucket_ids))
+    else:
+        if min_date_et:
+            stmt = stmt.where(Event.date_et >= min_date_et)
+        if open_positions_only:
+            stmt = stmt.join(Position, Position.bucket_id == Bucket.id).where(Position.net_qty > 0)
+        else:
+            stmt = stmt.where(Event.resolved_at.is_(None))
+    rows = (await session.execute(stmt)).all()
+    return [
+        {
+            "bucket_id": bucket.id,
+            "condition_id": bucket.condition_id,
+            "bucket_idx": bucket.bucket_idx,
+            "bucket_label": bucket.label,
+            "event_id": event.id,
+            "date_et": event.date_et,
+            "city_slug": city.city_slug,
+            "market_slug": event.gamma_slug,
+        }
+        for bucket, event, city in rows
+        if bucket.condition_id
+    ]
+
+
 # ─── Wallet Stats ─────────────────────────────────────────────────────────────
 
 async def upsert_wallet_stat(
@@ -2012,6 +2055,21 @@ async def get_all_positions(session: AsyncSession) -> list[Position]:
         select(Position).where(Position.net_qty > 0)
     )
     return list(result.scalars().all())
+
+
+async def get_open_position_summary(session: AsyncSession) -> dict[str, float | int]:
+    """Aggregate open-position count and cost exposure without loading rows."""
+    result = await session.execute(
+        select(
+            func.count(Position.id),
+            func.coalesce(func.sum(Position.net_qty * Position.avg_cost), 0.0),
+        ).where(Position.net_qty > 0)
+    )
+    count, exposure = result.one()
+    return {
+        "open_positions": int(count or 0),
+        "total_exposure": float(exposure or 0.0),
+    }
 
 
 async def get_daily_realized_pnl(session: AsyncSession, date_et: str) -> float:

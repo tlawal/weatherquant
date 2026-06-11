@@ -65,6 +65,87 @@ class RetentionPolicy:
         )
 
 
+@dataclass(frozen=True)
+class ColdExportSpec:
+    table: str
+    cutoff_column: str
+    cutoff_kind: str
+    rationale: str
+
+
+ALLOWED_COLD_EXPORTS: dict[str, ColdExportSpec] = {
+    "market_snapshots": ColdExportSpec(
+        table="market_snapshots",
+        cutoff_column="fetched_at",
+        cutoff_kind="timestamp",
+        rationale="CLOB depth/price history for execution and VPIN-style research.",
+    ),
+    "market_flow_features": ColdExportSpec(
+        table="market_flow_features",
+        cutoff_column="computed_at",
+        cutoff_kind="timestamp",
+        rationale="Shadow flow/imbalance/toxicity feature history for out-of-sample validation.",
+    ),
+    "wallet_trades": ColdExportSpec(
+        table="wallet_trades",
+        cutoff_column="trade_ts",
+        cutoff_kind="timestamp",
+        rationale="Normalized public wallet-trade firehose for longer-window smart-money backtests.",
+    ),
+    "wallet_market_exposures": ColdExportSpec(
+        table="wallet_market_exposures",
+        cutoff_column="date",
+        cutoff_kind="date",
+        rationale="Derived wallet exposure state for research snapshots.",
+    ),
+    "forecast_obs": ColdExportSpec(
+        table="forecast_obs",
+        cutoff_column="date_et",
+        cutoff_kind="date",
+        rationale="Raw forecast observations beyond the hot rolling skill window.",
+    ),
+}
+
+
+def get_cold_export_spec(table: str) -> ColdExportSpec:
+    key = (table or "").strip().lower()
+    try:
+        return ALLOWED_COLD_EXPORTS[key]
+    except KeyError as exc:
+        allowed = ", ".join(sorted(ALLOWED_COLD_EXPORTS))
+        raise ValueError(f"Unsupported cold export table {table!r}; allowed: {allowed}") from exc
+
+
+def build_cold_export_metadata(
+    table: str,
+    *,
+    days: int,
+    limit_rows: int | None = None,
+    batch_size: int = 5000,
+) -> dict[str, Any]:
+    """Validate and describe a hot-DB cold export request."""
+    spec = get_cold_export_spec(table)
+    days_clamped = max(1, min(int(days), 3650))
+    batch_clamped = max(100, min(int(batch_size), 20000))
+    row_limit = None if limit_rows is None else max(1, min(int(limit_rows), 10_000_000))
+    cutoff_dt = _cutoff(days_clamped)
+    cutoff_value: Any
+    if spec.cutoff_kind == "date":
+        cutoff_value = cutoff_dt.strftime("%Y-%m-%d")
+    else:
+        cutoff_value = cutoff_dt
+    return {
+        "table": spec.table,
+        "cutoff_column": spec.cutoff_column,
+        "cutoff_kind": spec.cutoff_kind,
+        "cutoff_value": cutoff_value,
+        "days": days_clamped,
+        "limit_rows": row_limit,
+        "batch_size": batch_clamped,
+        "rationale": spec.rationale,
+    }
+
+
 def _dialect(session: AsyncSession) -> str:
     bind = session.get_bind()
     return getattr(getattr(bind, "dialect", None), "name", "unknown")
@@ -109,6 +190,20 @@ async def build_db_size_report(session: AsyncSession) -> dict[str, Any]:
         "index_bytes": sum(int(r["index_bytes"] or 0) for r in rows),
         "dead_rows_est": sum(int(r["dead_rows_est"] or 0) for r in rows),
     }
+    database_bytes = int(
+        await session.scalar(text("SELECT pg_database_size(current_database())")) or 0
+    )
+    wal_bytes = 0
+    try:
+        wal_bytes = int(
+            await session.scalar(text("SELECT COALESCE(sum(size), 0) FROM pg_ls_waldir()"))
+            or 0
+        )
+    except Exception:
+        wal_bytes = 0
+    totals["database_bytes"] = database_bytes
+    totals["wal_bytes"] = wal_bytes
+    totals["hot_store_bytes"] = database_bytes + wal_bytes
     return {
         "supported": True,
         "dialect": dialect,
@@ -116,6 +211,123 @@ async def build_db_size_report(session: AsyncSession) -> dict[str, Any]:
         "totals": totals,
         "protected_tables": list(PROTECTED_TABLES),
         "tables": [dict(r) for r in rows],
+    }
+
+
+def evaluate_db_storage_alerts(
+    size_report: dict[str, Any],
+    *,
+    volume_limit_mb: int = 5000,
+    volume_alert_pct: float = 0.70,
+    top_table_alert_mb: int = 750,
+    table_growth_alert_mb: int = 100,
+    previous_snapshot: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Evaluate DB storage alerts from a size report and optional prior snapshot."""
+    if not size_report.get("supported"):
+        return {
+            "supported": False,
+            "alerts": [],
+            "snapshot": None,
+            "reason": size_report.get("reason", "unsupported"),
+        }
+
+    totals = size_report.get("totals") or {}
+    volume_limit_bytes = max(1, int(volume_limit_mb)) * 1024 * 1024
+    hot_store_bytes = int(
+        totals.get("hot_store_bytes")
+        or totals.get("database_bytes")
+        or totals.get("total_bytes")
+        or 0
+    )
+    usage_pct = hot_store_bytes / volume_limit_bytes
+    tables = size_report.get("tables") or []
+    top_table = tables[0] if tables else None
+    top_table_name = top_table.get("table_name") if top_table else None
+    top_table_bytes = int(top_table.get("total_bytes") or 0) if top_table else 0
+    table_bytes = {
+        str(row.get("table_name")): int(row.get("total_bytes") or 0)
+        for row in tables
+        if row.get("table_name")
+    }
+
+    alerts: list[dict[str, Any]] = []
+    if usage_pct >= float(volume_alert_pct):
+        alerts.append(
+            {
+                "level": "critical" if usage_pct >= 0.90 else "warning",
+                "type": "volume_usage",
+                "message": (
+                    f"Postgres hot store is {usage_pct:.1%} of configured "
+                    f"{int(volume_limit_mb)} MB limit"
+                ),
+                "usage_pct": round(usage_pct, 4),
+                "hot_store_bytes": hot_store_bytes,
+                "volume_limit_bytes": volume_limit_bytes,
+            }
+        )
+
+    top_table_threshold = max(1, int(top_table_alert_mb)) * 1024 * 1024
+    if top_table and top_table_bytes >= top_table_threshold:
+        alerts.append(
+            {
+                "level": "warning",
+                "type": "top_table_size",
+                "message": (
+                    f"Top table {top_table_name} is "
+                    f"{top_table_bytes / 1024 / 1024:.1f} MB"
+                ),
+                "table": top_table_name,
+                "table_bytes": top_table_bytes,
+                "threshold_bytes": top_table_threshold,
+            }
+        )
+
+    previous_tables = (previous_snapshot or {}).get("table_bytes") or {}
+    growth_threshold = max(1, int(table_growth_alert_mb)) * 1024 * 1024
+    growth_rows = []
+    for table_name, current_bytes in table_bytes.items():
+        previous_bytes = int(previous_tables.get(table_name) or 0)
+        growth = current_bytes - previous_bytes
+        if previous_bytes > 0 and growth >= growth_threshold:
+            growth_rows.append((table_name, growth, current_bytes, previous_bytes))
+    for table_name, growth, current_bytes, previous_bytes in sorted(
+        growth_rows,
+        key=lambda item: item[1],
+        reverse=True,
+    )[:5]:
+        alerts.append(
+            {
+                "level": "warning",
+                "type": "table_growth",
+                "message": (
+                    f"Table {table_name} grew "
+                    f"{growth / 1024 / 1024:.1f} MB since last storage snapshot"
+                ),
+                "table": table_name,
+                "growth_bytes": growth,
+                "current_bytes": current_bytes,
+                "previous_bytes": previous_bytes,
+                "threshold_bytes": growth_threshold,
+            }
+        )
+
+    snapshot = {
+        "as_of": size_report.get("as_of"),
+        "hot_store_bytes": hot_store_bytes,
+        "database_bytes": int(totals.get("database_bytes") or 0),
+        "wal_bytes": int(totals.get("wal_bytes") or 0),
+        "volume_limit_bytes": volume_limit_bytes,
+        "usage_pct": round(usage_pct, 6),
+        "top_table": top_table_name,
+        "top_table_bytes": top_table_bytes,
+        "table_bytes": table_bytes,
+    }
+    return {
+        "supported": True,
+        "alerts": alerts,
+        "snapshot": snapshot,
+        "usage_pct": round(usage_pct, 6),
     }
 
 

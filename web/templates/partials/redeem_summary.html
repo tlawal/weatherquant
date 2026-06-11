@@ -1,0 +1,61 @@
+{% if unredeemed_wins %}
+<div class="card mb-5 overflow-hidden glow-green">
+  <div class="px-5 py-3 border-b flex items-center justify-between" style="border-color:var(--border)">
+    <h2 class="font-semibold text-base" style="color:var(--yellow)">Unredeemed Winnings</h2>
+    <span class="text-xs" style="color:var(--text-muted)">{{ unredeemed_wins|length }} event{{ 's' if unredeemed_wins|length != 1 }}</span>
+  </div>
+  <div class="divide-y" style="border-color:var(--border)">
+    {% for win in unredeemed_wins %}
+    <div class="px-5 py-3 flex items-center justify-between" id="redeem-row-{{ win.event_id }}">
+      <div class="flex items-center gap-3">
+        <span class="font-semibold text-sm">{{ win.city_name }}</span>
+        <span class="text-xs mono" style="color:var(--text-muted)">{{ win.date_et }}</span>
+        <span class="text-xs px-2 py-0.5 rounded-full" style="background:var(--bg-panel);color:var(--cyan)">{{ win.winning_label }}</span>
+      </div>
+      <div class="flex items-center gap-4">
+        <span class="mono font-bold text-green-400">${{ '%.2f'|format(win.total_payout) }}</span>
+        <button onclick="claimWinnings({{ win.event_id }}, this)"
+                class="px-4 py-1.5 rounded text-xs font-bold tracking-wide transition-all hover:opacity-90 active:scale-95"
+                style="background:var(--green);color:#000">
+          Claim Winnings
+        </button>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% else %}
+<div class="mb-5 flex justify-end">
+  <button onclick="checkResolved(this)" class="text-xs px-3 py-1.5 rounded transition-all hover:opacity-80"
+          style="color:var(--text-muted);border:1px solid var(--border)">
+    Check for resolved markets
+  </button>
+</div>
+{% endif %}
+
+{% if recent_redeems %}
+<div class="card mb-5 overflow-hidden" style="opacity:0.8">
+  <div class="px-5 py-3 border-b flex items-center justify-between" style="border-color:var(--border)">
+    <h2 class="font-semibold text-sm" style="color:var(--text-muted)">Recently Redeemed (7d)</h2>
+  </div>
+  <div class="divide-y" style="border-color:var(--border)">
+    {% for r in recent_redeems %}
+    <div class="px-5 py-2.5 flex items-center justify-between" id="redeemed-row-{{ r.event_id }}">
+      <div class="flex items-center gap-3">
+        <span class="text-sm" style="color:var(--text-muted)">{{ r.city_name }}</span>
+        <span class="text-xs mono" style="color:var(--text-muted)">{{ r.date_et }}</span>
+        <span class="text-xs" style="color:var(--text-muted)">{{ r.winning_label }}</span>
+      </div>
+      <div class="flex items-center gap-3">
+        <span class="text-xs" style="color:var(--text-muted)">{{ r.redeemed_at }}</span>
+        <button onclick="retryRedeem({{ r.event_id }}, this)"
+                class="px-3 py-1 rounded text-[10px] font-semibold transition-all hover:opacity-80"
+                style="color:var(--text-muted);border:1px solid var(--border)">
+          Retry
+        </button>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}

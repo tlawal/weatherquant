@@ -196,9 +196,12 @@ async def _run_ddl(ddl: str) -> None:
             log.warning("ddl: FAILED — %s — %s", ddl[:80], e)
 
 
-async def init_db() -> None:
+async def init_db(*, run_legacy_migrations: bool | None = None) -> None:
     """Create tables and seed initial data. Called once on startup."""
     global _engine, _session_factory
+
+    if run_legacy_migrations is None:
+        run_legacy_migrations = bool(Config.DB_STARTUP_LEGACY_MIGRATIONS_ENABLED)
 
     _engine = _build_engine()
     _session_factory = async_sessionmaker(
@@ -209,6 +212,15 @@ async def init_db() -> None:
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     log.info("db: tables created/verified")
+
+    if not run_legacy_migrations:
+        log.info(
+            "db: legacy startup migrations skipped "
+            "(DB_STARTUP_LEGACY_MIGRATIONS_ENABLED=false)"
+        )
+        await _seed_initial_data()
+        log.info("db: init complete")
+        return
 
     # Step 2: schema migrations — each in its own transaction so one failure
     # never aborts another (PostgreSQL aborts the whole tx on any error)
@@ -625,17 +637,43 @@ async def _seed_initial_data() -> None:
         from sqlalchemy import select
 
         existing_arming = await session.execute(select(ArmingState))
-        if existing_arming.scalar_one_or_none() is None:
+        arming = existing_arming.scalar_one_or_none()
+        initial_cities = list(Config.INITIAL_CITIES)
+        registry_slugs = {str(c["city_slug"]) for c in initial_cities}
+        existing_city_rows = (
+            await session.execute(select(City).where(City.city_slug.in_(registry_slugs)))
+        ).scalars().all()
+        existing_by_slug = {c.city_slug: c for c in existing_city_rows}
+
+        if arming is not None and registry_slugs.issubset(existing_by_slug):
+            log.info("db: seed fast-path complete (cities=%d)", len(existing_by_slug))
+            return
+
+        if arming is None:
             session.add(ArmingState(id=1, state="DISARMED"))
-            await session.commit()
             log.info("db: seeded arming_state")
 
-        # Cities
-        from backend.storage.repos import upsert_city
-        for c in Config.INITIAL_CITIES:
-            await upsert_city(session, c)
+        inserted = 0
+        updated = 0
+        for city_data in initial_cities:
+            slug = str(city_data["city_slug"])
+            city = existing_by_slug.get(slug)
+            if city is None:
+                session.add(City(**city_data))
+                inserted += 1
+                continue
+            for k, v in city_data.items():
+                if hasattr(city, k):
+                    setattr(city, k, v)
+            updated += 1
 
-        log.info("db: seeded %d cities", len(Config.INITIAL_CITIES))
+        await session.commit()
+        log.info(
+            "db: seeded city registry inserted=%d updated=%d total=%d",
+            inserted,
+            updated,
+            len(initial_cities),
+        )
 
 
 @asynccontextmanager

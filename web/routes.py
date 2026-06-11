@@ -400,10 +400,7 @@ async def dashboard(request: Request):
         get_all_cities,
         get_arming_state,
         get_daily_realized_pnl,
-        get_all_positions,
-        get_dashboard_signal_rows,
-        get_recently_redeemed_event_summaries,
-        get_unredeemed_winning_position_summaries,
+        get_open_position_summary,
     )
 
     today_et = et_today()
@@ -428,84 +425,20 @@ async def dashboard(request: Request):
         cities = await get_all_cities(sess, enabled_only=True)
         arming = await get_arming_state(sess)
         daily_pnl = await get_daily_realized_pnl(sess, today_et)
-        positions = await get_all_positions(sess)
-        signal_context_rows = await get_dashboard_signal_rows(
-            sess, limit=200, date_et=today_et
-        )
+        position_summary = await get_open_position_summary(sess)
 
         log.info("dashboard: data fetched: cities=%d, arming=%s, pnl=%.2f", len(cities), arming.state, daily_pnl)
 
-        # Build signal rows for the table — reuses the outer session.
-        signal_rows = []
-        for row in signal_context_rows:
-            sig = row["signal"]
-            bucket_row = row["bucket"]
-            city_row = row["city"]
-
-            reason = json.loads(sig.reason_json) if sig.reason_json else {}
-            gate_failures = json.loads(sig.gate_failures_json) if sig.gate_failures_json else []
-            if reason.get("city_state") == "resolved":
-                continue
-
-            slug = city_row.city_slug if city_row else ""
-            signal_rows.append({
-                "city_slug": slug,
-                "city_display": city_row.display_name if city_row else "",
-                "unit": city_row.unit if city_row else "F",
-                "bucket_idx": bucket_row.bucket_idx if bucket_row else 0,
-                "label": bucket_row.label or f"Bucket {bucket_row.bucket_idx}",
-                "low_f": bucket_row.low_f,
-                "high_f": bucket_row.high_f,
-                "model_prob": sig.model_prob,
-                "mkt_prob": sig.mkt_prob,
-                "true_edge": sig.true_edge,
-                "exec_cost": sig.exec_cost,
-                "spread": reason.get("spread"),
-                "ask_depth": reason.get("ask_depth"),
-                "actionable": sig.true_edge >= 0.10 and not gate_failures,
-                "gate_failures": gate_failures,
-                "prob_new_high": reason.get("prob_hotter_bucket", reason.get("prob_new_high", 1.0)),
-                "prob_hotter_bucket": reason.get("prob_hotter_bucket", reason.get("prob_new_high", 1.0)),
-                "prob_new_high_raw": reason.get("prob_new_high_raw"),
-                "lock_regime": reason.get("lock_regime", False),
-                "observed_bucket_idx": reason.get("observed_bucket_idx"),
-                "observed_bucket_upper_f": reason.get("observed_bucket_upper_f"),
-                "city_state": reason.get("city_state", "early"),
-                "resolution_high": reason.get("resolution_high"),
-                "raw_high": reason.get("raw_high"),
-                "observation_minutes": reason.get("observation_minutes"),
-                "resolution_mismatch": reason.get("resolution_mismatch"),
-                "_reason": reason,
-            })
-
-        # Deduplicate — keep latest signal per (city, bucket_idx)
-        seen = {}
-        deduped = []
-        for row in signal_rows:
-            key = (row["city_slug"], row["bucket_idx"])
-            if key not in seen:
-                seen[key] = True
-                deduped.append(row)
-
-        # Group by city for the redesigned signals table
-        city_groups = _build_city_groups(deduped)
-
-        total_exposure = sum((p.net_qty * p.avg_cost) for p in positions if p.net_qty > 0)
-        unredeemed_wins = await get_unredeemed_winning_position_summaries(sess)
-        recent_redeems = await get_recently_redeemed_event_summaries(sess, days=7)
-
     context = {
         "request": request,
-        "signal_rows": deduped,
-        "city_groups": city_groups,
+        "signal_rows": [],
+        "city_groups": [],
         "arming_state": arming.state,
         "daily_pnl": round(daily_pnl, 2),
-        "total_exposure": round(total_exposure, 2),
-        "open_positions": len([p for p in positions if p.net_qty > 0]),
+        "total_exposure": round(float(position_summary["total_exposure"]), 2),
+        "open_positions": int(position_summary["open_positions"]),
         "cities": [c.city_slug for c in cities],
         "today_et": today_et,
-        "unredeemed_wins": unredeemed_wins,
-        "recent_redeems": recent_redeems,
         "dashboard_cache_hit": False,
     }
     if cache_ttl_s:
@@ -1770,31 +1703,19 @@ async def db_admin(request: Request):
 async def htmx_signals_table(request: Request):
     """HTMX partial — refreshes only the signals table body."""
     from backend.storage.db import get_session
-    from backend.storage.repos import get_signals_for_latest_snapshot
-    from backend.storage.models import Bucket, Event, City
+    from backend.storage.repos import get_dashboard_signal_rows
 
-    # Single session for the whole HTMX poll — was opening N+1 sessions
-    # (1 outer + 1 per signal) which leaked aiosqlite daemon threads under
-    # SQLite + NullPool. The HTMX poller hits this endpoint every few
-    # seconds, so the cumulative leak rate was the main driver of the
-    # `dialect.connect()` exhaustion 500s.
     async with get_session() as sess:
-        raw_signals = await get_signals_for_latest_snapshot(
-            sess, limit=1000, date_et=None,
+        signal_context_rows = await get_dashboard_signal_rows(
+            sess, limit=1000, date_et=et_today(),
         )
 
         rows = []
         seen = {}
-        for sig in raw_signals:
-            b = await sess.get(Bucket, sig.bucket_id)
-            if not b:
-                continue
-            ev = await sess.get(Event, b.event_id)
-            if not ev:
-                continue
-            c = await sess.get(City, ev.city_id)
-            if not c or ev.date_et != city_local_date(c):
-                continue
+        for row in signal_context_rows:
+            sig = row["signal"]
+            b = row["bucket"]
+            c = row["city"]
 
             key = (c.city_slug, b.bucket_idx)
             if key in seen:
@@ -1838,6 +1759,28 @@ async def htmx_signals_table(request: Request):
 
     city_groups = _build_city_groups(rows)
     return templates.TemplateResponse("partials/signals_table.html", {"request": request, "city_groups": city_groups})
+
+
+@dashboard_router.get("/htmx/redeem-summary", response_class=HTMLResponse)
+async def htmx_redeem_summary(request: Request):
+    """HTMX partial for settlement/redeem panels on the root dashboard."""
+    from backend.storage.db import get_session
+    from backend.storage.repos import (
+        get_recently_redeemed_event_summaries,
+        get_unredeemed_winning_position_summaries,
+    )
+
+    async with get_session() as sess:
+        unredeemed_wins = await get_unredeemed_winning_position_summaries(sess)
+        recent_redeems = await get_recently_redeemed_event_summaries(sess, days=7)
+    return templates.TemplateResponse(
+        "partials/redeem_summary.html",
+        {
+            "request": request,
+            "unredeemed_wins": unredeemed_wins,
+            "recent_redeems": recent_redeems,
+        },
+    )
 
 
 @dashboard_router.get("/stations", response_class=HTMLResponse)

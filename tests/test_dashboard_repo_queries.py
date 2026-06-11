@@ -1,10 +1,11 @@
 import asyncio
 from datetime import datetime, timezone
 
+import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from backend.storage.models import Base, Bucket, City, Event, ModelSnapshot, Signal
-from backend.storage.repos import get_dashboard_signal_rows
+from backend.storage.models import Base, Bucket, City, Event, ModelSnapshot, Position, Signal
+from backend.storage.repos import get_dashboard_signal_rows, get_open_position_summary
 
 
 def _run(coro):
@@ -91,3 +92,32 @@ def test_dashboard_signal_rows_only_use_latest_snapshot(tmp_path):
     assert rows[0]["city"].city_slug == "atlanta"
     assert rows[0]["bucket"].label == "80-81"
     assert rows[0]["signal"].model_prob == 0.6
+
+
+def test_open_position_summary_aggregates_without_closed_rows(tmp_path):
+    async def scenario():
+        db_path = tmp_path / "positions.db"
+        engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+        session_factory = async_sessionmaker(
+            engine, expire_on_commit=False, class_=AsyncSession
+        )
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        async with session_factory() as session:
+            session.add_all([
+                Position(bucket_id=1, side="YES", net_qty=2.0, avg_cost=0.31),
+                Position(bucket_id=2, side="YES", net_qty=3.0, avg_cost=0.40),
+                Position(bucket_id=3, side="YES", net_qty=0.0, avg_cost=0.99),
+            ])
+            await session.commit()
+
+        async with session_factory() as session:
+            summary = await get_open_position_summary(session)
+
+        await engine.dispose()
+        return summary
+
+    summary = _run(scenario())
+    assert summary["open_positions"] == 2
+    assert summary["total_exposure"] == pytest.approx(1.82)

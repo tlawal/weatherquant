@@ -34,6 +34,16 @@ def _int(key: str, default: int) -> int:
         return default
 
 
+def _managed_runtime_default(default_local: bool) -> bool:
+    """Return a conservative default for managed deploy runtimes."""
+    managed = bool(
+        os.environ.get("RAILWAY_ENVIRONMENT")
+        or os.environ.get("RAILWAY_PROJECT_ID")
+        or os.environ.get("RENDER")
+    )
+    return False if managed else default_local
+
+
 class Config:
     # ── Database ─────────────────────────────────────────────────────────────
     DATABASE_URL: str = os.environ.get(
@@ -57,6 +67,16 @@ class Config:
     DB_RETENTION_PRUNE_SIGNALS: bool = _bool("DB_RETENTION_PRUNE_SIGNALS", default=False)
     DB_RETENTION_BATCH_SIZE: int = _int("DB_RETENTION_BATCH_SIZE", 5000)
     DASHBOARD_CACHE_TTL_SECONDS: int = _int("DASHBOARD_CACHE_TTL_SECONDS", 8)
+    DB_STORAGE_ALERT_ENABLED: bool = _bool("DB_STORAGE_ALERT_ENABLED", default=True)
+    DB_VOLUME_LIMIT_MB: int = _int("DB_VOLUME_LIMIT_MB", 5000)
+    DB_VOLUME_ALERT_PCT: float = _float("DB_VOLUME_ALERT_PCT", 0.70)
+    DB_TOP_TABLE_ALERT_MB: int = _int("DB_TOP_TABLE_ALERT_MB", 750)
+    DB_TABLE_GROWTH_ALERT_MB: int = _int("DB_TABLE_GROWTH_ALERT_MB", 100)
+    DB_STORAGE_ALERT_INTERVAL_SECONDS: int = _int("DB_STORAGE_ALERT_INTERVAL_SECONDS", 3600)
+    DB_STARTUP_LEGACY_MIGRATIONS_ENABLED: bool = _bool(
+        "DB_STARTUP_LEGACY_MIGRATIONS_ENABLED",
+        default=_managed_runtime_default(True),
+    )
 
     # ── Service mode ─────────────────────────────────────────────────────────
     SERVICE_TYPE: str = os.environ.get("SERVICE_TYPE", "api").lower()
@@ -214,6 +234,11 @@ class Config:
     WALLET_TRACKER_CONDITION_CHUNK_SIZE: int = _int("WALLET_TRACKER_CONDITION_CHUNK_SIZE", 1)
     WALLET_TRACKER_FETCH_PAUSE_SECONDS: float = _float("WALLET_TRACKER_FETCH_PAUSE_SECONDS", 0.25)
     WALLET_TRACKER_TAKER_ONLY: bool = _bool("WALLET_TRACKER_TAKER_ONLY", default=False)
+    MARKET_FLOW_REFRESH_ENABLED: bool = _bool("MARKET_FLOW_REFRESH_ENABLED", default=True)
+    MARKET_FLOW_REFRESH_SECONDS: int = _int("MARKET_FLOW_REFRESH_SECONDS", 300)
+    MARKET_FLOW_REFRESH_OPEN_POSITIONS_ONLY: bool = _bool("MARKET_FLOW_REFRESH_OPEN_POSITIONS_ONLY", default=True)
+    MARKET_FLOW_ACTIVE_BUCKETS_LIMIT: int = _int("MARKET_FLOW_ACTIVE_BUCKETS_LIMIT", 80)
+    MARKET_FLOW_FETCH_LIMIT: int = _int("MARKET_FLOW_FETCH_LIMIT", 1000)
 
     # ── Logging ───────────────────────────────────────────────────────────────
     LOG_LEVEL: str = os.environ.get("LOG_LEVEL", "INFO").upper()

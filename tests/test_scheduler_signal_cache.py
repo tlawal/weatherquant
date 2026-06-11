@@ -40,3 +40,11 @@ def test_stale_signal_cache_refreshes_generation(monkeypatch):
 
     assert result == ["fresh"]
     assert calls["n"] == 1
+
+
+def test_scheduler_registers_storage_and_flow_maintenance_jobs():
+    sched = scheduler.create_scheduler()
+    job_ids = {job.id for job in sched.get_jobs()}
+    assert "db_retention_maintenance" in job_ids
+    assert "db_storage_alerts" in job_ids
+    assert "refresh_market_flow_features" in job_ids

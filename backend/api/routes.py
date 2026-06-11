@@ -10,12 +10,13 @@ import asyncio
 import json
 import logging
 import time
+import zlib
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Body
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from backend.api.deps import require_admin
@@ -2461,26 +2462,60 @@ async def automation_readiness():
         except Exception:
             balance = None
 
-    async with get_session() as sess:
-        arming = await get_arming_state(sess)
-        heartbeats = await get_all_heartbeats(sess)
-        rows = (await sess.execute(
-            select(Position, Bucket, Event, City)
-            .join(Bucket, Position.bucket_id == Bucket.id)
-            .join(Event, Bucket.event_id == Event.id)
-            .join(City, Event.city_id == City.id)
-            .where(Position.net_qty > 0)
-        )).all()
-        bucket_ids = [bucket.id for _, bucket, _, _ in rows]
-        snap_map = await get_latest_market_snapshots_bulk(sess, bucket_ids)
-        flow_map = await get_latest_market_flow_features_bulk(sess, bucket_ids, window_minutes=15)
-        pending_sells = await get_open_sell_orders_for_buckets(sess, bucket_ids)
-        last_exit_failure = (await sess.execute(
-            select(ExitEvent)
-            .where(ExitEvent.reason_json.ilike("%failed%"))
-            .order_by(ExitEvent.ts.desc())
-            .limit(1)
-        )).scalar_one_or_none()
+    try:
+        async with get_session() as sess:
+            arming = await get_arming_state(sess)
+            heartbeats = await get_all_heartbeats(sess)
+            rows = (await sess.execute(
+                select(Position, Bucket, Event, City)
+                .join(Bucket, Position.bucket_id == Bucket.id)
+                .join(Event, Bucket.event_id == Event.id)
+                .join(City, Event.city_id == City.id)
+                .where(Position.net_qty > 0)
+            )).all()
+            bucket_ids = [bucket.id for _, bucket, _, _ in rows]
+            snap_map = await get_latest_market_snapshots_bulk(sess, bucket_ids)
+            flow_map = await get_latest_market_flow_features_bulk(sess, bucket_ids, window_minutes=15)
+            pending_sells = await get_open_sell_orders_for_buckets(sess, bucket_ids)
+            last_exit_failure = (await sess.execute(
+                select(ExitEvent)
+                .where(ExitEvent.reason_json.ilike("%failed%"))
+                .order_by(ExitEvent.ts.desc())
+                .limit(1)
+            )).scalar_one_or_none()
+    except RuntimeError:
+        return {
+            "as_of": now.isoformat(),
+            "startup_state": "initializing",
+            "arming_state": "UNKNOWN",
+            "auto_trading_should_remain_disarmed": True,
+            "go_live_ready_after_24h_soak": False,
+            "checks": {
+                "disarmed_for_soak": True,
+                "clob_can_trade": bool(clob and clob.can_trade),
+                "balance_ready": balance is not None,
+                "residual_ml_loaded": bool(is_ml_model_loaded()),
+                "scheduler_heartbeats_present": False,
+                "no_stale_held_snapshots": False,
+                "no_pending_sell_orders": False,
+                "shadow_microstructure_fresh": False,
+            },
+            "clob": {
+                "available": clob is not None,
+                "can_trade": bool(clob and clob.can_trade),
+                "balance": round(balance, 4) if balance is not None else None,
+            },
+            "heartbeats": [],
+            "stale_positions": [],
+            "pending_sell_orders": [],
+            "last_exit_failure": None,
+            "shadow_microstructure": {
+                "markets_with_features": 0,
+                "missing_count": 0,
+                "stale_count": 0,
+                "freshness_max_age_s": None,
+            },
+        }
 
     stale_positions = []
     for pos, bucket, event, city in rows:
@@ -2611,6 +2646,128 @@ async def admin_db_retention_prune(
         report = await run_retention_maintenance(sess, dry_run=dry_run, policy=policy)
     report["actor"] = actor
     return report
+
+
+def _cold_export_json_default(value):
+    if isinstance(value, datetime):
+        if value.tzinfo:
+            return value.astimezone(timezone.utc).isoformat()
+        return value.replace(tzinfo=timezone.utc).isoformat()
+    return str(value)
+
+
+@router.get("/api/admin/db/cold-export")
+async def admin_db_cold_export(
+    table: str,
+    days: int = 30,
+    limit_rows: int | None = None,
+    batch_size: int = 5000,
+    actor: str = Depends(require_admin),
+):
+    """Stream old firehose rows as gzip JSONL before hot-DB retention deletes them."""
+    from sqlalchemy import text
+    from backend.storage.maintenance import build_cold_export_metadata
+
+    try:
+        meta = build_cold_export_metadata(
+            table,
+            days=days,
+            limit_rows=limit_rows,
+            batch_size=batch_size,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    safe_table = meta["table"]
+    safe_column = meta["cutoff_column"]
+    cutoff_value = meta["cutoff_value"]
+    cutoff_label = (
+        cutoff_value.strftime("%Y%m%d") if isinstance(cutoff_value, datetime)
+        else str(cutoff_value).replace("-", "")
+    )
+    filename = f"weatherquant_{safe_table}_older_than_{cutoff_label}.jsonl.gz"
+
+    async def stream_rows():
+        compressor = zlib.compressobj(level=6, wbits=16 + zlib.MAX_WBITS)
+        exported = 0
+        last_id = 0
+        header = {
+            "_meta": {
+                **{
+                    key: value
+                    for key, value in meta.items()
+                    if key != "cutoff_value"
+                },
+                "cutoff_value": _cold_export_json_default(cutoff_value),
+                "actor": actor,
+                "exported_at": datetime.now(timezone.utc).isoformat(),
+                "format": "gzip-jsonl",
+            }
+        }
+        first = compressor.compress(
+            (json.dumps(header, default=_cold_export_json_default, sort_keys=True) + "\n").encode("utf-8")
+        )
+        if first:
+            yield first
+
+        async with get_session() as sess:
+            while True:
+                remaining = None if meta["limit_rows"] is None else int(meta["limit_rows"]) - exported
+                if remaining is not None and remaining <= 0:
+                    break
+                this_batch = int(meta["batch_size"] if remaining is None else min(meta["batch_size"], remaining))
+                sql = text(
+                    f"""
+                    SELECT *
+                    FROM {safe_table}
+                    WHERE {safe_column} < :cutoff_value
+                      AND id > :last_id
+                    ORDER BY id ASC
+                    LIMIT :batch_size
+                    """
+                )
+                rows = (
+                    await sess.execute(
+                        sql,
+                        {
+                            "cutoff_value": cutoff_value,
+                            "last_id": last_id,
+                            "batch_size": this_batch,
+                        },
+                    )
+                ).mappings().all()
+                if not rows:
+                    break
+
+                payload_lines = []
+                for row in rows:
+                    as_dict = dict(row)
+                    last_id = max(last_id, int(as_dict.get("id") or 0))
+                    payload_lines.append(
+                        json.dumps(
+                            as_dict,
+                            default=_cold_export_json_default,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                    )
+                exported += len(payload_lines)
+                chunk = compressor.compress(("\n".join(payload_lines) + "\n").encode("utf-8"))
+                if chunk:
+                    yield chunk
+
+        tail = compressor.flush()
+        if tail:
+            yield tail
+
+    return StreamingResponse(
+        stream_rows(),
+        media_type="application/gzip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-WeatherQuant-Cold-Export-Table": safe_table,
+        },
+    )
 
 
 # ─── Live Orderbook ──────────────────────────────────────────────────────────

@@ -498,6 +498,22 @@ async def job_update_wallet_rankings():
         )
 
 
+async def job_refresh_market_flow_features():
+    """Refresh shadow CLOB/Data API flow rows for active held markets."""
+    from backend.market_context.flow_features import refresh_active_market_flow_features
+
+    summary = await refresh_active_market_flow_features()
+    if summary.enabled:
+        log.info(
+            "market_flow: scheduler summary targets=%d conditions=%d trades=%d features=%d errors=%d",
+            summary.targets,
+            summary.conditions,
+            summary.trades_fetched,
+            summary.feature_rows_written,
+            len(summary.errors),
+        )
+
+
 async def job_refresh_live_calibrations():
     """Refresh threshold-survival and per-bucket live calibration materializations."""
     from backend.modeling.live_calibration import refresh_all_live_calibrations
@@ -560,6 +576,72 @@ async def job_db_retention_maintenance():
         affected,
         ",".join(nonzero[:8]) if nonzero else "none",
     )
+
+
+async def job_db_storage_alerts():
+    """Alert when Postgres approaches the Railway volume cap or grows quickly."""
+    if not Config.DB_STORAGE_ALERT_ENABLED:
+        return
+
+    import json
+    from sqlalchemy import desc, select
+    from backend.notifications.telegram import send_telegram
+    from backend.storage.db import get_session
+    from backend.storage.maintenance import build_db_size_report, evaluate_db_storage_alerts
+    from backend.storage.models import AuditLog
+    from backend.storage.repos import append_audit
+
+    async with get_session() as sess:
+        size_report = await build_db_size_report(sess)
+        previous = (
+            await sess.execute(
+                select(AuditLog)
+                .where(AuditLog.action == "db_storage_snapshot")
+                .order_by(desc(AuditLog.ts))
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        previous_snapshot = None
+        if previous and previous.payload_json:
+            try:
+                previous_payload = json.loads(previous.payload_json)
+                previous_snapshot = previous_payload.get("snapshot") or previous_payload
+            except Exception:
+                previous_snapshot = None
+
+        alert_report = evaluate_db_storage_alerts(
+            size_report,
+            volume_limit_mb=Config.DB_VOLUME_LIMIT_MB,
+            volume_alert_pct=Config.DB_VOLUME_ALERT_PCT,
+            top_table_alert_mb=Config.DB_TOP_TABLE_ALERT_MB,
+            table_growth_alert_mb=Config.DB_TABLE_GROWTH_ALERT_MB,
+            previous_snapshot=previous_snapshot,
+        )
+        await append_audit(
+            sess,
+            actor="system",
+            action="db_storage_snapshot",
+            payload={
+                "snapshot": alert_report.get("snapshot"),
+                "alerts": alert_report.get("alerts", []),
+            },
+            ok=True,
+        )
+
+    alerts = alert_report.get("alerts") or []
+    if alerts:
+        message = "\n".join(f"- {a.get('message')}" for a in alerts[:6])
+        log.warning("db_storage_alerts: %s", message.replace("\n", " | "))
+        await send_telegram(f"<b>WeatherQuant DB storage alert</b>\n{message}")
+    else:
+        snapshot = alert_report.get("snapshot") or {}
+        log.info(
+            "db_storage_alerts: ok usage=%.1f%% hot_store_mb=%.1f top=%s %.1fMB",
+            100.0 * float(snapshot.get("usage_pct") or 0.0),
+            float(snapshot.get("hot_store_bytes") or 0.0) / 1024 / 1024,
+            snapshot.get("top_table") or "-",
+            float(snapshot.get("top_table_bytes") or 0.0) / 1024 / 1024,
+        )
 
 
 async def job_heartbeat():
@@ -640,6 +722,11 @@ def create_scheduler() -> AsyncIOScheduler:
         seconds=max(3600, Config.DB_RETENTION_INTERVAL_SECONDS),
         name="db_retention_maintenance",
     )
+    add(
+        job_db_storage_alerts,
+        seconds=max(300, Config.DB_STORAGE_ALERT_INTERVAL_SECONDS),
+        name="db_storage_alerts",
+    )
     # M1 Phase 2 — refit BMA mixture weights nightly. Cadence is 24h because
     # weights only meaningfully shift after a few new settled events arrive,
     # and the upstream SourceLeadTimeSkill σᵢ refreshes every 6h. Heavy job
@@ -655,6 +742,11 @@ def create_scheduler() -> AsyncIOScheduler:
         job_update_wallet_rankings,
         seconds=max(60, Config.WALLET_TRACKER_UPDATE_INTERVAL_MINUTES * 60),
         name="update_wallet_rankings",
+    )
+    add(
+        job_refresh_market_flow_features,
+        seconds=max(60, Config.MARKET_FLOW_REFRESH_SECONDS),
+        name="refresh_market_flow_features",
     )
 
     return scheduler

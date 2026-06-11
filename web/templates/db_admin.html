@@ -94,6 +94,38 @@
           </span>
         </label>
       </div>
+
+      <div class="mt-5 rounded p-3" style="background:rgba(34,211,238,0.06);border:1px solid rgba(34,211,238,0.2)">
+        <h3 class="mb-2 text-xs font-bold uppercase tracking-wider" style="color:var(--cyan)">Cold Export Before Prune</h3>
+        <div class="space-y-2 text-xs">
+          <label class="block">
+            <span class="mb-1 block uppercase tracking-wider" style="color:var(--text-muted)">Table</span>
+            <select x-model="coldExport.table" class="w-full rounded px-2 py-1 mono" style="background:var(--bg-panel);border:1px solid var(--border)">
+              <option value="market_snapshots">market_snapshots</option>
+              <option value="market_flow_features">market_flow_features</option>
+              <option value="wallet_trades">wallet_trades</option>
+              <option value="wallet_market_exposures">wallet_market_exposures</option>
+              <option value="forecast_obs">forecast_obs</option>
+            </select>
+          </label>
+          <div class="grid grid-cols-2 gap-2">
+            <label class="block">
+              <span class="mb-1 block uppercase tracking-wider" style="color:var(--text-muted)">Older than days</span>
+              <input type="number" min="1" max="3650" x-model.number="coldExport.days" class="w-full rounded px-2 py-1 mono" style="background:var(--bg-panel);border:1px solid var(--border)">
+            </label>
+            <label class="block">
+              <span class="mb-1 block uppercase tracking-wider" style="color:var(--text-muted)">Limit rows</span>
+              <input type="number" min="1" x-model="coldExport.limit_rows" placeholder="none" class="w-full rounded px-2 py-1 mono" style="background:var(--bg-panel);border:1px solid var(--border)">
+            </label>
+          </div>
+          <button @click="downloadColdExport()" class="w-full rounded px-3 py-1.5 text-xs font-bold" style="background:var(--bg-panel);border:1px solid var(--cyan);color:var(--cyan)">
+            Download Gzip JSONL
+          </button>
+          <div class="text-[11px] leading-relaxed" style="color:var(--text-muted)">
+            Use this for long-window microstructure, wallet-flow, and forecast research before executing hot-DB retention.
+          </div>
+        </div>
+      </div>
     </section>
 
     <section class="card overflow-hidden">
@@ -200,6 +232,12 @@ function dbAdminPage() {
       prune_signals: false,
       batch_size: 5000,
     },
+    coldExport: {
+      table: 'market_flow_features',
+      days: 30,
+      limit_rows: '',
+      batch_size: 5000,
+    },
     init() {
       this.loadSizeReport();
       this.runPrune(true);
@@ -237,6 +275,20 @@ function dbAdminPage() {
       if (!res.ok) throw new Error(data.detail || data.error || `${res.status} ${res.statusText}`);
       return data;
     },
+    async adminBlobFetch(url) {
+      this.error = '';
+      const token = getAdminToken();
+      if (!token) {
+        promptForToken();
+        throw new Error('Admin token required.');
+      }
+      const res = await fetch(url, { headers: { 'X-Admin-Token': token } });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.detail || data.error || `${res.status} ${res.statusText}`);
+      }
+      return res;
+    },
     async loadSizeReport() {
       try {
         this.sizeReport = await this.adminFetch('/api/admin/db/size-report');
@@ -268,6 +320,34 @@ function dbAdminPage() {
       try {
         this.pruneReport = await this.adminFetch(this.pruneUrl(dryRun), { method: 'POST' });
         if (!dryRun) await this.loadSizeReport();
+      } catch (e) {
+        this.error = e.message;
+      }
+    },
+    coldExportUrl() {
+      const p = new URLSearchParams({
+        table: this.coldExport.table,
+        days: String(this.coldExport.days || 30),
+        batch_size: String(this.coldExport.batch_size || 5000),
+      });
+      if (this.coldExport.limit_rows) p.set('limit_rows', String(this.coldExport.limit_rows));
+      return `/api/admin/db/cold-export?${p.toString()}`;
+    },
+    async downloadColdExport() {
+      try {
+        const res = await this.adminBlobFetch(this.coldExportUrl());
+        const blob = await res.blob();
+        const cd = res.headers.get('content-disposition') || '';
+        const match = cd.match(/filename="([^"]+)"/);
+        const filename = match ? match[1] : `weatherquant_${this.coldExport.table}.jsonl.gz`;
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
       } catch (e) {
         this.error = e.message;
       }
