@@ -620,7 +620,11 @@ def _trade_to_db_kwargs(trade: PublicTrade, market: MarketRef) -> dict[str, Any]
         "notional_usd": trade.notional,
         "trade_ts": trade.timestamp,
         "transaction_hash": trade.transaction_hash,
-        "raw_json": json.dumps(trade.raw, default=str) if trade.raw else None,
+        "raw_json": (
+            json.dumps(trade.raw, default=str)
+            if Config.STORE_RAW_WALLET_PAYLOADS and trade.raw
+            else None
+        ),
     }
 
 

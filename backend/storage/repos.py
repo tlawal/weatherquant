@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import desc, func, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.config import Config
 from backend.storage.models import (
     ArmingState,
     AuditLog,
@@ -51,6 +52,164 @@ from backend.storage.models import (
 def _chunks(items: list[Any], size: int = 1000):
     for idx in range(0, len(items), size):
         yield items[idx:idx + size]
+
+
+def _json_loads_maybe(value: Any) -> Any:
+    if isinstance(value, (dict, list)):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return json.loads(value)
+    except Exception:
+        return None
+
+
+def _json_dumps_compact(value: Any) -> str | None:
+    if value is None:
+        return None
+    try:
+        return json.dumps(value, default=str, separators=(",", ":"))
+    except Exception:
+        return None
+
+
+def _bounded_string(value: Any, max_len: int = 256) -> str | None:
+    if value is None:
+        return None
+    s = str(value)
+    return s if len(s) <= max_len else s[: max_len - 3] + "..."
+
+
+def _compact_forecast_raw_payload(source: str | None, raw_json: Any) -> str | None:
+    """Keep only metadata needed by downstream logic unless full raw storage is enabled."""
+    if raw_json is None or Config.STORE_RAW_FORECAST_PAYLOADS:
+        return raw_json
+    payload = _json_loads_maybe(raw_json)
+    if not isinstance(payload, dict):
+        return None
+    keep_keys = (
+        "source",
+        "obs_time",
+        "peak_hour",
+        "high_f",
+        "temp_f",
+        "model_run_at",
+        "generated_at",
+        "station_id",
+        "valid_time",
+    )
+    compact = {k: payload.get(k) for k in keep_keys if payload.get(k) is not None}
+    if source:
+        compact.setdefault("source", source)
+    return _json_dumps_compact(compact) if compact else None
+
+
+_SIGNAL_REASON_KEEP_KEYS = {
+    "active_station_id",
+    "adaptive_sigma_f",
+    "ask_depth",
+    "bid_depth",
+    "bucket_live_calibration",
+    "city_state",
+    "consensus_bucket_idx",
+    "current_temp_f",
+    "daily_high_metar",
+    "ev_at_bid",
+    "ev_per_share",
+    "exec_cost",
+    "kalman_divergence_f",
+    "kalman_nowcast_active",
+    "lock_regime",
+    "market_sanity",
+    "market_snapshot_at",
+    "market_snapshot_id",
+    "metar_condition",
+    "microstructure_shadow",
+    "model_prob_raw",
+    "model_snapshot_id",
+    "mu_forecast",
+    "mu_multi_model",
+    "observation_minutes",
+    "observed_bucket_idx",
+    "observed_bucket_upper_f",
+    "posterior_kelly",
+    "prob_hotter_bucket",
+    "prob_new_high",
+    "prob_new_high_raw",
+    "projected_high",
+    "projected_high_for_blend",
+    "raw_high",
+    "regime_label",
+    "regime_score",
+    "resolution_high",
+    "resolution_high_f",
+    "resolution_mismatch",
+    "sigma_raw",
+    "source_quality",
+    "source_quality_gates",
+    "spread",
+    "station_mae_f",
+    "threshold_calibration",
+    "time_to_settlement_h",
+}
+
+
+def _shrink_reason_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        out = {}
+        for k, v in value.items():
+            if isinstance(v, str):
+                out[k] = _bounded_string(v, 192)
+            elif isinstance(v, (int, float, bool)) or v is None:
+                out[k] = v
+            elif isinstance(v, list):
+                out[k] = [_shrink_reason_value(x) for x in v[:12]]
+            elif isinstance(v, dict):
+                out[k] = _shrink_reason_value(v)
+        return out
+    if isinstance(value, list):
+        return [_shrink_reason_value(v) for v in value[:12]]
+    if isinstance(value, str):
+        return _bounded_string(value, 192)
+    return value
+
+
+def compact_signal_reason_json(reason: Any) -> str | None:
+    if reason is None:
+        return None
+    if Config.STORE_FULL_SIGNAL_REASON_JSON:
+        raw = _json_dumps_compact(reason)
+    else:
+        payload = _json_loads_maybe(reason)
+        if not isinstance(payload, dict):
+            return None
+        compact = {
+            key: _shrink_reason_value(payload[key])
+            for key in _SIGNAL_REASON_KEEP_KEYS
+            if key in payload and payload[key] is not None
+        }
+        raw = _json_dumps_compact(compact)
+    if raw is None:
+        return None
+    max_bytes = max(512, int(Config.SIGNAL_REASON_MAX_JSON_BYTES or 6000))
+    if len(raw.encode("utf-8")) <= max_bytes:
+        return raw
+    payload = _json_loads_maybe(raw)
+    if isinstance(payload, dict):
+        for key in ("microstructure_shadow", "source_quality", "source_quality_gates", "threshold_calibration"):
+            payload.pop(key, None)
+        raw = _json_dumps_compact(payload)
+    return raw if raw and len(raw.encode("utf-8")) <= max_bytes else raw[:max_bytes]
+
+
+def compact_gate_failures_json(gate_failures: Any) -> str | None:
+    payload = _json_loads_maybe(gate_failures)
+    if payload is None:
+        payload = gate_failures
+    if isinstance(payload, list):
+        payload = [_bounded_string(item, 160) for item in payload[:20]]
+    return _json_dumps_compact(payload)
 
 
 # ─── Cities ───────────────────────────────────────────────────────────────────
@@ -655,6 +814,9 @@ async def get_metar_obs_for_city_since(
 # ─── Forecasts ────────────────────────────────────────────────────────────────
 
 async def insert_forecast_obs(session: AsyncSession, **kwargs) -> ForecastObs:
+    kwargs["raw_json"] = _compact_forecast_raw_payload(kwargs.get("source"), kwargs.get("raw_json"))
+    if not Config.STORE_RAW_FORECAST_PAYLOADS and kwargs.get("parse_error") is not None:
+        kwargs["parse_error"] = _bounded_string(kwargs.get("parse_error"), 256)
     obs = ForecastObs(**kwargs)
     session.add(obs)
     await session.commit()
@@ -1497,6 +1659,8 @@ async def upsert_market_context_snapshot(
 # ─── Signals ──────────────────────────────────────────────────────────────────
 
 async def insert_signal(session: AsyncSession, commit: bool = True, **kwargs) -> Signal:
+    kwargs["reason_json"] = compact_signal_reason_json(kwargs.get("reason_json"))
+    kwargs["gate_failures_json"] = compact_gate_failures_json(kwargs.get("gate_failures_json"))
     sig = Signal(**kwargs)
     session.add(sig)
     if commit:

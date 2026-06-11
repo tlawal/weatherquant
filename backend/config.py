@@ -40,9 +40,9 @@ class Config:
         "DATABASE_URL",
         "sqlite+aiosqlite:////tmp/weatherquant.db",
     )
-    POSTGRES_POOL_SIZE: int = _int("POSTGRES_POOL_SIZE", 6)
-    POSTGRES_MAX_OVERFLOW: int = _int("POSTGRES_MAX_OVERFLOW", 4)
-    POSTGRES_POOL_TIMEOUT_SECONDS: int = _int("POSTGRES_POOL_TIMEOUT_SECONDS", 10)
+    POSTGRES_POOL_SIZE: int = _int("POSTGRES_POOL_SIZE", 10)
+    POSTGRES_MAX_OVERFLOW: int = _int("POSTGRES_MAX_OVERFLOW", 5)
+    POSTGRES_POOL_TIMEOUT_SECONDS: int = _int("POSTGRES_POOL_TIMEOUT_SECONDS", 20)
     POSTGRES_POOL_RECYCLE_SECONDS: int = _int("POSTGRES_POOL_RECYCLE_SECONDS", 900)
 
     # ── Service mode ─────────────────────────────────────────────────────────
@@ -83,6 +83,10 @@ class Config:
     LIVE_CALIBRATION_REFRESH_SECONDS: int = _int("LIVE_CALIBRATION_REFRESH_SECONDS", 21600)
     LIVE_CALIBRATION_DAYS_BACK: int = _int("LIVE_CALIBRATION_DAYS_BACK", 90)
     RESIDUAL_ML_SHADOW_TRAIN_SECONDS: int = _int("RESIDUAL_ML_SHADOW_TRAIN_SECONDS", 86400)
+    STORE_RAW_FORECAST_PAYLOADS: bool = _bool("STORE_RAW_FORECAST_PAYLOADS", default=False)
+    STORE_RAW_WALLET_PAYLOADS: bool = _bool("STORE_RAW_WALLET_PAYLOADS", default=False)
+    STORE_FULL_SIGNAL_REASON_JSON: bool = _bool("STORE_FULL_SIGNAL_REASON_JSON", default=False)
+    SIGNAL_REASON_MAX_JSON_BYTES: int = _int("SIGNAL_REASON_MAX_JSON_BYTES", 6000)
 
     # ── Exit Engine ──────────────────────────────────────────────────────────
     QUICK_FLIP_TARGET: float = _float("QUICK_FLIP_TARGET", 0.08)
