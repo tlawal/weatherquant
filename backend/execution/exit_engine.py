@@ -605,6 +605,17 @@ def _is_likely_expiry_winner(signal: BucketSignal, bid: float, obs_high: float |
     return False
 
 
+def _is_event_expiry_window(event_date: str | None, now_local: datetime) -> bool:
+    """True only during the local close window for the event's own date."""
+    if not event_date:
+        return False
+    return (
+        str(event_date)[:10] == now_local.strftime("%Y-%m-%d")
+        and now_local.hour == 19
+        and now_local.minute >= 30
+    )
+
+
 def _loss_exit_blocked_by_positive_ev(pos, signal: BucketSignal, price: float) -> bool:
     """Guard against non-emergency loss exits while the held bucket is still +EV."""
     return (
@@ -676,10 +687,26 @@ async def _run_exit_cascade_for_position(
     if pos.avg_cost <= 0:
         return None
         
+    event_date = (
+        getattr(signal, "date_et", None)
+        or (signal.reason or {}).get("date_et")
+    )
     async with get_session() as sess:
         city = await get_city_by_slug(sess, signal.city_slug)
         if not city:
             return None
+        if not event_date:
+            try:
+                from backend.storage.models import Event
+                event_date = (await sess.execute(
+                    select(Event.date_et).where(Event.id == signal.event_id)
+                )).scalar_one_or_none()
+            except Exception:
+                log.debug(
+                    "exit_engine: event-date lookup failed for event_id=%s",
+                    signal.event_id,
+                    exc_info=True,
+                )
             
     now_local = city_local_now(city)
     
@@ -1032,7 +1059,7 @@ async def _run_exit_cascade_for_position(
     # Hold likely winners to redeem. Only risk-exit ambiguous/losing buckets,
     # and never use the old 10c dump unless explicitly configured below the
     # risk-exit cap.
-    if now_local.hour == 19 and now_local.minute >= 30:
+    if _is_event_expiry_window(event_date, now_local):
         likely_winner = _is_likely_expiry_winner(signal, bid, obs_high)
         if likely_winner:
             if bid >= Config.EXPIRY_PASSIVE_SELL_MIN_BID:
@@ -1275,6 +1302,10 @@ async def run_exit_engine(signals: list | None = None) -> None:
 
                 try:
                     from backend.notifications.telegram import notify_exit_triggered
+                    market_url = (
+                        getattr(signal, "market_url", None)
+                        or (signal.reason or {}).get("market_url")
+                    )
                     await notify_exit_triggered(
                         city_slug=signal.city_slug,
                         level=cascade["level"],
@@ -1282,6 +1313,7 @@ async def run_exit_engine(signals: list | None = None) -> None:
                         price=sell_price,
                         shares=exit_qty,
                         details=cascade.get("diagnostics"),
+                        market_url=market_url,
                     )
                 except Exception:
                     log.debug("Telegram exit notification failed (non-critical)", exc_info=True)
@@ -1302,6 +1334,10 @@ async def run_exit_engine(signals: list | None = None) -> None:
                     await sess.commit()
                 try:
                     from backend.notifications.telegram import notify_exit_failed
+                    market_url = (
+                        getattr(signal, "market_url", None)
+                        or (signal.reason or {}).get("market_url")
+                    )
                     await notify_exit_failed(
                         city_slug=signal.city_slug,
                         level=cascade["level"],
@@ -1310,6 +1346,7 @@ async def run_exit_engine(signals: list | None = None) -> None:
                         shares=exit_qty,
                         error=err,
                         details=cascade.get("diagnostics"),
+                        market_url=market_url,
                     )
                 except Exception:
                     log.debug("Telegram exit-failed notification failed (non-critical)", exc_info=True)

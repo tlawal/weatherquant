@@ -953,10 +953,32 @@ def test_notify_trade_filled_returns_send_result(monkeypatch):
         shares=5,
         price=0.25,
         edge=0.1,
+        market_url="https://polymarket.com/event/atlanta-2026-06-12",
     ))
 
     assert ok is True
     assert calls and "atlanta" in calls[0][0]
+    assert "https://polymarket.com/event/atlanta-2026-06-12" in calls[0][0]
+
+
+def test_notify_exit_triggered_includes_market_url(monkeypatch):
+    calls = []
+
+    async def fake_send_telegram(message, parse_mode="HTML"):
+        calls.append((message, parse_mode))
+        return True
+
+    monkeypatch.setattr(telegram_mod, "send_telegram", fake_send_telegram)
+    _run(telegram_mod.notify_exit_triggered(
+        city_slug="atlanta",
+        level="EXPIRY",
+        reason="market_close_risk_exit",
+        price=0.30,
+        shares=9,
+        market_url="https://polymarket.com/event/atlanta-2026-06-12",
+    ))
+
+    assert calls and "https://polymarket.com/event/atlanta-2026-06-12" in calls[0][0]
 
 
 def test_redemptions_can_include_api_position_without_admin_sync(tmp_path, monkeypatch):

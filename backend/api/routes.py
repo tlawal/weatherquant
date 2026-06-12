@@ -2770,6 +2770,60 @@ async def admin_db_cold_export(
     )
 
 
+@router.get("/api/admin/backtest/flow-validation")
+async def admin_flow_validation_backtest(
+    days_back: int = 14,
+    window_minutes: int = 15,
+    horizon_minutes: int = 15,
+    min_samples: int = 100,
+    max_rows: int = 5000,
+    large_move_threshold: float = 0.01,
+    actor: str = Depends(require_admin),
+):
+    """Validate shadow wallet/CLOB flow features before any execution promotion."""
+    from backend.backtesting.flow_validation import (
+        FlowValidationParams,
+        evaluate_market_flow_features,
+    )
+
+    params = FlowValidationParams(
+        days_back=days_back,
+        window_minutes=window_minutes,
+        horizon_minutes=horizon_minutes,
+        min_samples=min_samples,
+        max_rows=max_rows,
+        large_move_threshold=large_move_threshold,
+    )
+    async with get_session() as sess:
+        report = await evaluate_market_flow_features(sess, params)
+    report["actor"] = actor
+    return report
+
+
+@router.get("/api/admin/backtest/exit-calibration")
+async def admin_exit_calibration_backtest(
+    days_back: int = 90,
+    min_samples: int = 8,
+    include_excluded: bool = False,
+    actor: str = Depends(require_admin),
+):
+    """Calibrate exit policy from closed trades and realized foregone PnL."""
+    from backend.backtesting.exit_calibration import (
+        ExitCalibrationParams,
+        evaluate_exit_policy_calibration,
+    )
+
+    params = ExitCalibrationParams(
+        days_back=days_back,
+        min_samples=min_samples,
+        include_excluded=include_excluded,
+    )
+    async with get_session() as sess:
+        report = await evaluate_exit_policy_calibration(sess, params)
+    report["actor"] = actor
+    return report
+
+
 # ─── Live Orderbook ──────────────────────────────────────────────────────────
 
 @router.get("/api/orderbook/{city_slug}/{bucket_idx}")
@@ -2903,6 +2957,11 @@ class PositionExitOrderRequest(BaseModel):
     limit_price: Optional[float] = None
 
 
+def _polymarket_event_url(event) -> str | None:
+    slug = getattr(event, "gamma_slug", None)
+    return f"https://polymarket.com/event/{slug}" if slug else None
+
+
 async def _notify_late_manual_fill_if_synced(
     *,
     sync_res: dict,
@@ -2912,6 +2971,7 @@ async def _notify_late_manual_fill_if_synced(
     bucket_label: str,
     side: str,
     edge: float,
+    market_url: str | None = None,
 ) -> bool:
     """Finalize and alert a manual market fill discovered by position sync.
 
@@ -2971,6 +3031,7 @@ async def _notify_late_manual_fill_if_synced(
             shares=fill_qty,
             price=fill_price,
             edge=edge,
+            market_url=market_url,
         )
         if ok:
             log.info(
@@ -2991,6 +3052,7 @@ async def _retry_late_manual_fill_alert(
     bucket_label: str,
     side: str,
     edge: float,
+    market_url: str | None = None,
     attempts: int = 3,
     initial_delay_s: float = 2.0,
     interval_s: float = 4.0,
@@ -3008,6 +3070,7 @@ async def _retry_late_manual_fill_alert(
             bucket_label=bucket_label,
             side=side,
             edge=edge,
+            market_url=market_url,
         )
         if sent:
             return
@@ -3050,6 +3113,11 @@ async def _bucket_signal_from_state(sess, *, city, event, bucket, city_slug: str
             "market_snapshot_at",
             mkt_snap.fetched_at.isoformat() if mkt_snap.fetched_at else None,
         )
+    market_url = _polymarket_event_url(event)
+    signal_reason.setdefault("date_et", event.date_et)
+    signal_reason.setdefault("gamma_slug", event.gamma_slug)
+    if market_url:
+        signal_reason.setdefault("market_url", market_url)
 
     model_prob = sig_row.model_prob if sig_row else 0.5
     mkt_prob = (
@@ -3087,6 +3155,8 @@ async def _bucket_signal_from_state(sess, *, city, event, bucket, city_slug: str
         reason=signal_reason,
         gate_failures=gate_failures,
         actionable=True,
+        date_et=event.date_et,
+        market_url=market_url,
         regime_score=signal_reason.get("regime_score"),
         regime_label=signal_reason.get("regime_label"),
     )
@@ -3302,6 +3372,11 @@ async def manual_trade(
     bucket_idx = bucket.bucket_idx if bucket.bucket_idx is not None else body.bucket_idx
 
     yes_bid_val = mkt_snap.yes_bid if mkt_snap else None
+    market_url = _polymarket_event_url(event)
+    signal_reason.setdefault("date_et", event.date_et)
+    signal_reason.setdefault("gamma_slug", event.gamma_slug)
+    if market_url:
+        signal_reason.setdefault("market_url", market_url)
     signal = BucketSignal(
         city_slug=body.city_slug,
         city_display=city.display_name,
@@ -3328,6 +3403,8 @@ async def manual_trade(
         reason=signal_reason,
         gate_failures=gate_failures,
         actionable=True,  # manual override
+        date_et=event.date_et,
+        market_url=market_url,
     )
 
     # For manual trades, bypass the edge gate but keep all safety gates
@@ -3371,6 +3448,7 @@ async def manual_trade(
                     bucket_label=bucket.label or signal.label,
                     side=clob_side,
                     edge=signal.true_edge,
+                    market_url=signal.market_url,
                 )
                 result["late_fill_alert_sent"] = sent
                 if not sent:
@@ -3381,6 +3459,7 @@ async def manual_trade(
                         bucket_label=bucket.label or signal.label,
                         side=clob_side,
                         edge=signal.true_edge,
+                        market_url=signal.market_url,
                     ))
         except Exception:
             log.debug("manual_trade: post-trade position sync failed", exc_info=True)

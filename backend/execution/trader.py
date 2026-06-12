@@ -862,6 +862,10 @@ async def execute_signal(
                 shares=fill_result["qty"],
                 price=fill_result["price"],
                 edge=signal.true_edge,
+                market_url=(
+                    getattr(signal, "market_url", None)
+                    or (signal.reason or {}).get("market_url")
+                ),
             )
         except Exception:
             log.debug("Telegram notification failed (non-critical)", exc_info=True)

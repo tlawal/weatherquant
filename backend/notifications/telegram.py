@@ -7,6 +7,7 @@ and never propagated to callers.
 from __future__ import annotations
 
 import logging
+from html import escape
 
 import aiohttp
 
@@ -67,15 +68,18 @@ async def notify_trade_filled(
     shares: float,
     price: float,
     edge: float,
+    market_url: str | None = None,
 ) -> bool:
     """Notification for a successful fill."""
     try:
         arrow = "\u2b06" if side.upper() == "BUY" else "\u2b07"
+        market_line = f"\nMarket: {escape(market_url)}" if market_url else ""
         text = (
             f"{arrow} <b>Fill</b> | {city_slug}\n"
             f"Bucket: {bucket_label}\n"
             f"Side: <b>{side.upper()}</b>  Shares: {shares:.2f}\n"
             f"Price: {price:.4f}  Edge: {edge:+.2%}"
+            f"{market_line}"
         )
         ok = await send_telegram(text)
         if not ok:
@@ -93,10 +97,12 @@ async def notify_exit_triggered(
     price: float,
     shares: float,
     details: dict | None = None,
+    market_url: str | None = None,
 ) -> None:
     """Notification for exit engine actions."""
     try:
         detail_lines = ""
+        market_url = market_url or ((details or {}).get("market_url") if details else None)
         if details:
             entry_ev = details.get("entry_ev_at_bid")
             current_ev = details.get("current_ev_at_bid")
@@ -136,6 +142,8 @@ async def notify_exit_triggered(
                     f"{price_adjustment.get('reference_price', '—')} → "
                     f"{price_adjustment.get('order_price', '—')}"
                 )
+        if market_url:
+            detail_lines += f"\nMarket: {escape(market_url)}"
         text = (
             f"\u26a0\ufe0f <b>Exit</b> | {city_slug}\n"
             f"Level: {level}  Reason: {reason}\n"
@@ -155,10 +163,12 @@ async def notify_exit_failed(
     shares: float,
     error: str,
     details: dict | None = None,
+    market_url: str | None = None,
 ) -> None:
     """Notification when an exit order fails to execute."""
     try:
         detail_lines = ""
+        market_url = market_url or ((details or {}).get("market_url") if details else None)
         price_adjustment = (details or {}).get("price_adjustment") if details else None
         if price_adjustment:
             detail_lines = (
@@ -166,6 +176,8 @@ async def notify_exit_failed(
                 f"{price_adjustment.get('reference_price', '—')} → "
                 f"{price_adjustment.get('order_price', '—')}"
             )
+        if market_url:
+            detail_lines += f"\nMarket: {escape(market_url)}"
         text = (
             f"\U0001f6a8 <b>Exit FAILED</b> | {city_slug}\n"
             f"Level: {level}  Reason: {reason}\n"

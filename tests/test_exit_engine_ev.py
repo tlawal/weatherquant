@@ -119,9 +119,11 @@ def _make_signal(
     spread: float = 0.02,
     model_prob: float = 0.40,
     bucket_idx: int = 3,
+    label: str = "75-78°F",
     high_f: float = 78.0,
     low_f: float = 75.0,
     city_state: str = "early",
+    date_et: str | None = "2026-05-13",
 ) -> BucketSignal:
     """Synthetic BucketSignal with sane defaults for cascade tests."""
     return BucketSignal(
@@ -131,7 +133,7 @@ def _make_signal(
         event_id=1,
         bucket_id=bucket_id,
         bucket_idx=bucket_idx,
-        label="75-78°F",
+        label=label,
         low_f=low_f,
         high_f=high_f,
         model_prob=model_prob,
@@ -149,6 +151,8 @@ def _make_signal(
         yes_bid_depth=yes_bid_depth,
         reason={"current_temp_f": 70.0, "raw_high": None},
         city_state=city_state,
+        date_et=date_et,
+        market_url="https://polymarket.com/event/highest-temperature-in-atlanta-on-may-13-2026",
     )
 
 
@@ -509,6 +513,31 @@ def test_expiry_ambiguous_risk_exit_uses_small_discount(stub_db, monkeypatch):
     assert result["level"] == "EXPIRY"
     assert result["reason"] == "market_close_risk_exit"
     assert result["price"] == pytest.approx(0.48)
+
+
+def test_future_date_position_not_expiry_risk_exited_prior_evening(stub_db, monkeypatch):
+    """A tomorrow market must not be treated as near-close today."""
+    now = datetime(2026, 6, 11, 19, 39, tzinfo=ZoneInfo("America/New_York"))
+    monkeypatch.setattr("backend.execution.exit_engine.city_local_now", lambda city: now)
+    pos = _make_position(avg_cost=0.40, net_qty=9.0, age_seconds=9900, entry_type="MANUAL")
+    signal = _make_signal(
+        low_f=92.0,
+        high_f=93.0,
+        label="92-93°F",
+        yes_bid=0.30,
+        spread=0.02,
+        model_prob=0.30,
+        ev_at_bid=0.0,
+        date_et="2026-06-12",
+    )
+    signal.reason = {
+        **signal.reason,
+        "date_et": "2026-06-12",
+        "raw_high": 89.0,
+    }
+
+    result = _run(ee._run_exit_cascade_for_position(pos, signal, None, None))
+    assert result is None
 
 
 def test_expiry_loss_exit_blocked_when_bucket_still_positive_ev(stub_db, monkeypatch):

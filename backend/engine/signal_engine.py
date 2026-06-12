@@ -196,6 +196,8 @@ class BucketSignal:
     resolution_mismatch: Optional[float] = None
     observed_bucket_idx: Optional[int] = None
     observed_bucket_upper_f: Optional[float] = None
+    date_et: Optional[str] = None
+    market_url: Optional[str] = None
     # Phase C3 — regime telemetry (attached per-city; same value for every
     # bucket in the city). None = regime detector did not run this cycle.
     regime_score: Optional[float] = None
@@ -352,6 +354,10 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
         if event.status not in ("ok",):
             return []
 
+        market_url = (
+            f"https://polymarket.com/event/{event.gamma_slug}"
+            if event.gamma_slug else None
+        )
         active_station_id, active_station_source = resolve_active_station(city, event)
 
         buckets = await get_buckets_for_event(sess, event.id)
@@ -969,6 +975,8 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
                     observed_bucket_upper_f=model.observed_bucket_upper_f,
                     regime_score=(_regime.score if _regime else None),
                     regime_label=(_regime.label.value if _regime else None),
+                    date_et=today_et,
+                    market_url=market_url,
                 )
                 signals.append(sig)
                 continue
@@ -1074,6 +1082,9 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
                 **model.inputs,
                 "bucket_idx": i,
                 "label": bucket.label,
+                "date_et": today_et,
+                "gamma_slug": event.gamma_slug,
+                "market_url": market_url,
                 "model_prob_raw": float(round(model_prob, 4)),
                 "model_prob_threshold_calibrated": float(round(model_prob_threshold_calibrated, 4)),
                 "bucket_live_calibration": bucket_live_calibration,
@@ -1192,6 +1203,8 @@ async def _compute_city_signals(city: City, today_et: str) -> list[BucketSignal]
                 resolution_mismatch=resolution_mismatch,
                 observed_bucket_idx=model.observed_bucket_idx,
                 observed_bucket_upper_f=model.observed_bucket_upper_f,
+                date_et=today_et,
+                market_url=market_url,
                 regime_score=(_regime.score if _regime else None),
                 regime_label=(_regime.label.value if _regime else None),
             )
